@@ -4,7 +4,7 @@
 ## Compiling
 Install dependencies:
 
-`sudo apt-get install cmake libaio-dev libtbb-dev`
+`sudo apt-get install cmake libaio-dev libtbb-dev libbz2-dev liblz4-dev libsnappy-dev zlib1g-dev libwiredtiger-dev`
 
 `mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo .. && make -j`
 
