@@ -250,7 +250,7 @@ BufferFrame& BufferManager::resolveSwip(Guard& swip_guard, Swip<BufferFrame>& sw
       readPageSync(pid, bf.page);
       COUNTERS_BLOCK()
       {
-        // WorkerCounters::myCounters().dt_misses_counter[bf.page.dt_id]++;
+         WorkerCounters::myCounters().dt_misses_counter[bf.page.dt_id]++;
          if (FLAGS_trace_dt_id >= 0 && bf.page.dt_id == FLAGS_trace_dt_id &&
              utils::RandomGenerator::getRand<u64>(0, FLAGS_trace_trigger_probability) == 0) {
             utils::printBackTrace();
@@ -355,7 +355,7 @@ BufferFrame& BufferManager::resolveSwip(Guard& swip_guard, Swip<BufferFrame>& sw
 // -------------------------------------------------------------------------------------
 void BufferManager::readPageSync(u64 pid, u8* destination)
 {
-   assert(u64(destination) % 512 == 0);
+   assert(u64(destination) % 4096 == 0);
    s64 bytes_left = PAGE_SIZE;
    do {
       const int bytes_read = pread(ssd_fd, destination, bytes_left, pid * PAGE_SIZE + (PAGE_SIZE - bytes_left));
@@ -363,7 +363,10 @@ void BufferManager::readPageSync(u64 pid, u8* destination)
       bytes_left -= bytes_read;
    } while (bytes_left > 0);
    // -------------------------------------------------------------------------------------
-   COUNTERS_BLOCK() { WorkerCounters::myCounters().read_operations_counter++; }
+   COUNTERS_BLOCK() { 
+      WorkerCounters::myCounters().read_operations_counter++; 
+      WorkerCounters::myCounters().io_reads++;
+   }
 }
 // -------------------------------------------------------------------------------------
 void BufferManager::fDataSync()

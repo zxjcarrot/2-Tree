@@ -34,6 +34,7 @@ struct WorkerCounters {
    atomic<u64> xmerge_partial_counter[max_dt_id] = {0};
    atomic<u64> xmerge_full_counter[max_dt_id] = {0};
    // -------------------------------------------------------------------------------------
+   atomic<u64> io_reads = 0;
    atomic<u64> dt_misses_counter[max_dt_id] = {0};
    atomic<u64> dt_restarts_update_same_size[max_dt_id] = {0};   // without structural change
    atomic<u64> dt_restarts_structural_change[max_dt_id] = {0};  // includes insert, remove, update with different size

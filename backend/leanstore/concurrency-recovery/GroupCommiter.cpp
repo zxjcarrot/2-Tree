@@ -18,7 +18,7 @@ namespace leanstore
 namespace cr
 {
 // -------------------------------------------------------------------------------------
-struct alignas(512) SSDMeta {
+struct alignas(4096) SSDMeta {
    u64 last_written_chunk;
 };
 // -------------------------------------------------------------------------------------
@@ -161,7 +161,7 @@ void CRManager::groupCommiter()
       // -------------------------------------------------------------------------------------
       // Flush
       if (chunk.total_size > sizeof(WALChunk)) {
-         ensure(ssd_offset % 512 == 0);
+         ensure(ssd_offset % 4096 == 0);
          ssd_offset -= sizeof(WALChunk);
          if (!FLAGS_wal_io_hack) {
             add_pwrite(reinterpret_cast<u8*>(&chunk), sizeof(WALChunk), ssd_offset);

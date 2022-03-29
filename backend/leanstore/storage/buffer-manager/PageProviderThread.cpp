@@ -394,6 +394,7 @@ void BufferManager::pageProviderThread(u64 p_begin, u64 p_end)  // [p_begin, p_e
       COUNTERS_BLOCK() { PPCounters::myCounters().pp_thread_rounds++; }
    }
    bg_threads_counter--;
+   std::cout << "Page provider thread exited " << bg_threads_counter << std::endl;
    //   delete cr::Worker::tls_ptr;
 }
 // -------------------------------------------------------------------------------------

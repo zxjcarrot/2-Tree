@@ -58,7 +58,7 @@ LeanStore::LeanStore()
    posix_check(ssd_fd > -1);
    if (FLAGS_falloc > 0) {
       const u64 gib_size = 1024ull * 1024ull * 1024ull;
-      auto dummy_data = (u8*)aligned_alloc(512, gib_size);
+      auto dummy_data = (u8*)aligned_alloc(4096, gib_size);
       for (u64 i = 0; i < FLAGS_falloc; i++) {
          const int ret = pwrite(ssd_fd, dummy_data, gib_size, gib_size * i);
          posix_check(ret == gib_size);

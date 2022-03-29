@@ -42,7 +42,7 @@ struct BufferFrame {
       // -------------------------------------------------------------------------------------
       u64 debug;
    };
-   struct alignas(512) Page {
+   struct alignas(4096) Page {
       u64 GSN = 0;
       DTID dt_id = 9999;                                                                // INIT: datastructure id
       u64 magic_debugging_number;                                                       // ATTENTION
@@ -84,7 +84,7 @@ static constexpr u64 EFFECTIVE_PAGE_SIZE = sizeof(BufferFrame::Page::dt);
 // -------------------------------------------------------------------------------------
 static_assert(sizeof(BufferFrame::Page) == PAGE_SIZE, "");
 // -------------------------------------------------------------------------------------
-static_assert((sizeof(BufferFrame) - sizeof(BufferFrame::Page)) == 512, "");
+static_assert((sizeof(BufferFrame) - sizeof(BufferFrame::Page)) == 4096, "");
 // -------------------------------------------------------------------------------------
 }  // namespace storage
 }  // namespace leanstore

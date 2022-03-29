@@ -321,7 +321,7 @@ outofmemory : {
    const u64 lower_bound = slot.offset;
    const u64 lower_bound_aligned = utils::downAlign(lower_bound);
    const u64 read_size_aligned = utils::upAlign(slot.length + lower_bound - lower_bound_aligned);
-   auto log_chunk = static_cast<u8*>(std::aligned_alloc(512, read_size_aligned));
+   auto log_chunk = static_cast<u8*>(std::aligned_alloc(4096, read_size_aligned));
    const u64 ret = pread(ssd_fd, log_chunk, read_size_aligned, lower_bound_aligned);
    posix_check(ret >= read_size_aligned);
    WorkerCounters::myCounters().wal_read_bytes += read_size_aligned;

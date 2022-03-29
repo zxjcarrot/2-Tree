@@ -28,7 +28,7 @@ static_assert(sizeof(WTTS) == sizeof(u64), "");
 static_assert(sizeof(WLSN) == sizeof(u64), "");
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
-struct alignas(512) WALChunk {
+struct alignas(4096) WALChunk {
    static constexpr u16 STATIC_MAX_WORKERS = 256;
    struct Slot {
       u64 offset;
@@ -106,7 +106,7 @@ struct Worker {
    // -------------------------------------------------------------------------------------
    // -------------------------------------------------------------------------------------
    atomic<u64> wal_ww_cursor = 0;                // GCT->W
-   alignas(512) u8 wal_buffer[WORKER_WAL_SIZE];  // W->GCT
+   alignas(4096) u8 wal_buffer[WORKER_WAL_SIZE];  // W->GCT
    LID wal_lsn_counter = 0;
    LID clock_gsn;
    // -------------------------------------------------------------------------------------

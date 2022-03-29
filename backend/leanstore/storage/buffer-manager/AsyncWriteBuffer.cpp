@@ -42,7 +42,7 @@ bool AsyncWriteBuffer::full()
 void AsyncWriteBuffer::add(BufferFrame& bf, PID pid)
 {
    assert(!full());
-   assert(u64(&bf.page) % 512 == 0);
+   assert(u64(&bf.page) % 4096 == 0);
    assert(pending_requests <= batch_max_size);
    // -------------------------------------------------------------------------------------
    auto slot = pending_requests++;
@@ -70,6 +70,10 @@ u64 AsyncWriteBuffer::pollEventsSync()
 {
    if (pending_requests > 0) {
       const int done_requests = io_getevents(aio_context, pending_requests, pending_requests, events.get(), NULL);
+      if (done_requests < 0) {
+         perror(strerror(errno));
+         exit(1);
+      }
       if (u32(done_requests) != pending_requests) {
          cerr << done_requests << endl;
          raise(SIGTRAP);

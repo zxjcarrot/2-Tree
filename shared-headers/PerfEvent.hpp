@@ -84,22 +84,22 @@ struct PerfEvent {
   }
   PerfEvent(bool inherit = true) : inherit(inherit), printHeader(true)
   {
-    registerCounter("cycle", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
-    registerCounter("cycle-kernel", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, 1);
-    registerCounter("instr", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
-    registerCounter("L1-miss", PERF_TYPE_HW_CACHE,
-                    PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) | (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
-    if (isIntel())
-      registerCounter("LLC-miss", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
-    registerCounter("br-miss", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
-    registerCounter("task", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK);
+    // registerCounter("cycle", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
+    // registerCounter("cycle-kernel", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, 1);
+    // registerCounter("instr", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+    // registerCounter("L1-miss", PERF_TYPE_HW_CACHE,
+    //                 PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) | (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+    // if (isIntel())
+    //   registerCounter("LLC-miss", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
+    // registerCounter("br-miss", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
+    // registerCounter("task", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK);
     // additional counters can be found in linux/perf_event.h
 
     for (unsigned i = 0; i < events.size(); i++) {
       auto& event = events[i];
       event.fd = syscall(__NR_perf_event_open, &event.pe, 0, -1, -1, 0);
       if (event.fd < 0) {
-        std::cerr << "Error opening counter " << names[i] << std::endl;
+        std::cerr << "Error opening counter " << names[i] << " " <<  std::strerror(errno) <<std::endl;
         events.resize(0);
         names.resize(0);
         return;
