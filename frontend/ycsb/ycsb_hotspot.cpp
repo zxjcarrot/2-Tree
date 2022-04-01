@@ -21,13 +21,13 @@ DEFINE_uint32(ycsb_warmup_rounds, 0, "");
 DEFINE_uint32(ycsb_tx_rounds, 1, "");
 DEFINE_uint32(ycsb_tx_count, 0, "default = tuples");
 DEFINE_bool(verify, false, "");
-DEFINE_bool(cached_btree, false, "");
+DEFINE_uint32(cached_btree, 0, "");
 DEFINE_double(cached_btree_ram_ratio, 0.0, "");
 DEFINE_bool(cache_lazy_migration, false, "");
 DEFINE_bool(ycsb_scan, false, "");
 DEFINE_bool(ycsb_tx, true, "");
 DEFINE_bool(ycsb_count_unique_lookup_keys, true, "");
-DEFINE_double(ycsb_leaf_stride_ratio, 0.01, "");
+DEFINE_double(ycsb_keyspace_access_ratio, 0.01, "");
 // -------------------------------------------------------------------------------------
 using namespace leanstore;
 // -------------------------------------------------------------------------------------
@@ -89,10 +89,14 @@ int main(int argc, char** argv)
    } else {
       btree_ptr = &db.registerBTreeLL("ycsb");
    }
-   if (FLAGS_cached_btree) {
+   if (FLAGS_cached_btree == 0) {
+      adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id));
+   } else if (FLAGS_cached_btree == 1) {
       adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_cached_btree == 2) {
+      adapter.reset(new BTreeCachedNoninlineVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
    } else {
-      adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr));
+      assert(false);
    }
    
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
@@ -156,12 +160,14 @@ int main(int argc, char** argv)
    auto minimal_num_pages = FLAGS_ycsb_tuple_count / (sizeof(YCSBPayload) + sizeof(YCSBKey));
    auto fill_factor = minimal_num_pages / (db.getBufferManager().consumedPages() + 0.0);
    auto entries_per_leaf = fill_factor * optimal_entries_per_leaf;
-   auto stride = std::max((int)(entries_per_leaf * FLAGS_ycsb_leaf_stride_ratio), 1);
-   vector<YCSBKey> query_keys;
-   for (YCSBKey i = 0; i < FLAGS_ycsb_tuple_count; i += stride) {
-      query_keys.push_back(i);
+   auto stride = std::max((int)(entries_per_leaf * FLAGS_ycsb_keyspace_access_ratio), 1);
+   auto num_keys_to_access = std::max(1, (int)(FLAGS_ycsb_tuple_count * FLAGS_ycsb_keyspace_access_ratio));
+   vector<YCSBKey> all_query_keys;
+   for (YCSBKey i = 0; i < FLAGS_ycsb_tuple_count; i += 1) {
+      all_query_keys.push_back(i);
    }
-   std::random_shuffle(query_keys.begin(), query_keys.end());
+   std::random_shuffle(all_query_keys.begin(), all_query_keys.end());
+   vector<YCSBKey> query_keys(all_query_keys.begin(), all_query_keys.begin() + num_keys_to_access);
    // -------------------------------------------------------------------------------------
    auto zipf_random = std::make_unique<utils::ScrambledZipfGenerator>(0, ycsb_tuple_count, FLAGS_zipf_factor);
    cout << setprecision(4);
@@ -210,8 +216,7 @@ int main(int argc, char** argv)
       cout << "Total commit: " << calculateMTPS(begin, end, txs.load()) << " M tps" << endl;
       cout << "entries_per_leaf: " << entries_per_leaf << std::endl;
       cout << "query_keys size " << query_keys.size() << std::endl;
-      cout << "stride: " << stride << std::endl;
-      cout << "stride_ratio: " << FLAGS_ycsb_leaf_stride_ratio << std::endl;
+      cout << "keyspace_access_ratio: " << FLAGS_ycsb_keyspace_access_ratio << std::endl;
       zipf_stats(zipf_random.get());
       adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
       cout << "-------------------------------------------------------------------------------------" << endl;

@@ -21,7 +21,7 @@ DEFINE_uint32(ycsb_warmup_rounds, 0, "");
 DEFINE_uint32(ycsb_tx_rounds, 1, "");
 DEFINE_uint32(ycsb_tx_count, 0, "default = tuples");
 DEFINE_bool(verify, false, "");
-DEFINE_bool(cached_btree, false, "");
+DEFINE_uint32(cached_btree, 0, "");
 DEFINE_double(cached_btree_ram_ratio, 0.0, "");
 DEFINE_bool(cache_lazy_migration, false, "");
 DEFINE_bool(ycsb_scan, false, "");
@@ -88,10 +88,14 @@ int main(int argc, char** argv)
    } else {
       btree_ptr = &db.registerBTreeLL("ycsb");
    }
-   if (FLAGS_cached_btree) {
-      adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
-   } else {
+   if (FLAGS_cached_btree == 0) {
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id));
+   } else if (FLAGS_cached_btree == 1) {
+      adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_cached_btree == 2) {
+      adapter.reset(new BTreeCachedNoninlineVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+   } else {
+      assert(false);
    }
 
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
