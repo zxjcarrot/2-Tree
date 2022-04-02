@@ -71,7 +71,9 @@ int main(int argc, char** argv)
    // -------------------------------------------------------------------------------------
    // LeanStore DB
    double cached_btree_size_gib = 0;
-   if (FLAGS_cached_btree) {
+   if (FLAGS_cached_btree == 3) {
+      cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+   } else if (FLAGS_cached_btree == 1 || FLAGS_cached_btree == 2){
       cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
    }
@@ -83,6 +85,7 @@ int main(int argc, char** argv)
    LeanStore db;
    unique_ptr<BTreeInterface<YCSBKey, YCSBPayload>> adapter;
    leanstore::storage::btree::BTreeLL* btree_ptr = nullptr;
+   leanstore::storage::btree::BTreeLL* btree_ptr2 = nullptr;
    if (FLAGS_recover) {
       btree_ptr = &db.retrieveBTreeLL("ycsb");
    } else {
@@ -94,8 +97,12 @@ int main(int argc, char** argv)
       adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
    } else if (FLAGS_cached_btree == 2) {
       adapter.reset(new BTreeCachedNoninlineVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
-   } else {
-      assert(false);
+   } else if (FLAGS_cached_btree == 3) {
+      if (FLAGS_cached_btree) {
+         cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+         FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
+      }
+      adapter.reset(new BTreeVSHotColdPartitionedAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, cached_btree_size_gib));
    }
 
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
