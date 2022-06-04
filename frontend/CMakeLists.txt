@@ -4,11 +4,11 @@ target_link_libraries(frontend leanstore)
 
 
 add_executable(ycsb ycsb/ycsb.cpp)
-target_link_libraries(ycsb leanstore Threads::Threads)
+target_link_libraries(ycsb leanstore Threads::Threads rocksdb)
 target_include_directories(ycsb PRIVATE ${SHARED_INCLUDE_DIRECTORY})
 
 add_executable(ycsb_hotspot ycsb/ycsb_hotspot.cpp)
-target_link_libraries(ycsb_hotspot leanstore Threads::Threads)
+target_link_libraries(ycsb_hotspot leanstore Threads::Threads rocksdb)
 target_include_directories(ycsb PRIVATE ${SHARED_INCLUDE_DIRECTORY})
 
 

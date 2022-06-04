@@ -41,6 +41,8 @@ void DTTable::open()
                    [&](Column& col) { col << sum(WorkerCounters::worker_counters, &WorkerCounters::xmerge_partial_counter, dt_id); });
    columns.emplace("xmerge_full_counter",
                    [&](Column& col) { col << sum(WorkerCounters::worker_counters, &WorkerCounters::xmerge_full_counter, dt_id); });
+   columns.emplace("split_merge_count",
+                   [&](Column& col) { col << sum(WorkerCounters::worker_counters, &WorkerCounters::split_merge_count, dt_id); });
    for (u64 i = 1; i < WorkerCounters::VW_MAX_STEPS; i++) {
       columns.emplace("vw_version_step_" + std::to_string(i),
                       [&, i](Column& col) { col << sum(WorkerCounters::worker_counters, &WorkerCounters::vw_version_step, dt_id, i); });

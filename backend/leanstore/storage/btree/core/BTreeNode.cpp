@@ -151,6 +151,7 @@ u32 BTreeNode::spaceUsedBySlot(u16 s_i)
 // left(this) into right
 bool BTreeNode::merge(u16 slotId, ExclusivePageGuard<BTreeNode>& parent, ExclusivePageGuard<BTreeNode>& right)
 {
+   WorkerCounters::myCounters().split_merge_count[parent.bf()->page.dt_id]++;
    if (is_leaf) {
       assert(right->is_leaf);
       assert(parent->isInner());
@@ -380,6 +381,7 @@ void BTreeNode::split(ExclusivePageGuard<BTreeNode>& parent, ExclusivePageGuard<
    nodeRight->makeHint();
    // -------------------------------------------------------------------------------------
    memcpy(reinterpret_cast<char*>(this), nodeRight, sizeof(BTreeNode));
+   WorkerCounters::myCounters().split_merge_count[parent.bf()->page.dt_id]++;
 }
 // -------------------------------------------------------------------------------------
 bool BTreeNode::removeSlot(u16 slotId)

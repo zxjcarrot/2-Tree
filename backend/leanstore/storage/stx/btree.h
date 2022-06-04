@@ -128,14 +128,15 @@ public:
     /// compiled with BTREE_DEBUG defined and key_type must be std::ostream
     /// printable.
     static const bool debug = false;
-
+    
+    static const size_t node_size = 1024;
     /// Number of slots in each leaf of the tree. Estimated so that each node
     /// has a size of about 256 bytes.
-    static const int leafslots = BTREE_MAX(8, 1024 / (sizeof(_Key) + sizeof(_Data)));
+    static const int leafslots = BTREE_MAX(8, node_size / (sizeof(_Key) + sizeof(_Data)));
 
     /// Number of slots in each inner node of the tree. Estimated so that each node
     /// has a size of about 256 bytes.
-    static const int innerslots = BTREE_MAX(8, 1024 / (sizeof(_Key) + sizeof(void*)));
+    static const int innerslots = BTREE_MAX(8, node_size / (sizeof(_Key) + sizeof(void*)));
 
     /// As of stx-btree-0.9, the code does linear search in find_lower() and
     /// find_upper() instead of binary_search, unless the node size is larger

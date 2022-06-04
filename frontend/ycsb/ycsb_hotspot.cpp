@@ -7,6 +7,7 @@
 #include "leanstore/utils/Files.hpp"
 #include "leanstore/utils/RandomGenerator.hpp"
 #include "leanstore/utils/ScrambledZipfGenerator.hpp"
+#include "rocksdb_adapter.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
 #include <tbb/tbb.h>
@@ -22,6 +23,7 @@ DEFINE_uint32(ycsb_tx_rounds, 1, "");
 DEFINE_uint32(ycsb_tx_count, 0, "default = tuples");
 DEFINE_bool(verify, false, "");
 DEFINE_uint32(cached_btree, 0, "");
+DEFINE_uint32(cached_btree_node_size_type, 0, "");
 DEFINE_double(cached_btree_ram_ratio, 0.0, "");
 DEFINE_bool(cache_lazy_migration, false, "");
 DEFINE_bool(ycsb_scan, false, "");
@@ -83,6 +85,7 @@ int main(int argc, char** argv)
    cout << "zipf_factor=" << FLAGS_zipf_factor << std::endl;
    cout << "ycsb_read_ratio=" << FLAGS_ycsb_read_ratio << std::endl;
    cout << "run_for_seconds=" << FLAGS_run_for_seconds << std::endl;
+   cout << "cache_btree_node_size_type=" << FLAGS_cached_btree_node_size_type << std::endl;
    LeanStore db;
    unique_ptr<BTreeInterface<YCSBKey, YCSBPayload>> adapter;
    leanstore::storage::btree::BTreeLL* btree_ptr = nullptr;
@@ -94,7 +97,17 @@ int main(int argc, char** argv)
    if (FLAGS_cached_btree == 0) {
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id));
    } else if (FLAGS_cached_btree == 1) {
-      adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+      if (FLAGS_cached_btree_node_size_type == 0) {
+         adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload, 1024>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+      } else if (FLAGS_cached_btree_node_size_type == 1) {
+         adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload, 2048>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+      } else if (FLAGS_cached_btree_node_size_type == 2) {
+         adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload, 4096>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+      } else if (FLAGS_cached_btree_node_size_type == 3) {
+         adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload, 8192>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+      } else if (FLAGS_cached_btree_node_size_type == 4) {
+         adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload, 16384>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+      }
    } else if (FLAGS_cached_btree == 2) {
       adapter.reset(new BTreeCachedNoninlineVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
    } else if (FLAGS_cached_btree == 3) {
@@ -103,6 +116,8 @@ int main(int argc, char** argv)
          FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
       }
       adapter.reset(new BTreeVSHotColdPartitionedAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, cached_btree_size_gib));
+   } else if (FLAGS_cached_btree == 4) {
+      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
    }
 
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
@@ -166,7 +181,6 @@ int main(int argc, char** argv)
    auto minimal_num_pages = FLAGS_ycsb_tuple_count / (sizeof(YCSBPayload) + sizeof(YCSBKey));
    auto fill_factor = minimal_num_pages / (db.getBufferManager().consumedPages() + 0.0);
    auto entries_per_leaf = fill_factor * optimal_entries_per_leaf;
-   auto stride = std::max((int)(entries_per_leaf * FLAGS_ycsb_keyspace_access_ratio), 1);
    auto num_keys_to_access = std::max(1, (int)(FLAGS_ycsb_tuple_count * FLAGS_ycsb_keyspace_access_ratio));
    vector<YCSBKey> all_query_keys;
    for (YCSBKey i = 0; i < FLAGS_ycsb_tuple_count; i += 1) {
@@ -188,6 +202,7 @@ int main(int argc, char** argv)
    begin = chrono::high_resolution_clock::now();
    for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
       threads.emplace_back([&]() {
+         adapter->clear_stats();
          running_threads_counter++;
          u64 tx = 0;
          while (keep_running) {

@@ -24,11 +24,35 @@ inline u64 upAlign(u64 x)
 {
    return (x + 511) & ~511ul;
 }
+
+inline u64 upAlignY(u64 x, u64 y)
+{
+   return (x + (y-1)) & ~(y-1);
+}
+
+inline u64 upAlign4K(u64 x)
+{
+   return upAlignY(x, 4096);
+}
+
+
+
 // -------------------------------------------------------------------------------------
 inline u64 downAlign(u64 x)
 {
    return x - (x & 511);
 }
+
+inline u64 downAlignY(u64 x, u64 y)
+{
+   return x - (x & (y-1));
+}
+inline u64 downAlign4K(u64 x)
+{
+   return downAlignY(x, 4096);
+}
+
+
 // -------------------------------------------------------------------------------------
 u32 CRC(const u8* src, u64 size);
 // -------------------------------------------------------------------------------------

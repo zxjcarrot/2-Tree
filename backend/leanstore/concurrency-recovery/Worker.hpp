@@ -29,7 +29,7 @@ static_assert(sizeof(WLSN) == sizeof(u64), "");
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 struct alignas(4096) WALChunk {
-   static constexpr u16 STATIC_MAX_WORKERS = 256;
+   static constexpr u16 STATIC_MAX_WORKERS = 128;
    struct Slot {
       u64 offset;
       u64 length;
