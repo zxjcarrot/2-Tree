@@ -163,11 +163,12 @@ void LeanStore::startProfilingThread()
          // -------------------------------------------------------------------------------------
          const double instr_per_tx = cpu_table.workers_agg_events["instr"] / tx;
          const double cycles_per_tx = cpu_table.workers_agg_events["cycle"] / tx;
-         const double l1_per_tx = cpu_table.workers_agg_events["L1-miss"] / tx;
+         const double l1_per_tx = cpu_table.workers_agg_events["LLC-miss"] / tx;
+         //std::cerr << "instrs " << cpu_table.workers_agg_events["instr"] << ",  cycles " << cpu_table.workers_agg_events["cycle"] << ", LLC-miss " << cpu_table.workers_agg_events["LLC-miss"] << " tx " << tx << std::endl;
          // using RowType = std::vector<variant<std::string, const char*, Table>>;
          if (FLAGS_print_tx_console) {
             tabulate::Table table;
-            table.add_row({"t", "TX P", "TX A", "TX C", "W MiB", "R MiB", "Instrs/TX", "Cycles/TX", "CPUs", "L1/TX", "WAL T", "WAL R G", "WAL W G",
+            table.add_row({"t", "TX P", "TX A", "TX C", "W MiB", "R MiB", "Instrs/TX", "Cycles/TX", "CPUs", "LLC-miss/TX", "WAL T", "WAL R G", "WAL W G",
                            "GCT Rounds", "Split/Merge"});
             table.add_row({std::to_string(seconds), cr_table.get("0", "tx"), cr_table.get("0", "tx_abort"), cr_table.get("0", "gct_committed_tx"),
                            bm_table.get("0", "w_mib"), bm_table.get("0", "r_mib"), std::to_string(instr_per_tx), std::to_string(cycles_per_tx),

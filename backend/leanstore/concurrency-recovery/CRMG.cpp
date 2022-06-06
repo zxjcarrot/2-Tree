@@ -22,7 +22,7 @@ CRManager::CRManager(s32 ssd_fd, u64 end_of_block_device) : ssd_fd(ssd_fd), end_
          std::string thread_name("worker_" + std::to_string(t_i));
          pthread_setname_np(pthread_self(), thread_name.c_str());
          // -------------------------------------------------------------------------------------
-         CPUCounters::registerThread(thread_name, false);
+         CPUCounters::registerThread(thread_name, false, FLAGS_enable_perf);
          // -------------------------------------------------------------------------------------
          workers[t_i] = new Worker(t_i, workers, workers_count, ssd_fd);
          Worker::tls_ptr = workers[t_i];

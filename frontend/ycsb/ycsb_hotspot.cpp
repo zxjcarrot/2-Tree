@@ -7,7 +7,7 @@
 #include "leanstore/utils/Files.hpp"
 #include "leanstore/utils/RandomGenerator.hpp"
 #include "leanstore/utils/ScrambledZipfGenerator.hpp"
-#include "rocksdb_adapter.hpp"
+//#include "rocksdb_adapter.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
 #include <tbb/tbb.h>
@@ -76,7 +76,7 @@ int main(int argc, char** argv)
    double cached_btree_size_gib = 0;
    if (FLAGS_cached_btree == 3) {
       cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
-   } else if (FLAGS_cached_btree == 1 || FLAGS_cached_btree == 2){
+   } else if (FLAGS_cached_btree == 1 || FLAGS_cached_btree == 2 || FLAGS_cached_btree == 5){
       cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
    }
@@ -117,7 +117,9 @@ int main(int argc, char** argv)
       }
       adapter.reset(new BTreeVSHotColdPartitionedAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, cached_btree_size_gib));
    } else if (FLAGS_cached_btree == 4) {
-      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
+      //adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_cached_btree == 5) {
+      adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
    }
 
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
@@ -159,12 +161,6 @@ int main(int argc, char** argv)
                auto& key = keys[t_i];
                table.insert(key, payload);
             }
-            // for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
-            //    YCSBPayload payload;
-            //    utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-            //    auto& key = t_i;
-            //    table.insert(key, payload);
-            // }
          });
       }
       end = chrono::high_resolution_clock::now();
@@ -178,7 +174,7 @@ int main(int argc, char** argv)
    }
    
    auto optimal_entries_per_leaf = leanstore::storage::PAGE_SIZE / (sizeof(YCSBPayload) + sizeof(YCSBKey));
-   auto minimal_num_pages = FLAGS_ycsb_tuple_count / (sizeof(YCSBPayload) + sizeof(YCSBKey));
+   auto minimal_num_pages = FLAGS_ycsb_tuple_count * (sizeof(YCSBPayload) + sizeof(YCSBKey)) / leanstore::storage::PAGE_SIZE;
    auto fill_factor = minimal_num_pages / (db.getBufferManager().consumedPages() + 0.0);
    auto entries_per_leaf = fill_factor * optimal_entries_per_leaf;
    auto num_keys_to_access = std::max(1, (int)(FLAGS_ycsb_tuple_count * FLAGS_ycsb_keyspace_access_ratio));
@@ -197,11 +193,10 @@ int main(int argc, char** argv)
    atomic<bool> keep_running = true;
    atomic<u64> running_threads_counter = 0;
    atomic<u64> txs = 0;
-   vector<thread> threads;
 
    begin = chrono::high_resolution_clock::now();
    for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
-      threads.emplace_back([&]() {
+      db.getCRManager().scheduleJobAsync(t_i, [&]() {
          adapter->clear_stats();
          running_threads_counter++;
          u64 tx = 0;
@@ -241,9 +236,6 @@ int main(int argc, char** argv)
       zipf_stats(zipf_random.get());
       adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
       cout << "-------------------------------------------------------------------------------------" << endl;
-      for (auto& thread : threads) {
-         thread.join();
-      }
    }
    cout << "-------------------------------------------------------------------------------------" << endl;
    // -------------------------------------------------------------------------------------

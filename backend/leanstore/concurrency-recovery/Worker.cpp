@@ -27,7 +27,7 @@ Worker::Worker(u64 worker_id, Worker** all_workers, u64 workers_count, s32 fd)
    CRCounters::myCounters().worker_id = worker_id;
    std::memset(wal_buffer, 0, WORKER_WAL_SIZE);
    my_snapshot = make_unique<u64[]>(workers_count);
-   lower_water_marks = static_cast<atomic<u64>*>(std::aligned_alloc(64, 8 * sizeof(u64) * workers_count));
+   lower_water_marks = static_cast<atomic<u64>*>(aligned_alloc(64, 8 * sizeof(u64) * workers_count));
    for (u64 w = 0; w < workers_count; w++) {
       lower_water_marks[w * 8] = 0;
    }
@@ -321,7 +321,7 @@ outofmemory : {
    const u64 lower_bound = slot.offset;
    const u64 lower_bound_aligned = utils::downAlign(lower_bound);
    const u64 read_size_aligned = utils::upAlign(slot.length + lower_bound - lower_bound_aligned);
-   auto log_chunk = static_cast<u8*>(std::aligned_alloc(4096, read_size_aligned));
+   auto log_chunk = static_cast<u8*>(aligned_alloc(4096, read_size_aligned));
    const u64 ret = pread(ssd_fd, log_chunk, read_size_aligned, lower_bound_aligned);
    posix_check(ret >= read_size_aligned);
    WorkerCounters::myCounters().wal_read_bytes += read_size_aligned;

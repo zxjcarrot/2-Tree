@@ -69,6 +69,7 @@ struct PerfEvent {
   std::map<std::string, std::string> params;
   const bool inherit;
   bool printHeader;
+  const bool do_register;
 
   bool isIntel()
   {
@@ -82,7 +83,7 @@ struct PerfEvent {
     return false;
 #endif
   }
-  PerfEvent(bool inherit = true) : inherit(inherit), printHeader(true)
+  PerfEvent(bool inherit = true, bool do_register = false) : inherit(inherit), printHeader(true), do_register(do_register)
   {
     registerCounter("cycle", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
     registerCounter("cycle-kernel", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, 1);
@@ -95,6 +96,9 @@ struct PerfEvent {
     registerCounter("task", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK);
     // additional counters can be found in linux/perf_event.h
 
+    if (do_register == false) {
+      return;
+    }
     for (unsigned i = 0; i < events.size(); i++) {
       auto& event = events[i];
       event.fd = syscall(__NR_perf_event_open, &event.pe, 0, -1, -1, 0);
@@ -129,6 +133,9 @@ struct PerfEvent {
   void startCounters()
   {
     for (unsigned i = 0; i < events.size(); i++) {
+      if (do_register == false) {
+        continue;
+      }
       auto& event = events[i];
       ioctl(event.fd, PERF_EVENT_IOC_RESET, 0);
       ioctl(event.fd, PERF_EVENT_IOC_ENABLE, 0);
@@ -150,6 +157,9 @@ struct PerfEvent {
     stopTime = std::chrono::steady_clock::now();
     for (unsigned i = 0; i < events.size(); i++) {
       auto& event = events[i];
+      if (do_register == false) {
+        continue;
+      }
       if (read(event.fd, &event.data, sizeof(uint64_t) * 3) != sizeof(uint64_t) * 3)
         std::cerr << "Error reading counter " << names[i] << std::endl;
       ioctl(event.fd, PERF_EVENT_IOC_DISABLE, 0);

@@ -25,6 +25,7 @@ DECLARE_bool(print_debug);
 DECLARE_bool(print_tx_console);
 DECLARE_bool(profiling);
 DECLARE_uint32(print_debug_interval_s);
+DECLARE_bool(enable_perf);
 // -------------------------------------------------------------------------------------
 DECLARE_bool(contention_split);
 DECLARE_uint64(cm_update_on);

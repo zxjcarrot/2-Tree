@@ -19,7 +19,7 @@ std::string CPUTable::getName()
 // -------------------------------------------------------------------------------------
 void CPUTable::open()
 {
-   PerfEvent e;
+   PerfEvent e(true, FLAGS_enable_perf);
    for (const auto& event_name : e.getEventsName()) {
       workers_agg_events[event_name] = 0;
       pp_agg_events[event_name] = 0;
@@ -46,6 +46,8 @@ void CPUTable::next()
    {
       std::unique_lock guard(CPUCounters::mutex);
       for (auto& thread : CPUCounters::threads) {
+         if (thread.second.e.get() == nullptr)
+            continue;
          thread.second.e->stopCounters();
          auto events_map = thread.second.e->getCountersMap();
          columns.at("key") << thread.second.name;

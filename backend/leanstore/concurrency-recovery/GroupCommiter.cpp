@@ -30,7 +30,7 @@ void CRManager::groupCommiter()
    running_threads++;
    std::string thread_name("group_committer");
    pthread_setname_np(pthread_self(), thread_name.c_str());
-   CPUCounters::registerThread(thread_name, false);
+   CPUCounters::registerThread(thread_name, false, FLAGS_enable_perf);
    // -------------------------------------------------------------------------------------
    WALChunk chunk;
    SSDMeta meta;
