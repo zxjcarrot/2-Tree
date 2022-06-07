@@ -3,9 +3,9 @@
 #include <iostream>
 #include "Units.hpp"
 #include "leanstore/storage/btree/BTreeLL.hpp"
-#include "leanstore/storage/stx/btree_map.h"
 #include "leanstore/storage/btree/core/WALMacros.hpp"
-#include "ARTIndex.hpp"
+#include "ART/ARTIndex.hpp"
+#include "stx/btree_map.h"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore
