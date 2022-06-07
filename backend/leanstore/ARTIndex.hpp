@@ -118,7 +118,7 @@ public:
 	class Iterator {
 	public:
 		Iterator(): idx(nullptr) {}
-		Iterator(ARTIndex<Key, Value> * idx, ARTIter iter): idx(idx), iter(iter) {
+		Iterator(ARTIndex<Key, Value> * idx, const ARTIter & iter): idx(idx), iter(iter) {
 			reached_end = iter.value() == 0;
 		}
 
@@ -130,8 +130,9 @@ public:
 			return idx->reverseKey(iter.key());
 		}
 
-		bool operator ++(int) {
-			reached_end = iter++;
+		void operator ++(int) {
+			bool has_more = iter++;
+			reached_end = !has_more || iter.value() == 0;
 		}
 
 		bool end(){

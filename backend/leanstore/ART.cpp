@@ -989,20 +989,20 @@ inline Node* ARTIter::nextLeaf() {
     return minimum_recordPath(nextSlot());
 }
 
-uint64_t ARTIter::value() {
+uint64_t ARTIter::value() const {
     return val;
 }
 
 bool ARTIter::operator ++ (int) {
     Node* leaf = currentLeaf();
     if (index->isLeaf(leaf)) {
-	val = (uint64_t)index->getLeafValue(leaf);
-	index->loadKey(val, (uint8_t*)key_buf);
-	nextLeaf();
-	return true;
-    }
-    else {
-	val = 0;
-	return false;
+		val = (uint64_t)index->getLeafValue(leaf);
+		index->loadKey(val, (uint8_t*)key_buf);
+		nextLeaf();
+		assert(val != 0);
+		return true;
+	} else {
+		val = 0;
+		return false;
     }
 }

@@ -13,11 +13,12 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -rdynamic")
-
+#set(CMAKE_BUILD_TYPE RelWithDebInfo)
+set(CMAKE_BUILD_TYPE RelWithDebInfo)
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
-  add_compile_options(-O3 -g3 -fno-omit-frame-pointer -Wall -Wextra -mavx2 -mcx16 -m64) # -fno-elide-constructors no need for now
+  add_compile_options(-fno-omit-frame-pointer -Wall -Wextra -mavx2 -mcx16 -m64) # -fno-elide-constructors no need for now
 else()
-  add_compile_options(-O3 -g3 -fno-omit-frame-pointer -Wall -Wextra -march=native)
+  add_compile_options(-fno-omit-frame-pointer -Wall -Wextra -march=native)
 endif()
 
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG -g3")

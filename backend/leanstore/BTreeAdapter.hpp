@@ -57,8 +57,18 @@ using OP_RESULT = leanstore::storage::btree::OP_RESULT;
 
 class DeferCode {
 public:
-   DeferCode(std::function<void()> f): f(f) {}
-   ~DeferCode() { f(); }
+   DeferCode() = delete;
+   DeferCode(std::function<void()> f): f(f) {
+      if (!f) {
+         throw std::runtime_error("DeferCode got empty function");
+      }
+   }
+   ~DeferCode() { 
+      if (!f) {
+         throw std::runtime_error("~DeferCode got empty function");
+      }
+      f(); 
+   }
    std::function<void()> f;
 };
 
@@ -1259,6 +1269,7 @@ struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
    }
 
    void evict_one() {
+      int cnt = 0;
       Key key = clock_hand;
       typename ARTIndex<Key, TaggedPayload>::Iterator it;
       if (key == std::numeric_limits<Key>::max()) {
@@ -1268,8 +1279,13 @@ struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
       }
       auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
       while (it.end() == false) {
+         ++cnt;
          it++;
          auto tagged_payload = it.value();
+         if (tagged_payload == nullptr) {
+            clock_hand = std::numeric_limits<Key>::max();
+            break;
+         }
          if (tagged_payload->referenced == true) {
             tagged_payload->referenced = false;
             clock_hand = it.key();
@@ -1313,6 +1329,7 @@ struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
          evict_till_safe();
       assert(cache.exists(k) == false);
       cache.insert(k, new TaggedPayload{k, v, dirty, true});
+      assert(cache.exists(k) == true);
    }
 
    bool lookup(Key k, Payload& v) override

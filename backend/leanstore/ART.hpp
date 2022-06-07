@@ -227,7 +227,7 @@ public:
     
     void begin();
 
-    uint64_t value();
+    uint64_t value() const;
     uint8_t* key() { return key_buf; }
     bool operator ++ (int);
 
@@ -235,8 +235,8 @@ public:
 
 private:
     ART* index;
-    std::vector<NodeCursor> node_stack;
     uint64_t val;
-    uint8_t key_buf[32];
+    uint8_t key_buf[64];
+    std::vector<NodeCursor> node_stack;
 };
 
