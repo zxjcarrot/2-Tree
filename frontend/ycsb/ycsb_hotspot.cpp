@@ -1,4 +1,5 @@
 #include "Units.hpp"
+#include "interface/StorageInterface.hpp"
 #include "leanstore/BTreeAdapter.hpp"
 #include "leanstore/Config.hpp"
 #include "leanstore/LeanStore.hpp"
@@ -7,7 +8,8 @@
 #include "leanstore/utils/Files.hpp"
 #include "leanstore/utils/RandomGenerator.hpp"
 #include "leanstore/utils/ScrambledZipfGenerator.hpp"
-//#include "rocksdb_adapter.hpp"
+#include "rocksdb_adapter.hpp"
+#include "anti-caching/AntiCache.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
 #include <tbb/tbb.h>
@@ -79,6 +81,9 @@ int main(int argc, char** argv)
    } else if (FLAGS_cached_btree == 1 || FLAGS_cached_btree == 2 || FLAGS_cached_btree == 5){
       cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
+   } else if (FLAGS_cached_btree == 4 || FLAGS_cached_btree == 6) { // rocksdb with row cache
+      cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio; // row cache size
+      FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio); // block cache size
    }
    cout << "cached_btree_size_gib " << cached_btree_size_gib << std::endl;
    cout << "wal=" << FLAGS_wal << std::endl;
@@ -117,9 +122,11 @@ int main(int argc, char** argv)
       }
       adapter.reset(new BTreeVSHotColdPartitionedAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, cached_btree_size_gib));
    } else if (FLAGS_cached_btree == 4) {
-      //adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
+      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
    } else if (FLAGS_cached_btree == 5) {
       adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_cached_btree == 6) {
+      adapter.reset(new AntiCacheAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib));
    }
 
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
@@ -193,7 +200,9 @@ int main(int argc, char** argv)
    atomic<bool> keep_running = true;
    atomic<u64> running_threads_counter = 0;
    atomic<u64> txs = 0;
+   adapter->evict_all();
 
+   cout << "All evicted" << endl;
    begin = chrono::high_resolution_clock::now();
    for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
       db.getCRManager().scheduleJobAsync(t_i, [&]() {

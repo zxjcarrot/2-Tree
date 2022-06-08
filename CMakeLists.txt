@@ -14,7 +14,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -rdynamic")
 #set(CMAKE_BUILD_TYPE RelWithDebInfo)
-set(CMAKE_BUILD_TYPE RelWithDebInfo)
+set(CMAKE_BUILD_TYPE Release)
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
   add_compile_options(-fno-omit-frame-pointer -Wall -Wextra -mavx2 -mcx16 -m64) # -fno-elide-constructors no need for now
 else()
@@ -48,7 +48,7 @@ find_package(Threads REQUIRED)
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
-include("${CMAKE_SOURCE_DIR}/libs/gflags.cmake")
+#include("${CMAKE_SOURCE_DIR}/libs/gflags.cmake")
 include("${CMAKE_SOURCE_DIR}/libs/tabluate.cmake")
 include("${CMAKE_SOURCE_DIR}/libs/rapidjson.cmake")
 #include("${CMAKE_SOURCE_DIR}/libs/googletest.cmake")

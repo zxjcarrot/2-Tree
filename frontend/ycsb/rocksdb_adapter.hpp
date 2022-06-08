@@ -4,7 +4,7 @@
 #include <rocksdb/utilities/options_util.h>
 
 // -------------------------------------------------------------------------------------
-#include "leanstore/BTreeAdapter.hpp"
+#include "interface/StorageInterface.hpp"
 #include "leanstore/utils/RandomGenerator.hpp"
 // -------------------------------------------------------------------------------------
 #include <atomic>
@@ -15,7 +15,7 @@
 #include <string>
 #include <thread>
 template <typename Key, typename Payload>
-struct RocksDBAdapter : leanstore::BTreeInterface<Key, Payload> {
+struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    rocksdb::DB* db;
    rocksdb::Options options;
    bool lazy_migration;
@@ -75,7 +75,7 @@ struct RocksDBAdapter : leanstore::BTreeInterface<Key, Payload> {
    void update(Key k, Payload& v) {
       Payload t;
       //read
-      auto status = lookup(k, t);
+      auto status __attribute__((unused)) = lookup(k, t);
       //modify
       memcpy(&t, &v, sizeof(v));
       //write
@@ -93,7 +93,7 @@ struct RocksDBAdapter : leanstore::BTreeInterface<Key, Payload> {
 
    void report(u64, u64) override {
       std::string val;
-      auto res = db->GetProperty("rocksdb.block-cache-usage", &val);
+      auto res __attribute__((unused)) = db->GetProperty("rocksdb.block-cache-usage", &val);
       assert(res);
       std::cout << "RocksDB block-cache-usage " << val << std::endl;
       res = db->GetProperty("rocksdb.estimate-num-keys", &val);

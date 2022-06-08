@@ -1,4 +1,5 @@
 #include "Units.hpp"
+#include "interface/storage_interface.hpp"
 #include "leanstore/BTreeAdapter.hpp"
 #include "leanstore/Config.hpp"
 #include "leanstore/LeanStore.hpp"
