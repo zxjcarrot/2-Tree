@@ -129,7 +129,7 @@ void singleDeleteTest(btree_t<KeyType, leaf_size, inner_size> &btree) {
     auto inner_nodes = btree.getNumInnerNodes();
     auto leaf_nodes = btree.getNumLeafNodes();
     auto tree_bytes = leaf_size * leaf_nodes + inner_nodes * inner_size;
-    std::cout << "After deletes, inner nodes " << inner_nodes << ", leaf nodes " <<  leaf_nodes << ", kv_size " << kv_size << ", tree_bytes " << tree_bytes  << std::endl;;
+    std::cout << "After deletes, inner nodes " << inner_nodes << ", leaf nodes " <<  leaf_nodes << ", kv_size " << kv_size << ", tree_bytes " << tree_bytes << std::endl;;
 }
 
 template<typename KeyType, uint64_t leaf_size, uint64_t inner_size>
