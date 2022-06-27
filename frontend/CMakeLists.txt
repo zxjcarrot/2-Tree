@@ -12,6 +12,11 @@ target_link_libraries(ycsb_hotspot leanstore Threads::Threads)
 target_include_directories(ycsb_hotspot PRIVATE ${SHARED_INCLUDE_DIRECTORY})
 
 
+add_executable(btreeolc_test btreeolc_test/btreeolc_test.cpp)
+target_link_libraries(btreeolc_test leanstore gtest Threads::Threads)
+target_include_directories(btreeolc_test PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+
+
 # add_executable(tpcc tpc-c/tpcc.cpp)
 # target_link_libraries(tpcc leanstore Threads::Threads)
 # target_include_directories(tpcc PRIVATE ${SHARED_INCLUDE_DIRECTORY})
