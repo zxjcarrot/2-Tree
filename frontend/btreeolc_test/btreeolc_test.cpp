@@ -5,6 +5,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <chrono>
+#include <thread>
 #include <type_traits>  // std::is_trivial
 
 #include "btreeolc/btreeolc.hpp"
@@ -22,7 +24,7 @@ public:
         value = v.value;
         return *this;
     }
-
+    void setValue(int v) { value = v;}
     int getValue() const { return value; }
 private:
     int value;
@@ -200,8 +202,38 @@ void singleScanTest(btree_t<KeyType, leaf_size, inner_size> &btree) {
 }
 
 template<typename KeyType, uint64_t leaf_size, uint64_t inner_size>
+void singleScanForUpdateTest(btree_t<KeyType, leaf_size, inner_size> &btree) {
+    {
+        KeyType l{0}, h{50000};
+        int vSeq = 0;
+        btree.scanForUpdate(l, [&](const KeyType & key, Value & v, bool lastItem) {
+            if (key.getValue() > h.getValue())
+                return true; // exit
+            assert(v.getValue() == vSeq);
+            vSeq++;
+            v.setValue(1);
+            return false;
+        });;
+        delete[] l.transfer();
+        delete[] h.transfer();
+    }
+
+    {
+        KeyType l{0}, h{50000};
+        btree.scanForUpdate(l, [&](const KeyType & key, Value & v, bool lastItem) {
+            if (key.getValue() > h.getValue())
+                return true; // exit
+            assert(v.getValue() == 1);
+            return false;
+        });
+        delete[] l.transfer();
+        delete[] h.transfer();
+    }
+}
+
+template<typename KeyType, uint64_t leaf_size, uint64_t inner_size>
 void multiScanDelInsert1Test(btree_t<KeyType, leaf_size, inner_size> &btree) {
-    for (int i = 0; i < 1000000; i++) {
+    for (int i = 0; i < 100000; i++) {
         KeyType k{i};
         bool res = btree.remove(k);
         ASSERT_EQ(res, true);
@@ -280,7 +312,7 @@ void multiScanDelInsert1Test(btree_t<KeyType, leaf_size, inner_size> &btree) {
 
 template<typename T, uint64_t leaf_size, uint64_t inner_size>
 void multiScanDelInsert2Test(btree_t<T, leaf_size, inner_size> &btree) {
-    for (int i = 0; i < 2000000; i++) {
+    for (int i = 0; i < 100000; i++) {
         btree.remove(i * 2);
     }
 
@@ -338,9 +370,10 @@ void multiScanDelInsert2Test(btree_t<T, leaf_size, inner_size> &btree) {
     singleLookupTest(btree);        \
     singleDeleteTest(btree);        \
     singleGetValueTest(btree);      \
-    singleScanTest(btree);
-    // multiScanDelInsert1Test(btree);
-    // multiScanDelInsert2Test(btree);
+    singleScanTest(btree);          \
+    singleScanForUpdateTest(btree); \
+    multiScanDelInsert1Test(btree);
+    //multiScanDelInsert2Test(btree);
 
 #define BasicTrivialKeyTest(type, page_size)                     \
     TEST(BTreeBasicTest, CONCAT3(TrivialKey, type, page_size)) \
@@ -610,7 +643,8 @@ void ConcurrentTest_InsertInsert() {
         std::vector<std::thread> insert_threads;
         for (int i = 0; i < 4; ++i) {
             insert_threads.emplace_back([&btree](int id) {
-                for (int i = 0; i < kElementCount; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(id * 10));
+                for (int i = id; i < kElementCount; i += 4) {
                     bool ret;
                     KeyType k{i};
                     Value v = btree.insert(k, i, &ret);
@@ -643,6 +677,106 @@ void ConcurrentTest_InsertInsert() {
             ASSERT_EQ(res, true);
             delete[] k.transfer();
         }
+    }
+    std::cout << '\n';
+}
+
+template<typename KeyType, uint64_t page_size = 4096>
+void ConcurrentTest_InsertDeleteScanForUpdate() {
+    // using Type = SharedPodWrapper<long>;
+    btree_t<KeyType, page_size, page_size> btree;
+
+    constexpr int kIterNum = 10;
+    constexpr int kElementCount = 100000;
+
+    for (int i = 0; i < kIterNum; ++i) {
+        std::cout << '\r' << "iter " << i + 1 << "/" << kIterNum << " ..." << std::flush;
+
+        std::vector<KeyType> keys;
+        for (int i = 0; i < kElementCount; ++i) {
+            keys.push_back(KeyType(i));
+        }
+        std::random_shuffle(keys.begin(), keys.end());
+        // 1. spawn 4 threads to insert
+        std::vector<std::thread> insert_threads;
+        std::vector<std::thread> delete_threads;
+        for (int i = 0; i < 4; ++i) {
+            insert_threads.emplace_back([&btree, &keys](int id) {
+                for (int i = id; i < kElementCount; i += 4) {
+                    bool ret;
+                    KeyType k(keys[i]);
+                    Value v = btree.insert(k, (int)keys[i].getValue(), &ret);
+                    if (ret) {
+                        ASSERT_EQ(v.getValue(), (int)keys[i].getValue());
+                    } else {
+                        delete[] k.transfer();
+                    }
+                }
+            }, i);
+        }
+
+        std::vector<KeyType> keysForDelete = keys;
+        std::random_shuffle(keysForDelete.begin(), keysForDelete.end());
+        keysForDelete.resize(keysForDelete.size() / 2);
+        for (int i = 0; i < 2; ++i) {
+            delete_threads.emplace_back([&btree, &keysForDelete](int id) {
+                std::this_thread::sleep_for(std::chrono::milliseconds((id + 1) * 40));
+                for (int i = id; i < keysForDelete.size(); i += 2) {
+                    KeyType k(keysForDelete[i]);
+                    bool res = btree.remove(k);
+                }
+            }, i);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        btree.scanForUpdate(0, [](const KeyType & k, Value & v, bool lastItem){
+            v.setValue(0);
+            if(lastItem) {
+                return true; // end on last item
+            }
+            return false;
+        });
+        
+        for (int i = 0; i < 4; ++i) {
+            insert_threads[i].join();
+        }
+
+
+        btree.scanForUpdate(0, [](const KeyType & k, Value & v, bool lastItem){
+            v.setValue(0);
+            if(lastItem) {
+                return true; // end on last item
+            }
+            return false;
+        });
+        for (int i = 0; i < 2; ++i) {
+            delete_threads[i].join();
+        }
+        int left = 0;
+        for (int i = 0; i < kElementCount; ++i) {
+            Value res;
+            KeyType k(keys[i]);
+            if (btree.lookup(k, res)) {
+                ASSERT_EQ(res.getValue(), 0);
+                left++;
+            }
+            
+            delete[] k.transfer();
+        }
+
+        std::cout << "Before deletes, " << left << " elements" << std::endl;
+        // 3. delete all
+        for (int i = 0; i < kElementCount; ++i) {
+            KeyType k(keys[i]);
+            bool res = btree.remove(k);
+            delete[] k.transfer();
+        }
+
+        auto kv_size = sizeof(KeyType) + sizeof(Value);
+        auto inner_nodes = btree.getNumInnerNodes();
+        auto leaf_nodes = btree.getNumLeafNodes();
+        auto tree_bytes = page_size * leaf_nodes + inner_nodes * page_size;
+        std::cout << "After deletes, inner nodes " << inner_nodes << ", leaf nodes " <<  leaf_nodes << ", kv_size " << kv_size << ", tree_bytes " << tree_bytes << std::endl;;
     }
     std::cout << '\n';
 }
@@ -776,16 +910,18 @@ void ConcurrentTest_InsertDeleteQuery() {
 
 
 #define ConcurrencyTrivialKeyTest(TestType, type, page_size)                     \
-    TEST(BtreeConcurrencyTest, CONCAT4(TestType, TrivialKey, type, page_size)) \
+    TEST(BTreeConcurrencyTest, CONCAT4(TestType, TrivialKey, type, page_size)) \
     {                                                                            \
         ConcurrentTest_##TestType<TrivialKey<type>, page_size>();                \
     }
 
 #define ConcurrencyNonTrivialKeyTest(TestType, type, page_size)                     \
-    TEST(BtreeConcurrencyTest, CONCAT4(TestType, NonTrivialKey, type, page_size)) \
+    TEST(BTreeConcurrencyTest, CONCAT4(TestType, NonTrivialKey, type, page_size)) \
     {                                                                               \
         ConcurrentTest_##TestType<NonTrivialKey<type>, page_size>();                \
     }
+
+ConcurrencyTrivialKeyTest(InsertDeleteScanForUpdate, int, 4096);
 
 ConcurrencyTrivialKeyTest(QueryDelete, int, 1024);
 //ConcurrencyNonTrivialKeyTest(QueryDelete, int, 1024);

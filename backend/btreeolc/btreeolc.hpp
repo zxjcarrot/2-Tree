@@ -630,18 +630,24 @@ class BPlusTree {
         }
 
         unsigned lowerBound(const KeyType &k, const KeyComparator &keyComp_) {
-            int left = 0, right = this->getCount() - 1;
-            while (left <= right) {
-                int mid = left + (right - left) / 2;
-                int comp = keyComp_(keys_[mid], k);
-                if (comp == 0)
-                    return mid;
-                else if (comp < 0)
-                    left = mid + 1;
-                else
-                    right = mid - 1;
+            if (this->getCount() < 128) {
+                int left = 0;
+                while (left < this->getCount() && keyComp_(this->keys_[left], k) < 0) ++left;
+                return left;
+            } else {
+                int left = 0, right = this->getCount() - 1;
+                while (left <= right) {
+                    int mid = left + (right - left) / 2;
+                    int comp = keyComp_(keys_[mid], k);
+                    if (comp == 0)
+                        return mid;
+                    else if (comp < 0)
+                        left = mid + 1;
+                    else
+                        right = mid - 1;
+                }
+                return left;
             }
-            return left;
         }
 
         __attribute__ ((deprecated))
@@ -1793,6 +1799,8 @@ class BPlusTree {
      */
     void scan(const KeyType &lowKey, const KeyType &highKey, bool leftExist, bool rightExist,
               uint32_t limit, std::vector<KeyValuePair> &res) {
+        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
     restart:
         res.clear();
@@ -1862,6 +1870,97 @@ class BPlusTree {
         }
     }
 
+
+    /**
+     * Range scan items starting at `startKey` for update. 
+     * Leaves will be write-locked.
+     * The scan ends when processor returns false or all items are traversed.
+     */
+    void scanForUpdate(const KeyType &startKey, std::function<bool(const KeyType &, ValueType &, bool)> processor) {
+        bool leftExist = true;
+        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        int restartCount = 0;
+        int leavesTraversed = 0;
+        KeyType lowKey = startKey;
+    restart:
+        if (restartCount++) yield(restartCount);
+        bool needRestart = false;
+
+        NodeBase *node = root_;
+        uint64_t versionNode = node->readLockOrRestart(needRestart);
+        if (needRestart || (node != root_)) {
+            node->readUnlockOrRestart(versionNode, needRestart);
+            goto restart;
+        }
+
+        // Parent of current node
+        BTreeInner *parent = nullptr;
+        uint64_t versionParent;
+
+        // find the first leafNode
+        while (node->getType() == NodeType::BTreeInner) {
+            auto inner = static_cast<BTreeInner *>(node);
+
+            if (parent) {
+                parent->readUnlockOrRestart(versionParent, needRestart);
+                if (needRestart) goto restart;
+            }
+
+            parent = inner;
+            versionParent = versionNode;
+            node = inner->childAt(inner->lowerBound(lowKey, keyComp_));
+
+            prefetch((char *)node, kPageSize);
+            inner->checkOrRestart(versionNode, needRestart);
+            if (needRestart) goto restart;
+            versionNode = node->readLockOrRestart(needRestart);
+            if (needRestart) goto restart;
+        }
+        node->checkOrRestart(versionNode, needRestart);
+        if (needRestart) goto restart;
+        auto leaf = static_cast<BTreeLeaf *>(node);
+        unsigned pos = leaf->lowerBound(lowKey, keyComp_);
+        if (leaf == nullptr) return;
+
+        node->upgradeToWriteLockOrRestart(versionNode, needRestart);
+        if (needRestart) {
+            node->readUnlockOrRestart(versionNode, needRestart);
+            if (leavesTraversed == 0) {
+                lowKey = startKey;
+            }
+            goto restart;
+        }
+        BTreeLeaf * nextLeaf = leaf->next_;
+        for (unsigned p = pos; p < leaf->getCount(); ++p) {
+            bool lastItem = nextLeaf == nullptr && p + 1 == leaf->getCount();
+            bool quit = processor(leaf->keys_[p], leaf->values_[p], lastItem);
+            if (quit) {
+                break;
+            }
+        }
+        leavesTraversed++;
+        bool quit = false;
+
+        if (nextLeaf != nullptr) {
+            versionNode = nextLeaf->readLockOrRestart(needRestart);
+            assert(needRestart == false);
+            if (nextLeaf->getCount() > 0) {
+                lowKey = nextLeaf->keys_[0];
+            } else {
+                quit = true;
+            }
+            nextLeaf->readUnlockOrRestart(versionNode, needRestart);
+            assert(needRestart == false);
+        } else {
+            quit = true;
+        }
+        node->writeUnlock();
+        if (quit == false) {
+            goto restart;
+        }
+    }
+
     /**
      * Assume the nodes in stack are all optimistically read-locked,
      * meaning the version numbers are stored in the stack.
@@ -1883,6 +1982,10 @@ class BPlusTree {
         uint64_t childVersion = tope.version;
         unsigned childPos = tope.pos;
 
+/*           R[1]
+      A[1]           B[0] 
+  A1[2] A2[2]      B1[1] 
+*/
         assert(stack.size() >= 2);
         StackNodeElement parente = stack[stack.size() - 2];
         // parent node must be inner node
@@ -1902,6 +2005,8 @@ class BPlusTree {
         MergeOperation opt = MergeOperation::NoMerge;
         // the position of left sibling or right sibling
         int siblingPos = -1;
+        // If current node is the only node stored in parent
+        bool single_child = false;
         auto choose_one_sibling = [&]() -> NodeBase * {
             unsigned leftSiblingPos = childPos - 1;
             unsigned rightSiblingPos = childPos + 1;
@@ -1912,7 +2017,9 @@ class BPlusTree {
             if (rightSiblingPos > 0 && rightSiblingPos <= parentNode->getCount()) {
                 rightSibling = parentNode->childAt(rightSiblingPos);
             }
-
+            if (leftSibling == nullptr && rightSibling == nullptr) {
+                single_child = true;
+            }
             // try borrow from left sibling
             if (leftSibling) {
                 bool restart = false;
@@ -1977,7 +2084,12 @@ class BPlusTree {
         bool restart = false;
         NodeBase *siblingNode = choose_one_sibling();
         if (siblingNode == nullptr) {
-            return false;
+            // if childNode is the only child of parent, try merge the parent node first so as to get more "siblings".
+            if (single_child && stack.size() > 2) {
+                stack.pop_back();
+                EraseMerge(stack);
+            }
+            return false; // retry
         }
 
         // Lock protocol, top to bottom, left to right
@@ -2497,6 +2609,8 @@ class BPlusTree {
      * @param flag find key and it corresponding value when flag is true
      */
     bool _lookup(const KeyValuePair &element, ValueType &result, bool flag) {
+        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
     restart:
         if (restartCount++) yield(restartCount);
