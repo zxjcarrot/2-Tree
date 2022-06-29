@@ -120,7 +120,7 @@ class EBR {
             ensureHasControlBlock();
 
             control_block_->is_in_critical_region_.store(true, std::memory_order_relaxed);
-            std::atomic_thread_fence(std::memory_order_seq_cst);
+            //std::atomic_thread_fence(std::memory_order_seq_cst);
 
             auto epoch = global_epoch_.load(std::memory_order_acquire);
 

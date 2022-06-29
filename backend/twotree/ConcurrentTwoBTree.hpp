@@ -12,6 +12,8 @@
 namespace leanstore
 {
 
+thread_local int index_op_iters = 0;
+static constexpr int ebr_exit_threshold = 100; // stay in the epoch for this many ops before exiting
 /*
 
 ***Invariant: At any time, there is at most one thread working on the migration of a tuple.***
@@ -224,7 +226,17 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
 
    bool lookup(Key k, Payload& v) override
    {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      if (index_op_iters == 0) {
+         cache.EBREnter();
+      }
+      DeferCode c([&, this](){
+         io_reads_now = WorkerCounters::myCounters().io_reads.load(); 
+         if (++index_op_iters >= ebr_exit_threshold) {
+            cache.EBRExit();
+            index_op_iters = 0;
+         }
+         }
+      );
       retry:
       bool inflight = false;
       bool found_in_cache = cache.lookupForUpdate(k, [&](const Key & key, TaggedPayload & payload){
@@ -331,7 +343,17 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
 
    void update(Key k, Payload& v) override
    {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      if (index_op_iters == 0) {
+         cache.EBREnter();
+      }
+      DeferCode c([&, this](){
+         io_reads_now = WorkerCounters::myCounters().io_reads.load(); 
+         if (++index_op_iters >= ebr_exit_threshold) {
+            cache.EBRExit();
+            index_op_iters = 0;
+         }
+         }
+      );
       retry:
       bool inflight = false;
       bool found_in_cache = cache.lookupForUpdate(k, [&](const Key & key, TaggedPayload & payload){

@@ -1510,8 +1510,8 @@ class BPlusTree {
      * otherwise return an existing value
      */
     bool insert(const KeyType &k, const ValueType & v) {
-        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
-        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        // btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
     restart:
         // need yield CPU when come here at second time
@@ -1582,9 +1582,10 @@ class BPlusTree {
             versionParent = versionNode;
 
             node = inner->childAt(inner->lowerBound(k, keyComp_));
+            //prefetch((char *)node, sizeof(NodeMetaData));
             inner->checkOrRestart(versionNode, needRestart);
             if (needRestart) goto restart;
-            prefetch((char *)node, kPageSize);
+            
 
             versionNode = node->readLockOrRestart(needRestart);
             if (needRestart) goto restart;
@@ -1667,8 +1668,8 @@ class BPlusTree {
      * otherwise return an existing value
      */
     ValueType insert(const KeyType &k, const ValueType & v, bool *result) {
-        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
-        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        // btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
     restart:
         // need yield CPU when come here at second time
@@ -1739,9 +1740,10 @@ class BPlusTree {
             versionParent = versionNode;
 
             node = inner->childAt(inner->lowerBound(k, keyComp_));
+            //prefetch((char *)node, sizeof(NodeMetaData));
             inner->checkOrRestart(versionNode, needRestart);
             if (needRestart) goto restart;
-            prefetch((char *)node, kPageSize);
+            
 
             versionNode = node->readLockOrRestart(needRestart);
             if (needRestart) goto restart;
@@ -1826,8 +1828,8 @@ class BPlusTree {
      * otherwise, create a <k, v> and return v
      */
     ValueType getValue(const KeyType &k, std::function<ValueType (void)> createValue) {
-        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
-        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        // btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
     restart:
         // need yield CPU when come here at second time
@@ -1898,9 +1900,9 @@ class BPlusTree {
             versionParent = versionNode;
 
             node = inner->childAt(inner->lowerBound(k, keyComp_));
+            //prefetch((char *)node, sizeof(NodeMetaData));
             inner->checkOrRestart(versionNode, needRestart);
             if (needRestart) goto restart;
-            prefetch((char *)node, kPageSize);
 
             versionNode = node->readLockOrRestart(needRestart);
             if (needRestart) goto restart;
@@ -2016,8 +2018,8 @@ class BPlusTree {
      */
     void scan(const KeyType &lowKey, const KeyType &highKey, bool leftExist, bool rightExist,
               uint32_t limit, std::vector<KeyValuePair> &res) {
-        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
-        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        // btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
     restart:
         res.clear();
@@ -2048,7 +2050,7 @@ class BPlusTree {
             versionParent = versionNode;
             node = inner->childAt(inner->lowerBound(lowKey, keyComp_));
 
-            prefetch((char *)node, kPageSize);
+            //prefetch((char *)node, kPageSize);
             inner->checkOrRestart(versionNode, needRestart);
             if (needRestart) goto restart;
             versionNode = node->readLockOrRestart(needRestart);
@@ -2095,8 +2097,8 @@ class BPlusTree {
      */
     void scanForUpdate(const KeyType &startKey, std::function<bool(const KeyType &, ValueType &, bool)> processor) {
         bool leftExist = true;
-        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
-        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        // btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
         int leavesTraversed = 0;
         KeyType lowKey = startKey;
@@ -2128,7 +2130,7 @@ class BPlusTree {
             versionParent = versionNode;
             node = inner->childAt(inner->lowerBound(lowKey, keyComp_));
 
-            prefetch((char *)node, kPageSize);
+            //prefetch((char *)node, kPageSize);
             inner->checkOrRestart(versionNode, needRestart);
             if (needRestart) goto restart;
             versionNode = node->readLockOrRestart(needRestart);
@@ -2503,6 +2505,14 @@ class BPlusTree {
         return stats_.num_items / (maximumItems * 1.0);
     }
 
+    void EBREnter() {
+        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+    }
+
+    void EBRExit() {
+        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical();
+    }
+
    private:
     const KeyComparator keyComp_;
     const ValueComparator valueComp_;
@@ -2572,8 +2582,8 @@ class BPlusTree {
     }
 
     btreeolc::RemoveResult _remove_with_value_predicate(const KeyValuePair &element, std::function<btreeolc::RemovePredicateResult (const ValueType &)> predicate) {
-        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
-        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        // btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
         btreeolc::RemoveResult saved_result = btreeolc::RemoveResult::VALUE_NOT_SATISFYING_PREDICATE;
         bool result_saved = false;
@@ -2717,8 +2727,8 @@ class BPlusTree {
      * @param flag Delete key and all its corresponding values when flag is true
      */
     bool _remove(const KeyType &deleteKey, bool flag) {
-        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
-        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        // btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
         bool saved_success = false;
         bool result_saved = false;
@@ -2848,8 +2858,8 @@ class BPlusTree {
 
     
     bool _lookupForUpdate(const KeyType &key, std::function<void(const KeyType & key, ValueType & value)> update_processor) {
-        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
-        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        // btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
     restart:
         if (restartCount++) yield(restartCount);
@@ -2878,7 +2888,7 @@ class BPlusTree {
             versionParent = versionNode;
 
             node = inner->childAt(inner->lowerBound(key, keyComp_));
-            prefetch((char *)node, kPageSize);
+            prefetch((char *)node, sizeof(NodeMetaData));
             inner->checkOrRestart(versionNode, needRestart);
             if (needRestart) goto restart;
             versionNode = node->readLockOrRestart(needRestart);
@@ -2919,8 +2929,8 @@ class BPlusTree {
      * @param flag find key and it corresponding value when flag is true
      */
     bool _lookup(const KeyValuePair &element, ValueType &result, bool flag) {
-        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
-        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        // btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
     restart:
         if (restartCount++) yield(restartCount);
@@ -2949,7 +2959,7 @@ class BPlusTree {
             versionParent = versionNode;
 
             node = inner->childAt(inner->lowerBound(element.first, keyComp_));
-            prefetch((char *)node, kPageSize);
+            prefetch((char *)node, sizeof(NodeMetaData));
             inner->checkOrRestart(versionNode, needRestart);
             if (needRestart) goto restart;
             versionNode = node->readLockOrRestart(needRestart);
@@ -2987,8 +2997,6 @@ class BPlusTree {
      * find key and it's corresponding value 
      */
     bool _lookup(const KeyType & key, ValueType &result) {
-        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
-        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
     restart:
         if (restartCount++) yield(restartCount);
@@ -3017,7 +3025,7 @@ class BPlusTree {
             versionParent = versionNode;
 
             node = inner->childAt(inner->lowerBound(key, keyComp_));
-            prefetch((char *)node, kPageSize);
+            prefetch((char *)node, sizeof(NodeMetaData));
             inner->checkOrRestart(versionNode, needRestart);
             if (needRestart) goto restart;
             versionNode = node->readLockOrRestart(needRestart);
