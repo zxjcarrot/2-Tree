@@ -12,6 +12,7 @@
 #include "twotree/PartitionedBTree.hpp"
 #include "twotree/TrieBTree.hpp"
 #include "twotree/TwoBTree.hpp"
+#include "twotree/ConcurrentTwoBTree.hpp"
 #include "anti-caching/AntiCache.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
@@ -84,7 +85,7 @@ int main(int argc, char** argv)
    double cached_btree_size_gib = 0;
    if (FLAGS_cached_btree == 3) {
       cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
-   } else if (FLAGS_cached_btree == 1 || FLAGS_cached_btree == 2 || FLAGS_cached_btree == 5 || FLAGS_cached_btree == 7){
+   } else if (FLAGS_cached_btree == 1 || FLAGS_cached_btree == 2 || FLAGS_cached_btree == 5 || FLAGS_cached_btree == 7 || FLAGS_cached_btree == 8){
       cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
    } else if (FLAGS_cached_btree == 4 || FLAGS_cached_btree == 6) { // rocksdb with row cache
@@ -135,6 +136,8 @@ int main(int argc, char** argv)
       adapter.reset(new AntiCacheAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib));
    } else if (FLAGS_cached_btree == 7) {
       adapter.reset(new BTreeCachedCompressedVSAdapter<YCSBKey, YCSBPayload, 4096>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_cached_btree == 8) {
+      adapter.reset(new ConcurrentBTreeBTree<YCSBKey, YCSBPayload, 2048>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
    }
 
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
@@ -208,7 +211,7 @@ int main(int argc, char** argv)
    atomic<bool> keep_running = true;
    atomic<u64> running_threads_counter = 0;
    atomic<u64> txs = 0;
-   adapter->evict_all();
+   //adapter->evict_all();
 
    cout << "All evicted" << endl;
    begin = chrono::high_resolution_clock::now();

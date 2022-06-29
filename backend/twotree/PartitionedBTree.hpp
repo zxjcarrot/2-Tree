@@ -139,11 +139,11 @@ struct BTreeVSHotColdPartitionedAdapter : BTreeInterface<Key, Payload> {
 
    void evict_all() override {
       while (hot_partition_item_count > 0) {
-         evict_one();
+         evict_a_bunch();
       }
    }
 
-   void evict_one() {
+   void evict_a_bunch() {
       Key start_key = clock_hand;
       if (start_key == std::numeric_limits<Key>::max()) {
          start_key = tag_with_hot_bit(std::numeric_limits<Key>::min());
@@ -158,7 +158,7 @@ struct BTreeVSHotColdPartitionedAdapter : BTreeInterface<Key, Payload> {
       assert(is_in_hot_partition(start_key));
       auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
-      btree.scanAsc(key_bytes, fold(key_bytes, start_key),
+      btree.scanAscExclusive(key_bytes, fold(key_bytes, start_key),
       [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
          auto real_key = unfold(*(Key*)(key));
          assert(key_length == sizeof(Key));
@@ -178,7 +178,7 @@ struct BTreeVSHotColdPartitionedAdapter : BTreeInterface<Key, Payload> {
          victim_found = true;
          evict_keys.push_back(real_key);
          evict_payloads.emplace_back(*tp);
-         if (evict_keys.size() >= 10) {
+         if (evict_keys.size() >= 100) {
             return false;
          }
          return true;
@@ -220,7 +220,7 @@ struct BTreeVSHotColdPartitionedAdapter : BTreeInterface<Key, Payload> {
 
    void evict_till_safe() {
       while (cache_under_pressure()) {
-         evict_one();
+         evict_a_bunch();
       }
    }
 
@@ -240,7 +240,7 @@ struct BTreeVSHotColdPartitionedAdapter : BTreeInterface<Key, Payload> {
       // try hot partition first
       auto hot_key = tag_with_hot_bit(k);
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
-      auto res = btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+      auto res = btree.lookupForUpdate(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          tp->referenced = true;
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 

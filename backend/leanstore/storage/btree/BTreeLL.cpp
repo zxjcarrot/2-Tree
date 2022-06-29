@@ -54,6 +54,44 @@ OP_RESULT BTreeLL::lookup(u8* key, u16 key_length, function<void(const u8*, u16)
       }
    }
 }
+
+OP_RESULT BTreeLL::lookupForUpdate(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback)
+{
+   volatile u32 mask = 1;
+   while (true) {
+      jumpmuTry()
+      {
+         HybridPageGuard<BTreeNode> leaf;
+         findLeafCanJump<LATCH_FALLBACK_MODE::EXCLUSIVE>(leaf, key, key_length);
+         // -------------------------------------------------------------------------------------
+         DEBUG_BLOCK()
+         {
+            s16 sanity_check_result = leaf->compareKeyWithBoundaries(key, key_length);
+            leaf.recheck();
+            if (sanity_check_result != 0) {
+               cout << leaf->count << endl;
+            }
+            ensure(sanity_check_result == 0);
+         }
+         // -------------------------------------------------------------------------------------
+         s16 pos = leaf->lowerBound<true>(key, key_length);
+         if (pos != -1) {
+            payload_callback(leaf->getPayload(pos), leaf->getPayloadLength(pos));
+            leaf.recheck();
+            jumpmu_return OP_RESULT::OK;
+         } else {
+            leaf.recheck();
+            //raise(SIGTRAP);
+            jumpmu_return OP_RESULT::NOT_FOUND;
+         }
+      }
+      jumpmuCatch()
+      {
+         BACKOFF_STRATEGIES()
+         WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
+      }
+   }
+}
 // -------------------------------------------------------------------------------------
 OP_RESULT BTreeLL::scanAsc(u8* start_key,
                            u16 key_length,
@@ -64,6 +102,34 @@ OP_RESULT BTreeLL::scanAsc(u8* start_key,
    jumpmuTry()
    {
       BTreeSharedIterator iterator(*static_cast<BTreeGeneric*>(this));
+      auto ret = iterator.seek(key);
+      if (ret != OP_RESULT::OK) {
+         jumpmu_return ret;
+      }
+      while (true) {
+         auto key = iterator.key();
+         auto value = iterator.value();
+         if (!callback(key.data(), key.length(), value.data(), value.length())) {
+            jumpmu_return OP_RESULT::OK;
+         } else {
+            if (iterator.next() != OP_RESULT::OK) {
+               jumpmu_return OP_RESULT::NOT_FOUND;
+            }
+         }
+      }
+   }
+   jumpmuCatch() { ensure(false); }
+}
+
+OP_RESULT BTreeLL::scanAscExclusive(u8* start_key,
+                           u16 key_length,
+                           std::function<bool(const u8* key, u16 key_length, const u8* payload, u16 payload_length)> callback,
+                           function<void()>)
+{
+   Slice key(start_key, key_length);
+   jumpmuTry()
+   {
+      BTreeExclusiveIterator iterator(*static_cast<BTreeGeneric*>(this));
       auto ret = iterator.seek(key);
       if (ret != OP_RESULT::OK) {
          jumpmu_return ret;

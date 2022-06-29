@@ -73,13 +73,13 @@ void singleInsertTest(btree_t<KeyType, leaf_size, inner_size> &btree) {
     std::random_shuffle(keys.begin(), keys.end());
     for (int i = 0; i < num_keys; i++) {
         KeyType k{keys[i]};
-        Value res = btree.insert(k, keys[i]);
-        ASSERT_EQ(res.getValue(), keys[i]);
+        bool res = btree.insert(k, keys[i]);
+        ASSERT_EQ(res, true);
     }
     for (int i = 0; i < 100000; i++) {
         KeyType k{keys[i]};
-        Value res = btree.insert(k, 0);
-        ASSERT_EQ(res.getValue(), keys[i]); // except insert failed
+        bool res = btree.insert(k, 0);
+        ASSERT_EQ(res, false); // except insert failed
         delete[] k.transfer();
     }
     auto kv_size = sizeof(KeyType) + sizeof(Value);
@@ -243,8 +243,9 @@ void multiScanDelInsert1Test(btree_t<KeyType, leaf_size, inner_size> &btree) {
     auto addFunc = [&btree](int start, int end) {
         vector<bool> res(end - start, false);
         for (int i = 0; i < (end - start) / 2; i++) {
-            res[i] = btree.insert(i + start, i + start).getValue() == -1;
-            res[end - i - 1 - start] = btree.insert(end - i - 1, end - i - 1).getValue() == -1;
+            bool ret;
+            res[i] = btree.insert(i + start, i + start, &ret).getValue() == -1;
+            res[end - i - 1 - start] = btree.insert(end - i - 1, end - i - 1, &ret).getValue() == -1;
         }
         return res;
     };
@@ -433,8 +434,8 @@ void ConcurrentTest_QueryDelete() {
         // 1. insert first
         for (int i = 0; i < kElementCount; ++i) {
             KeyType k{i};
-            Value res = btree.insert(k, i);
-            ASSERT_EQ(res.getValue(), i);
+            bool res = btree.insert(k, i);
+            ASSERT_EQ(res, true);
         }
         // 2. spawn a thread to delete
         std::thread delete_thread{[&btree]() {
@@ -492,8 +493,8 @@ void ConcurrentTest_QueryInsert() {
             // std::cout << "begin insert...\n";
             for (int i = 0; i < kElementCount; ++i) {
                 KeyType k{i};
-                Value res = btree.insert(k, i);
-                ASSERT_EQ(res.getValue(), i);
+                bool res = btree.insert(k, i);
+                ASSERT_EQ(res, true);
             }
             // std::cout << "finish insert\n";
         }};
@@ -548,8 +549,8 @@ void ConcurrentTest_DeleteDelete() {
         // 1. first insert
         for (int i = 0; i < kElementCount; ++i) {
             KeyType k{i};
-            Value res = btree.insert(k, i);
-            ASSERT_EQ(res.getValue(), i);
+            bool res = btree.insert(k, i);
+            ASSERT_EQ(res, true);
         }
 
         // 2. then spawn 4 threads to delete
@@ -595,8 +596,8 @@ void ConcurrentTest_DeleteDeletePredicate() {
         // 1. first insert
         for (int i = 0; i < kElementCount; ++i) {
             KeyType k{i};
-            Value res = btree.insert(k, i);
-            ASSERT_EQ(res.getValue(), i);
+            bool res = btree.insert(k, i);
+            ASSERT_EQ(res, true);
         }
 
         // 2. then spawn 4 threads to delete
@@ -645,12 +646,9 @@ void ConcurrentTest_InsertInsert() {
             insert_threads.emplace_back([&btree](int id) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(id * 10));
                 for (int i = id; i < kElementCount; i += 4) {
-                    bool ret;
                     KeyType k{i};
-                    Value v = btree.insert(k, i, &ret);
-                    if (ret) {
-                        ASSERT_EQ(v.getValue(), i);
-                    } else {
+                    bool ret = btree.insert(k, i);
+                    if (!ret) {
                         delete[] k.transfer();
                     }
                 }
@@ -740,7 +738,6 @@ void ConcurrentTest_InsertDeleteScanForUpdate() {
         for (int i = 0; i < 4; ++i) {
             insert_threads[i].join();
         }
-
 
         btree.scanForUpdate(0, [](const KeyType & k, Value & v, bool lastItem){
             v.setValue(0);
@@ -921,9 +918,10 @@ void ConcurrentTest_InsertDeleteQuery() {
         ConcurrentTest_##TestType<NonTrivialKey<type>, page_size>();                \
     }
 
+ConcurrencyTrivialKeyTest(QueryDelete, int, 1024);
+
 ConcurrencyTrivialKeyTest(InsertDeleteScanForUpdate, int, 4096);
 
-ConcurrencyTrivialKeyTest(QueryDelete, int, 1024);
 //ConcurrencyNonTrivialKeyTest(QueryDelete, int, 1024);
 
 ConcurrencyTrivialKeyTest(QueryInsert, int, 1024);

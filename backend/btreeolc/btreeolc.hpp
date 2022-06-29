@@ -139,10 +139,10 @@ enum class RemovePredicateResult{ GOOD = 0, VALUE_HAS_OTHER_REFERENCE, VALUE_NOT
 enum class RemoveResult{ GOOD = 0, KEY_NOT_FOUND, VALUE_HAS_OTHER_REFERENCE, VALUE_NOT_SATISFYING_PREDICATE};
 
 static void prefetch(char *ptr, size_t len) {
-    if (ptr == nullptr) return;
-    for (char *p = ptr; p < ptr + len; p += 64) {
-        __builtin_prefetch(p);
-    }
+    // if (ptr == nullptr) return;
+    // for (char *p = ptr; p < ptr + len; p += 64) {
+    //     __builtin_prefetch(p);
+    // }
 }
 
 /**
@@ -155,7 +155,7 @@ static void prefetch(char *ptr, size_t len) {
  * @param ValueComparator a==b 0, a!=b 1
  */
 template <class KeyType, class ValueType, class KeyComparator, class ValueComparator,
-          std::size_t UpdateThreshold = 10, uint64_t LeafPageSize = kLeafPageSize,
+          std::size_t UpdateThreshold = 1024, uint64_t LeafPageSize = kLeafPageSize,
           uint64_t InnerPageSize = kPageSize>
 class BPlusTree {
    public:
@@ -369,7 +369,9 @@ class BPlusTree {
             assert(writerId == RWSpinLatchThreadId); // Only write-locked by me
             assert(readerCount == 0);
             uint64_t neww = makeNewWord(1, 0);
-            return word.compare_exchange_strong(w, neww); // Try acquire write lock when we are the last reader
+            word.store(neww);
+            return true;
+            //return word.compare_exchange_strong(w, neww); // Try acquire write lock when we are the last reader
         }
 
         bool tryAcqurieWrite() {
@@ -392,7 +394,9 @@ class BPlusTree {
             assert(writerId == 0);
             assert(readerCount > 0);
             uint64_t neww = makeNewWord(readerCount - 1, 0);
-            return word.compare_exchange_strong(w, neww);
+            word.fetch_sub(1);
+            return true;
+            //return word.compare_exchange_strong(w, neww);
         }
 
         bool tryReleaseWrite() {
@@ -402,7 +406,9 @@ class BPlusTree {
             assert(writerId == RWSpinLatchThreadId);
             assert(readerCount == 0);
             uint64_t neww = makeNewWord(0, 0);
-            return word.compare_exchange_strong(w, neww);
+            word.store(0);
+            return true;
+            //return word.compare_exchange_strong(w, neww);
         }
 
         inline uint64_t makeNewWord(uint32_t readerCount, uint32_t writerId) {
@@ -520,9 +526,9 @@ class BPlusTree {
          *
          * return true if erase successfully
          */
-        bool erase(int pos, const KeyValuePair &element, const KeyComparator &keyComp_,
+        bool erase(int pos, const KeyComparator &keyComp_,
                    const ValueComparator &valueComp_, bool flag) {
-            assert(keyComp_(keys_[pos], element.first) == 0);
+            //assert(keyComp_(keys_[pos], element.first) == 0);
             bool res = false;
 
             __adjust_elements_in_erase(pos);
@@ -537,10 +543,12 @@ class BPlusTree {
         template <typename T = KeyType>
         typename std::enable_if<std::is_trivial<T>::value == true, void>::type
         __adjust_elements_in_erase(int pos) {
-            for (uint16_t i = pos; i < this->getCount() - 1u; i++) {
-                keys_[i] = keys_[i + 1];
-                values_[i] = values_[i + 1];
-            }
+            memmove(keys_ + pos, keys_ + pos + 1, sizeof(KeyType) * (this->getCount() - pos - 1));
+            memmove(values_ + pos, values_ + pos + 1, sizeof(ValueType) * (this->getCount() - pos - 1));
+            // for (uint16_t i = pos; i < this->getCount() - 1u; i++) {
+            //     keys_[i] = keys_[i + 1];
+            //     values_[i] = values_[i + 1];
+            // }
             keys_[this->getCount() - 1].~KeyType();
             values_[this->getCount() - 1].~ValueType();
             // call dtor manually
@@ -709,6 +717,39 @@ class BPlusTree {
                 this->setCount(this->getCount() + 1);
                 success = true;
                 return v;
+            }
+        }
+
+
+        /**
+         * return v (in the b+tree) and false , if <k, v> already exists
+         * otherwise return v and true
+         */
+        bool insert(const KeyType &k, const ValueType & v, const KeyComparator &keyComp_) {
+            assert(this->getCount() < maxEntries);
+            unsigned pos = -1;
+            pos = lowerBound(k, keyComp_);
+            if (pos < this->getCount() && keyComp_(keys_[pos], k) == 0) {
+                // already exists
+                return false;
+            } else {
+                if (pos == this->getCount()) {
+                    // Placement new
+                    new (&keys_[this->getCount()]) KeyType{k};
+                    new (&values_[this->getCount()]) ValueType{v};
+                } else {
+                    // Placement new
+                    new (&keys_[this->getCount()]) KeyType{keys_[this->getCount() - 1]};
+                    new (&values_[this->getCount()]) ValueType{values_[this->getCount() - 1]};
+                    for (uint16_t i = this->getCount() - 1; i > pos; i--) {
+                        keys_[i] = keys_[i - 1];
+                        values_[i] = values_[i - 1];
+                    }
+                    keys_[pos] = k;
+                    values_[pos] = v;
+                }
+                this->setCount(this->getCount() + 1);
+                return true;
             }
         }
 
@@ -926,18 +967,25 @@ class BPlusTree {
         bool hasEnoughSpace(int need) { return this->getCount() + need + 1 < (int)maxEntries; }
 
         unsigned lowerBound(const KeyType &k, const KeyComparator &keyComp_) {
-            int left = 0, right = this->getCount() - 1;
-            while (left <= right) {
-                int mid = left + (right - left) / 2;
-                int comp = keyComp_(keyAt(mid), k);
-                if (comp == 0)
-                    return mid;
-                else if (comp < 0)
-                    left = mid + 1;
-                else
-                    right = mid - 1;
+            if (this->getCount() < 128) {
+                int left = 0;
+                while (left < this->getCount() && keyComp_(keyAt(left), k) < 0) ++left;
+                return left;
+            } else {
+
+                int left = 0, right = this->getCount() - 1;
+                while (left <= right) {
+                    int mid = left + (right - left) / 2;
+                    int comp = keyComp_(keyAt(mid), k);
+                    if (comp == 0)
+                        return mid;
+                    else if (comp < 0)
+                        left = mid + 1;
+                    else
+                        right = mid - 1;
+                }
+                return left;
             }
-            return left;
         }
 
         bool needMerge() { return this->getCount() / (maxEntries + 0.0) < kMergeThreshold; }
@@ -1456,11 +1504,169 @@ class BPlusTree {
         EBR<UpdateThreshold, Deallocator>::getLocalThreadData().addRetiredNode(ptr);
     }
 
+
     /**
-     * return v if insert successfult
+     * return v if insert successful
      * otherwise return an existing value
      */
-    ValueType insert(const KeyType &k, ValueType v, bool *result = nullptr) {
+    bool insert(const KeyType &k, const ValueType & v) {
+        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        int restartCount = 0;
+    restart:
+        // need yield CPU when come here at second time
+        if (restartCount++) yield(restartCount, true);
+        bool needRestart = false;
+
+        // Current node
+        NodeBase *node = root_;
+        uint64_t versionNode = node->readLockOrRestart(needRestart);
+        if (needRestart || (node != root_)) {
+            node->readUnlockOrRestart(versionNode, needRestart);
+            goto restart;
+        }
+
+        // Parent of current node
+        BTreeInner *parent = nullptr;
+        uint64_t versionParent = 0;
+
+        while (node->getType() == NodeType::BTreeInner) {
+            auto inner = static_cast<BTreeInner *>(node);
+            // Split eagerly if full
+            if (inner->isFull()) {
+                // Lock
+                if (parent) {
+                    parent->upgradeToWriteLockOrRestart(versionParent, needRestart);
+                    if (needRestart) goto restart;
+                }
+                node->upgradeToWriteLockOrRestart(versionNode, needRestart);
+                if (needRestart) {
+                    if (parent) parent->writeUnlock();
+                    goto restart;
+                }
+                // parent is null and node isn't root
+                if (!parent && (node != root_)) {
+                    // there's a new parent
+                    node->writeUnlock();
+                    goto restart;
+                }
+                // Split
+                KeyType sep;
+                BTreeInner *newInner = inner->split(sep);
+                stats_.inner_nodes++;
+                if (parent)
+                    parent->insert(sep, newInner, keyComp_);
+                else
+                    makeRoot(sep, inner, newInner);
+
+                if (parent) {
+                    parent->downgradeToReadLock(versionParent);
+                }
+
+                if (keyComp_(k, sep) > 0) {
+                    inner->writeUnlock();
+                    inner = newInner;
+                    versionNode = newInner->readLockOrRestart(needRestart);
+                    if (needRestart) goto restart;
+                } else {
+                    node->downgradeToReadLock(versionNode);
+                }
+            }
+
+            if (parent) {
+                parent->readUnlockOrRestart(versionParent, needRestart);
+                if (needRestart) goto restart;
+            }
+
+            parent = inner;
+            versionParent = versionNode;
+
+            node = inner->childAt(inner->lowerBound(k, keyComp_));
+            inner->checkOrRestart(versionNode, needRestart);
+            if (needRestart) goto restart;
+            prefetch((char *)node, kPageSize);
+
+            versionNode = node->readLockOrRestart(needRestart);
+            if (needRestart) goto restart;
+        }  // while
+
+        auto leaf = static_cast<BTreeLeaf *>(node);
+        ValueType insertRes;
+        bool success;
+
+        // Split leaf if full
+        if (leaf->getCount() == leaf->maxEntries) {
+            // Lock
+            if (parent) {
+                parent->upgradeToWriteLockOrRestart(versionParent, needRestart);
+                if (needRestart) {
+                    node->readUnlockOrRestart(versionNode, needRestart);
+                    goto restart;
+                }
+            }
+            node->upgradeToWriteLockOrRestart(versionNode, needRestart);
+            if (needRestart) {
+                node->readUnlockOrRestart(versionNode, needRestart);
+                if (parent) parent->writeUnlock();
+                goto restart;
+            }
+            if (!parent && (node != root_)) {
+                // there's a new parent
+                node->writeUnlock();
+                goto restart;
+            }
+            // Split
+            KeyType sep;
+            BTreeLeaf *newLeaf = leaf->split(sep);
+            stats_.leaf_nodes++;
+            if (keyComp_(k, sep) > 0) {
+                success = newLeaf->insert(k, v, keyComp_);
+            } else {
+                success = leaf->insert(k, v, keyComp_);
+            }
+
+            if (success) {
+                stats_.num_items++;
+            }
+
+            if (parent)
+                parent->insert(sep, newLeaf, keyComp_);
+            else
+                makeRoot(sep, leaf, newLeaf);
+            // Unlock and restart
+            node->writeUnlock();
+            if (parent) parent->writeUnlock();
+
+            return success;  // success
+        } else {
+            // only lock leaf node
+            node->upgradeToWriteLockOrRestart(versionNode, needRestart);
+            if (needRestart) {
+                node->readUnlockOrRestart(versionNode, needRestart);
+                goto restart;
+            }
+            if (parent) {
+                parent->readUnlockOrRestart(versionParent, needRestart);
+                if (needRestart) {
+                    node->writeUnlock();
+                    goto restart;
+                }
+            }
+            success = leaf->insert(k, v, keyComp_);
+            node->writeUnlock();
+            // node->readUnlockOrRestart(versionParent, needRestart);
+            if (success) {
+                stats_.num_items++;
+            }
+            return success;  // success
+        }
+    }
+
+    /**
+     * return v if insert successful
+     * otherwise return an existing value
+     */
+    ValueType insert(const KeyType &k, const ValueType & v, bool *result) {
         EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
         btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
@@ -1584,6 +1790,9 @@ class BPlusTree {
             node->writeUnlock();
             if (parent) parent->writeUnlock();
 
+            if (success) {
+                stats_.num_items++;
+            }
             if (result) *result = success;
             return insertRes;  // success
         } else {
@@ -1605,6 +1814,9 @@ class BPlusTree {
             // node->readUnlockOrRestart(versionParent, needRestart);
 
             if (result) *result = success;
+            if (success) {
+                stats_.num_items++;
+            }
             return insertRes;  // success
         }
     }
@@ -1731,6 +1943,9 @@ class BPlusTree {
                 insertRes = leaf->getValue(k, keyComp_, createValue, success);
             }
 
+            if (success) {
+                stats_.num_items++;
+            }
             if (parent)
                 parent->insert(sep, newLeaf, keyComp_);
             else
@@ -1754,6 +1969,9 @@ class BPlusTree {
                 }
             }
             insertRes = leaf->getValue(k, keyComp_, createValue, success);
+            if (success) {
+                stats_.num_items++;
+            }
             node->writeUnlock();
             return insertRes;  // success
         }
@@ -1775,15 +1993,14 @@ class BPlusTree {
      * return true if key exists and delete successfully
      */
     bool remove(const KeyType &key) {
-        ValueType v;
-        return _remove(std::make_pair(key, v), true);
+        return _remove(key, true);
     }
 
     /**
      * Delete <key, value>
      * return true if <key, value> exists and delete successfully
      */
-    bool remove(const KeyType &key, ValueType value) { return _remove({key, value}, false); }
+    bool remove(const KeyType &key, ValueType value) { return _remove(key, false); }
 
     /**
      * @param leftExist: Left interval is `[` when leftExist is true, otherwise '('
@@ -1931,18 +2148,18 @@ class BPlusTree {
             }
             goto restart;
         }
+        bool quit = false;
         BTreeLeaf * nextLeaf = leaf->next_;
         for (unsigned p = pos; p < leaf->getCount(); ++p) {
             bool lastItem = nextLeaf == nullptr && p + 1 == leaf->getCount();
-            bool quit = processor(leaf->keys_[p], leaf->values_[p], lastItem);
-            if (quit) {
+            bool end = processor(leaf->keys_[p], leaf->values_[p], lastItem);
+            if (end) {
+                quit = true;
                 break;
             }
         }
         leavesTraversed++;
-        bool quit = false;
-
-        if (nextLeaf != nullptr) {
+        if (quit == false && nextLeaf != nullptr) {
             versionNode = nextLeaf->readLockOrRestart(needRestart);
             assert(needRestart == false);
             if (nextLeaf->getCount() > 0) {
@@ -2226,11 +2443,18 @@ class BPlusTree {
     /**
      * find key and all its corresponding values
      * return true if key exists
-     * NOTE: lookup only append data to result
      */
     bool lookup(const KeyType &key, ValueType &result) {
-        ValueType value;
-        return _lookup({key, value}, result, true);
+        return _lookup(key, result);
+    }
+    
+
+    /**
+     * find key and all its corresponding values
+     * return true if key exists
+     */
+    bool lookupForUpdate(const KeyType &key, std::function<void(const KeyType & key, ValueType & value)> update_processor) {
+        return _lookupForUpdate(key, update_processor);
     }
 
     /**
@@ -2269,6 +2493,16 @@ class BPlusTree {
         return stats_.leaf_nodes.load();
     }
 
+    std::size_t size() const {
+        return stats_.num_items;
+    }
+
+    double getAverageFillFactor() const {
+        auto numLeaves = getNumLeafNodes();
+        auto maximumItems = numLeaves * BTreeLeaf::maxEntries;
+        return stats_.num_items / (maximumItems * 1.0);
+    }
+
    private:
     const KeyComparator keyComp_;
     const ValueComparator valueComp_;
@@ -2280,7 +2514,10 @@ class BPlusTree {
 
     struct tree_stats{
         std::atomic<uint64_t> inner_nodes{0};
+        char pad1_[64];    
         std::atomic<uint64_t> leaf_nodes{0};
+        char pad2_[64];    
+        std::atomic<uint64_t> num_items{0};
     };
     char pad_[64];
     tree_stats stats_;
@@ -2413,8 +2650,9 @@ class BPlusTree {
                 auto predicate_result = predicate(value);
 
                 if (predicate_result == btreeolc::RemovePredicateResult::GOOD) {
-                    leafNode->erase(pos, element, keyComp_, valueComp_, false);
+                    leafNode->erase(pos, keyComp_, valueComp_, false);
                     result = btreeolc::RemoveResult::GOOD;
+                    stats_.num_items--;
                 } else if (predicate_result == btreeolc::RemovePredicateResult::VALUE_HAS_OTHER_REFERENCE){
                     result = btreeolc::RemoveResult::VALUE_HAS_OTHER_REFERENCE;
                 } else {
@@ -2478,7 +2716,7 @@ class BPlusTree {
     /**
      * @param flag Delete key and all its corresponding values when flag is true
      */
-    bool _remove(const KeyValuePair &element, bool flag) {
+    bool _remove(const KeyType &deleteKey, bool flag) {
         EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
         btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
@@ -2516,7 +2754,7 @@ class BPlusTree {
             parent = inner;
             versionParent = versionNode;
 
-            unsigned pos = inner->lowerBound(element.first, keyComp_);
+            unsigned pos = inner->lowerBound(deleteKey, keyComp_);
             node = inner->childAt(pos);
             inner->checkOrRestart(versionNode, needRestart);
             if (needRestart) {
@@ -2532,14 +2770,14 @@ class BPlusTree {
 
         // reach the leaf node
         BTreeLeaf *leafNode = static_cast<BTreeLeaf *>(node);
-        unsigned pos = leafNode->lowerBound(element.first, keyComp_);
+        unsigned pos = leafNode->lowerBound(deleteKey, keyComp_);
         bool success = false, leafNeedMerge = false;
         if (pos < leafNode->getCount() && result_saved == false) {
             //const KeyValuePair &kv = leafNode->data_[pos];
             const KeyType & key = leafNode->keys_[pos];
             //const ValueType & value = leafNode->values_[pos];
             // the leaf node contains the key
-            if (keyComp_(key, element.first) == 0) {
+            if (keyComp_(key, deleteKey) == 0) {
                 leafNode->upgradeToWriteLockOrRestart(versionNode, needRestart);
                 if (needRestart) {
                     leafNode->readUnlockOrRestart(versionNode, needRestart);
@@ -2553,7 +2791,10 @@ class BPlusTree {
                         goto restart;
                     }
                 }
-                success = leafNode->erase(pos, element, keyComp_, valueComp_, flag);
+                success = leafNode->erase(pos, keyComp_, valueComp_, flag);
+                if (success) {
+                    stats_.num_items--;
+                }
                 leafNeedMerge = leafNode->needMerge();
                 leafNode->downgradeToReadLock(versionNode);
 
@@ -2603,6 +2844,75 @@ class BPlusTree {
 
         assert(result_saved);
         return saved_success;
+    }
+
+    
+    bool _lookupForUpdate(const KeyType &key, std::function<void(const KeyType & key, ValueType & value)> update_processor) {
+        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        int restartCount = 0;
+    restart:
+        if (restartCount++) yield(restartCount);
+        bool needRestart = false;
+
+        NodeBase *node = root_;
+        uint64_t versionNode = node->readLockOrRestart(needRestart);
+        if (needRestart || (node != root_)){
+            node->readUnlockOrRestart(versionNode, needRestart);
+            goto restart;
+        }
+
+        // Parent of current node
+        BTreeInner *parent = nullptr;
+        uint64_t versionParent = 0;
+
+        while (node->getType() == NodeType::BTreeInner) {
+            auto inner = static_cast<BTreeInner *>(node);
+
+            if (parent) {
+                parent->readUnlockOrRestart(versionParent, needRestart);
+                if (needRestart) goto restart;
+            }
+
+            parent = inner;
+            versionParent = versionNode;
+
+            node = inner->childAt(inner->lowerBound(key, keyComp_));
+            prefetch((char *)node, kPageSize);
+            inner->checkOrRestart(versionNode, needRestart);
+            if (needRestart) goto restart;
+            versionNode = node->readLockOrRestart(needRestart);
+            if (needRestart) goto restart;
+        }
+        node->checkOrRestart(versionNode, needRestart);
+        if (needRestart) goto restart;
+
+        auto leaf = static_cast<BTreeLeaf *>(node);
+        leaf->upgradeToWriteLockOrRestart(versionNode, needRestart);
+        // Optimization: do the search before taking the write lock.
+        if (needRestart) {
+            leaf->readUnlockOrRestart(versionNode, needRestart);
+            goto restart;
+        }
+        if (parent) {
+            // check the version only, don't call `readUnlockOrRestart`
+            parent->checkOrRestart(versionParent, needRestart);
+            if (needRestart) {
+                leaf->writeUnlock();
+                goto restart;
+            }
+        }
+
+        unsigned pos = leaf->lowerBound(key, keyComp_);
+
+        bool success = false;
+        if ((pos < leaf->getCount()) && keyComp_(leaf->keys_[pos], key) == 0) {
+            success = true;
+            update_processor(leaf->keys_[pos], leaf->values_[pos]);
+        }
+
+        leaf->writeUnlock();
+        return success;
     }
 
     /**
@@ -2660,6 +2970,67 @@ class BPlusTree {
                     result = leaf->values_[pos];
                 }
             }
+        }
+        if (parent) {
+            parent->readUnlockOrRestart(versionParent, needRestart);
+            if (needRestart) {
+                leaf->readUnlockOrRestart(versionNode, needRestart);
+                goto restart;
+            } 
+        }
+        node->readUnlockOrRestart(versionNode, needRestart);
+        if (needRestart) goto restart;
+        return success;
+    }
+
+    /**
+     * find key and it's corresponding value 
+     */
+    bool _lookup(const KeyType & key, ValueType &result) {
+        EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
+        btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
+        int restartCount = 0;
+    restart:
+        if (restartCount++) yield(restartCount);
+        bool needRestart = false;
+
+        NodeBase *node = root_;
+        uint64_t versionNode = node->readLockOrRestart(needRestart);
+        if (needRestart || (node != root_)){
+            node->readUnlockOrRestart(versionNode, needRestart);
+            goto restart;
+        }
+
+        // Parent of current node
+        BTreeInner *parent = nullptr;
+        uint64_t versionParent = 0;
+
+        while (node->getType() == NodeType::BTreeInner) {
+            auto inner = static_cast<BTreeInner *>(node);
+
+            if (parent) {
+                parent->readUnlockOrRestart(versionParent, needRestart);
+                if (needRestart) goto restart;
+            }
+
+            parent = inner;
+            versionParent = versionNode;
+
+            node = inner->childAt(inner->lowerBound(key, keyComp_));
+            prefetch((char *)node, kPageSize);
+            inner->checkOrRestart(versionNode, needRestart);
+            if (needRestart) goto restart;
+            versionNode = node->readLockOrRestart(needRestart);
+            if (needRestart) goto restart;
+        }
+        node->checkOrRestart(versionNode, needRestart);
+        if (needRestart) goto restart;
+        auto leaf = static_cast<BTreeLeaf *>(node);
+        unsigned pos = leaf->lowerBound(key, keyComp_);
+        bool success = false;
+        if ((pos < leaf->getCount()) && keyComp_(leaf->keys_[pos], key) == 0) {
+            success = true;
+            result = leaf->values_[pos];
         }
         if (parent) {
             parent->readUnlockOrRestart(versionParent, needRestart);

@@ -146,7 +146,9 @@ struct BytesPayload {
    BytesPayload() {}
    bool operator==(BytesPayload& other) { return (std::memcmp(value, other.value, sizeof(value)) == 0); }
    bool operator!=(BytesPayload& other) { return !(operator==(other)); }
-   BytesPayload(const BytesPayload& other) { std::memcpy(value, other.value, sizeof(value)); }
+   BytesPayload(const BytesPayload& other) { 
+      std::memcpy(value, other.value, sizeof(value)); 
+   }
    BytesPayload& operator=(const BytesPayload& other)
    {
       std::memcpy(value, other.value, sizeof(value));
