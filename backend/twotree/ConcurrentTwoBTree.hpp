@@ -324,7 +324,17 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
 
    void insert(Key k, Payload& v) override
    {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      if (index_op_iters == 0) {
+         cache.EBREnter();
+      }
+      DeferCode c([&, this](){
+         io_reads_now = WorkerCounters::myCounters().io_reads.load(); 
+         if (++index_op_iters >= ebr_exit_threshold) {
+            cache.EBRExit();
+            index_op_iters = 0;
+         }
+         }
+      );
       if (inclusive) {
          bool res = admit_element(k, v, true);
          assert(res);

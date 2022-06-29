@@ -44,7 +44,7 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
    uint64_t btree_buffer_hit = 0;
    DTID dt_id;
    std::size_t hot_partition_capacity_bytes;
-   std::size_t hot_partition_size_bytes = 0;
+   std::atomic<std::size_t> hot_partition_size_bytes{0};
    bool inclusive = false;
    static constexpr double eviction_threshold = 0.99;
    uint64_t eviction_items = 0;
@@ -56,6 +56,7 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
       Payload payload;
       bool modified = false;
       bool referenced = false;
+      bool inflight = false;
    };
    
    Key clock_hand = std::numeric_limits<Key>::max();
@@ -77,7 +78,7 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
       return key & ~(PartitionBitMask);
    }
 
-   BTreeVSHotColdPartitionedAdapter(leanstore::storage::btree::BTreeInterface& btree, DTID dt_id,  double hot_partition_size_gb, bool inclusive = false) : btree(btree), dt_id(dt_id), hot_partition_capacity_bytes(hot_partition_size_gb * 1024ULL * 1024ULL * 1024ULL), inclusive(inclusive) {
+   ConcurrentPartitionedLeanstore(leanstore::storage::btree::BTreeInterface& btree, DTID dt_id,  double hot_partition_size_gb, bool inclusive = false) : btree(btree), dt_id(dt_id), hot_partition_capacity_bytes(hot_partition_size_gb * 1024ULL * 1024ULL * 1024ULL), inclusive(inclusive) {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
    }
 
@@ -240,7 +241,7 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
       // try hot partition first
       auto hot_key = tag_with_hot_bit(k);
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
-      auto res = btree.lookupForUpdate(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+      bool found_in_cache = btree.lookupForUpdate(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          tp->referenced = true;
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
