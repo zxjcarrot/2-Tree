@@ -185,6 +185,9 @@ OP_RESULT BTreeLL::insert(u8* o_key, u16 o_key_length, u8* o_value, u16 o_value_
    {
       BTreeExclusiveIterator iterator(*static_cast<BTreeGeneric*>(this));
       auto ret = iterator.insertKV(key, value);
+      if (ret == OP_RESULT::DUPLICATE) {
+         jumpmu_return ret; 
+      }
       ensure(ret == OP_RESULT::OK);
       if (FLAGS_wal) {
          auto wal_entry = iterator.leaf.reserveWALEntry<WALInsert>(key.length() + value.length());

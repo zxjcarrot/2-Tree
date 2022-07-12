@@ -25,15 +25,18 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       std::cout << "RocksDB cache budget " << (block_cache_memory_budget_gib + row_cache_memory_budget_gib) << "gib" << std::endl;
       std::cout << "RocksDB write_buffer_size " << options.write_buffer_size << std::endl;
       std::cout << "RocksDB max_write_buffer_number " << options.max_write_buffer_number << std::endl;
+      options.write_buffer_size = 16 * 1024 * 1024;
+      std::size_t block_cache_size = (row_cache_memory_budget_gib + block_cache_memory_budget_gib) * 1024ULL * 1024ULL * 1024ULL - options.write_buffer_size * options.max_write_buffer_number;
+      std::cout << "RocksDB block cache size " << block_cache_size / 1024.0 /1024.0/1024 << " gib" << std::endl;
       rocksdb::DestroyDB(db_dir,options);
-      options.manual_wal_flush = false;
+      options.manual_wal_flush = true;
       options.use_direct_reads = true;
       options.create_if_missing = true;
       options.stats_dump_period_sec = 3000;
       options.compression = rocksdb::kNoCompression;
       options.use_direct_io_for_flush_and_compaction = true;
       rocksdb::BlockBasedTableOptions table_options;
-      table_options.block_cache = rocksdb::NewLRUCache((row_cache_memory_budget_gib + block_cache_memory_budget_gib) * 1024ULL * 1024ULL * 1024ULL - options.write_buffer_size * options.max_write_buffer_number, 0, false, 0);
+      table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true, 0);
       options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
       rocksdb::Status status =
          rocksdb::DB::Open(options, db_dir, &db);
@@ -60,9 +63,9 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       assert(sizeof(v) == value.size());
       memcpy(&v, value.data(), value.size());
       if (status == rocksdb::Status::OK()) {
-         if (should_migrate()) {
-            put(k, v);
-         }
+         // if (should_migrate()) {
+         //    put(k, v);
+         // }
          return true;
       }
       return false;

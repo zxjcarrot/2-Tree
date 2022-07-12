@@ -1,7 +1,10 @@
 #sh scripts/anticache_ycsb_hotspot.sh 
 #sh scripts/cached_trie_ycsb_hotspot.sh 
-#sh scripts/cached_btree_ycsb_hotspot.sh 
-sh scripts/lsmt_ycsb_hotspot.sh 
+
+sh scripts/concurrent_partitioned_leanstore_ycsb_hotspot.sh
+sh scripts/concurrent_btree_ycsb_hotspot.sh
+sh scripts/concurrent_twobtree_ycsb_hotspot.sh
+
 #sh scripts/btree_ycsb_hotspot.sh
 #sh scripts/cached_btree_ycsb_hotspot_lazy.sh 
 

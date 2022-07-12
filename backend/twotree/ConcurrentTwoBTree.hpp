@@ -150,25 +150,32 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
       std::vector<TaggedPayload> evict_payloads;
       cache.scanForUpdate(start_key, [&](const Key & key, TaggedPayload & payload, bool last_item) {
          clock_hand = key;
+         if (payload.inflight) { // skip inflight records
+            if (last_item) {
+               clock_hand = std::numeric_limits<Key>::max();
+               return true;
+            }
+            return false;
+         }
+         assert(payload.inflight == false);
          if (payload.referenced == true) {
             payload.referenced = false;
          } else {
             evict_keys.push_back(key);
-            assert(payload.inflight == false);
             payload.inflight = true;
             evict_payloads.push_back(payload);
-            evict_payloads.back().inflight = false;
          }
          if (last_item) {
             clock_hand = std::numeric_limits<Key>::max();
             return true;
          }
-         if (evict_payloads.size() > eviction_limit) { // evict a bunch of payloads at a time
+         if (evict_payloads.size() >= eviction_limit) { // evict a bunch of payloads at a time
             return true;
          }
          return false;
       });
 
+      in_eviction.store(false);
       for (size_t i = 0; i < evict_payloads.size(); ++i) {
          if (inclusive) {
             if (evict_payloads[i].modified) {
@@ -178,8 +185,19 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
             insert_btree(evict_keys[i], evict_payloads[i].payload);
          }
          bool res = cache.remove(evict_keys[i]);
+         if (res == false) {
+            assert(false);
+            TaggedPayload empty_payload;
+            bool res2 = cache.lookup(evict_keys[i], empty_payload);
+            bool res3 = false;
+            if (res2 == true) {
+               res3 = cache.remove(evict_keys[i]);
+            }
+            assert(res2 == false);
+         }
          assert(res == true);
       }
+      
    }
 
    void evict_till_safe() {
@@ -188,8 +206,7 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
             bool state = false;
             if (in_eviction.compare_exchange_strong(state, true)) {
                // Allow only one thread to perform the eviction
-               evict_a_bunch();
-               in_eviction.store(false);
+               evict_a_bunch();         
             }
          } else {
             std::this_thread::sleep_for(std::chrono::microseconds(10));
@@ -224,19 +241,19 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
       assert(found_in_cache);
    }
 
-   bool lookup(Key k, Payload& v) override
-   {
-      if (index_op_iters == 0) {
+   bool lookup_internal(Key k, Payload& v, bool from_update = false) {
+      if (from_update == false && index_op_iters == 0) {
          cache.EBREnter();
       }
       DeferCode c([&, this](){
          io_reads_now = WorkerCounters::myCounters().io_reads.load(); 
-         if (++index_op_iters >= ebr_exit_threshold) {
+         if (from_update == false && ++index_op_iters >= ebr_exit_threshold) {
             cache.EBRExit();
             index_op_iters = 0;
          }
          }
       );
+
       retry:
       bool inflight = false;
       bool found_in_cache = cache.lookupForUpdate(k, [&](const Key & key, TaggedPayload & payload){
@@ -293,6 +310,11 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
          assert(removeRes);
       }
       return res;
+   }
+
+   bool lookup(Key k, Payload& v) override
+   {
+      return lookup_internal(k, v, false);
    }
 
    void upsert_btree(Key k, Payload& v)
@@ -385,7 +407,7 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
       if (found_in_cache == false) {
          Payload empty_v;
          // on miss, perform a read first.
-         lookup(k, empty_v);
+         lookup_internal(k, empty_v, true);
          goto retry;
       }
 

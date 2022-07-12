@@ -175,19 +175,19 @@ class BPlusTree {
      * Its functionality is determined by the @RWLock parameter at construction.
      */
     struct NodeLock : public LatchBase {
-       bool isRWLock = false;
+       //bool isRWLock = false;
        public:
         NodeLock(bool isRWLock = false) {
-            this->isRWLock = isRWLock;
-            if (isRWLock) {
-                word = 0;              // RW Spin Lock Initialzation
-            } else {
+            // this->isRWLock = isRWLock;
+            // if (isRWLock) {
+            //     word = 0;              // RW Spin Lock Initialzation
+            // } else {
                 word = kLockMask * 2;  // Optimistic Lock Initialzation
-            }
+            //}
         }
 
         bool isLocked(uint64_t version) { 
-            assert(!isRWLock);
+            //assert(!isRWLock);
             return (version & kLockMask) != 0; 
         }
 
@@ -195,12 +195,14 @@ class BPlusTree {
          * acquire success and increase counter
          */
         uint64_t readLockOrRestart(bool &needRestart) {
-            if (isRWLock) {
-                acquireRead();
-                needRestart = false;
-                //OLTP_LOG_INFO(RWSpinLatchThreadId," readLockOrRestart on ", (uint64_t)this,  ", Readers: ",getReaderCount(word.load()));
-                return 0;
-            } else {
+            // if (isRWLock) {
+            //     assert(getReaderCount(word.load()) < 20);
+            //     acquireRead();
+            //     assert(getReaderCount(word.load()) < 20);
+            //     needRestart = false;
+            //     //OLTP_LOG_INFO(RWSpinLatchThreadId," readLockOrRestart on ", (uint64_t)this,  ", Readers: ",getReaderCount(word.load()));
+            //     return 0;
+            // } else {
                 uint64_t version;
                 version = word.load(std::memory_order_relaxed);
                 if (isLocked(version)) {
@@ -209,14 +211,16 @@ class BPlusTree {
                     _mm_pause();
                 }
                 return version;
-            }
+            //}
             
         }
 
         void iteratorEnter(bool &needRestart) {
-            if (isRWLock) {
-                acquireRead();
-            } else {
+            // if (isRWLock) {
+            //     assert(getReaderCount(word.load()) < 20);
+            //     acquireRead();
+            //     assert(getReaderCount(word.load()) < 20);
+            // } else {
                 uint64_t version;
                 version = word.load(std::memory_order_relaxed);
                 if (isLocked(version)) {
@@ -226,35 +230,41 @@ class BPlusTree {
                     return;
                 }
                 word.fetch_add(1);
-            }
+            //}
         }
 
         void iteratorLeave() {
-            if (isRWLock) {
-                releaseRead();
-            } else {
+            // if (isRWLock) {
+            //     assert(getReaderCount(word.load()) < 20);
+            //     releaseRead();
+            //     assert(getReaderCount(word.load()) < 20);
+            // } else {
                 word.fetch_sub(1);
-            }
+            //}
         }
 
         void writeLockOrRestart(bool &needRestart) {
-            if (isRWLock) {
-                acquireWrite();
-            } else {
+            // if (isRWLock) {
+            //     assert(getReaderCount(word.load()) < 20);
+            //     acquireWrite();
+            //     assert(getReaderCount(word.load()) < 20);
+            // } else {
                 uint64_t version;
                 version = readLockOrRestart(needRestart);
                 if (needRestart) return;
 
                 upgradeToWriteLockOrRestart(version, needRestart);
                 if (needRestart) return;
-            }
+            //}
         }
 
         void upgradeToWriteLockOrRestart(uint64_t &version, bool &needRestart) {
-            if (isRWLock) {
-                needRestart = RWLockUpgradeToWriteLock() == false;
-                //OLTP_LOG_INFO(RWSpinLatchThreadId, " upgradeToWriteLockOrRestart on ", (uint64_t)this,  ", Readers: ",getReaderCount(word.load()));
-            } else {
+            // if (isRWLock) {
+            //     assert(getReaderCount(word.load()) < 20);
+            //     needRestart = RWLockUpgradeToWriteLock() == false;
+            //     assert(getReaderCount(word.load()) < 20);
+            //     //OLTP_LOG_INFO(RWSpinLatchThreadId, " upgradeToWriteLockOrRestart on ", (uint64_t)this,  ", Readers: ",getReaderCount(word.load()));
+            // } else {
                 if ((word & kReaderMask) != 0) {
                     needRestart = true;
                     return;
@@ -265,41 +275,47 @@ class BPlusTree {
                     //_mm_pause();
                     needRestart = true;
                 }
-            }
+            //}
         }
 
         void downgradeToReadLock(uint64_t &version) {
-            if (isRWLock) {
-                RWLockDowngradeToReadLock();
-            } else {
+            // if (isRWLock) {
+            //     assert(getReaderCount(word.load()) < 20);
+            //     RWLockDowngradeToReadLock();
+            //     assert(getReaderCount(word.load()) < 20);
+            // } else {
                 version = word.fetch_add(kLockMask);
                 version += kLockMask;
-            }
+            //}
         }
 
         void writeUnlock() { 
-            if (isRWLock) {
-                //OLTP_LOG_INFO(RWSpinLatchThreadId, " writeUnlock on ", (uint64_t)this,  ", Readers: ",getReaderCount(word.load()));
-                releaseWrite();
-            } else {
+            // if (isRWLock) {
+            //     assert(getReaderCount(word.load()) < 20);
+            //     //OLTP_LOG_INFO(RWSpinLatchThreadId, " writeUnlock on ", (uint64_t)this,  ", Readers: ",getReaderCount(word.load()));
+            //     releaseWrite();
+            //     assert(getReaderCount(word.load()) < 20);
+            // } else {
                 word.fetch_add(kLockMask); 
-            }
+            //}
         }
 
         void checkOrRestart(uint64_t startRead, bool &needRestart) {
-            if (isRWLock) {
-                return;
-            }
+            // if (isRWLock) {
+            //     return;
+            // }
             readUnlockOrRestart(startRead, needRestart, false);
         }
 
         void readUnlockOrRestart(uint64_t startRead, bool &needRestart, bool ebr = true) {
-            if (isRWLock) {
-                //OLTP_LOG_INFO(RWSpinLatchThreadId," readUnlockOrRestart on ", (uint64_t)this,  ", Readers: ",getReaderCount(word.load()));
-                releaseRead();
-            } else {
+            // if (isRWLock) {
+            //     assert(getReaderCount(word.load()) < 20);
+            //     //OLTP_LOG_INFO(RWSpinLatchThreadId," readUnlockOrRestart on ", (uint64_t)this,  ", Readers: ",getReaderCount(word.load()));
+            //     releaseRead();
+            //     needRestart = false;
+            // } else {
                 needRestart = (((startRead ^ word.load()) & kVersionMask) != 0);
-            }
+            //}
         }
 
         void acquireRead() {
@@ -339,6 +355,7 @@ class BPlusTree {
         }
 
         bool RWLockUpgradeToWriteLock() {
+            assert(getReaderCount(word.load()) < 20);
             // Only works if we are the only reader
             return tryUpgradeToWriteLock();
         }
@@ -369,9 +386,9 @@ class BPlusTree {
             assert(writerId == RWSpinLatchThreadId); // Only write-locked by me
             assert(readerCount == 0);
             uint64_t neww = makeNewWord(1, 0);
-            word.store(neww);
-            return true;
-            //return word.compare_exchange_strong(w, neww); // Try acquire write lock when we are the last reader
+            // word.store(neww);
+            // return true;
+            return word.compare_exchange_strong(w, neww); // Try acquire write lock when we are the last reader
         }
 
         bool tryAcqurieWrite() {
@@ -394,9 +411,9 @@ class BPlusTree {
             assert(writerId == 0);
             assert(readerCount > 0);
             uint64_t neww = makeNewWord(readerCount - 1, 0);
-            word.fetch_sub(1);
-            return true;
-            //return word.compare_exchange_strong(w, neww);
+            //word.fetch_sub(1);
+            //return true;
+            return word.compare_exchange_strong(w, neww);
         }
 
         bool tryReleaseWrite() {
@@ -406,9 +423,9 @@ class BPlusTree {
             assert(writerId == RWSpinLatchThreadId);
             assert(readerCount == 0);
             uint64_t neww = makeNewWord(0, 0);
-            word.store(0);
-            return true;
-            //return word.compare_exchange_strong(w, neww);
+            //word.store(0);
+            //return true;
+            return word.compare_exchange_strong(w, neww);
         }
 
         inline uint64_t makeNewWord(uint32_t readerCount, uint32_t writerId) {
@@ -452,7 +469,7 @@ class BPlusTree {
         NodeMetaData meta_;
 
        public:
-        NodeBase(NodeType nodeType) : NodeLock(nodeType == NodeType::BTreeLeaf), meta_{nodeType} {}
+        NodeBase(NodeType nodeType) : NodeLock(false), meta_{nodeType} {}
         NodeType getType() const { return meta_.type_; }
         uint16_t getCount() const { return meta_.count_; }
         void setCount(uint16_t count) { meta_.count_ = count; }
@@ -466,11 +483,13 @@ class BPlusTree {
      */
     struct Deallocator {
         void operator()(void *n) const {
+            assert(((uint64_t)n) != 0xffffffffffffffffull);
             /*
              * `n` maybe `NodeType *` or `char *`. If it's `NodeType *`, NO need to
              * call its dtor manually beause there are no valid keys in that page.
              */
-            delete[] reinterpret_cast<char *>(n);  // free memory
+            memset(n, 0xff, LeafPageSize);
+            // delete[] reinterpret_cast<char *>(n);  // free memory
         }
     };
 
@@ -594,6 +613,7 @@ class BPlusTree {
             }
             this->setCount(this->getCount() + sibling->getCount());
             this->next_ = sibling->next_;
+            assert(((uint64_t)sibling) != 0xffffffffffffffffull);
             EBR<UpdateThreshold, Deallocator>::getLocalThreadData().addRetiredNode(sibling);
         }
 
@@ -890,6 +910,7 @@ class BPlusTree {
              * Because of OLC strategy, can NOT delete pointer here, should transfer
              * the pointer to EBR, it will delete the pointer safely.
              */
+            assert(((uint64_t)ptr) != 0xffffffffffffffffull);
             EBR<UpdateThreshold, Deallocator>::getLocalThreadData().addRetiredNode(ptr);
 
             // always merge nodes to the left node, so remove the `pos + 1` child
@@ -902,7 +923,8 @@ class BPlusTree {
 
             this->setCount(this->getCount() + 1);
             this->setCount(this->getCount() + sibling->getCount());
-
+            
+            assert(((uint64_t)sibling) != 0xffffffffffffffffull);
             EBR<UpdateThreshold, Deallocator>::getLocalThreadData().addRetiredNode(sibling);
         }
         /**
@@ -1402,7 +1424,7 @@ class BPlusTree {
                 /*
                  * right borrow one from left
                  *
-                 *         A                           C
+                 *         A                           B
                  *      /     \                     /     \
                  *  [ B  C ]  [ D ]     ==>      [ B ]   [ C D ]
                  *    |  |      |                  |       |  |  
@@ -1425,7 +1447,7 @@ class BPlusTree {
                 }
             }
             // adjust parent: replace the parent key which in the `pos`
-            __adjust_parent_in_reallocNode(p, pos, a->keys_[a->getCount() - 1]);
+            __adjust_parent_in_reallocNode(p, pos, a->max_key());
         } else {
             auto a = static_cast<BTreeInner *>(left);
             auto b = static_cast<BTreeInner *>(right);
@@ -1497,10 +1519,12 @@ class BPlusTree {
     template <typename T = KeyType>
     typename std::enable_if<std::is_trivial<T>::value == false, void>::type
     __adjust_parent_in_reallocNode(BTreeInner *p, unsigned pos, const KeyType &key) {
+        assert(false);
         char *ptr = p->keyAt(pos).transfer();
 
         p->keyAt(pos) = key.deepCopy();
 
+        assert(((uint64_t)ptr) != 0xffffffffffffffffull);
         EBR<UpdateThreshold, Deallocator>::getLocalThreadData().addRetiredNode(ptr);
     }
 
@@ -1559,18 +1583,12 @@ class BPlusTree {
                 else
                     makeRoot(sep, inner, newInner);
 
+                // Unlock and restart
+	            node->writeUnlock();
                 if (parent) {
-                    parent->downgradeToReadLock(versionParent);
+                    parent->writeUnlock();
                 }
-
-                if (keyComp_(k, sep) > 0) {
-                    inner->writeUnlock();
-                    inner = newInner;
-                    versionNode = newInner->readLockOrRestart(needRestart);
-                    if (needRestart) goto restart;
-                } else {
-                    node->downgradeToReadLock(versionNode);
-                }
+                goto restart;
             }
 
             if (parent) {
@@ -1585,12 +1603,18 @@ class BPlusTree {
             //prefetch((char *)node, sizeof(NodeMetaData));
             inner->checkOrRestart(versionNode, needRestart);
             if (needRestart) goto restart;
-            
 
             versionNode = node->readLockOrRestart(needRestart);
             if (needRestart) goto restart;
         }  // while
 
+        if (parent) {
+            parent->checkOrRestart(versionParent, needRestart);
+            if (needRestart) {
+                node->readUnlockOrRestart(versionNode, needRestart);
+                goto restart;
+            }
+        }
         auto leaf = static_cast<BTreeLeaf *>(node);
         ValueType insertRes;
         bool success;
@@ -1601,13 +1625,11 @@ class BPlusTree {
             if (parent) {
                 parent->upgradeToWriteLockOrRestart(versionParent, needRestart);
                 if (needRestart) {
-                    node->readUnlockOrRestart(versionNode, needRestart);
                     goto restart;
                 }
             }
             node->upgradeToWriteLockOrRestart(versionNode, needRestart);
             if (needRestart) {
-                node->readUnlockOrRestart(versionNode, needRestart);
                 if (parent) parent->writeUnlock();
                 goto restart;
             }
@@ -1642,10 +1664,8 @@ class BPlusTree {
         } else {
             // only lock leaf node
             node->upgradeToWriteLockOrRestart(versionNode, needRestart);
-            if (needRestart) {
-                node->readUnlockOrRestart(versionNode, needRestart);
+            if (needRestart) 
                 goto restart;
-            }
             if (parent) {
                 parent->readUnlockOrRestart(versionParent, needRestart);
                 if (needRestart) {
@@ -1653,6 +1673,7 @@ class BPlusTree {
                     goto restart;
                 }
             }
+
             success = leaf->insert(k, v, keyComp_);
             node->writeUnlock();
             // node->readUnlockOrRestart(versionParent, needRestart);
@@ -1995,14 +2016,14 @@ class BPlusTree {
      * return true if key exists and delete successfully
      */
     bool remove(const KeyType &key) {
-        return _remove(key, true);
+        return _remove(key);
     }
 
     /**
      * Delete <key, value>
      * return true if <key, value> exists and delete successfully
      */
-    bool remove(const KeyType &key, ValueType value) { return _remove(key, false); }
+    bool remove(const KeyType &key, ValueType value) { return _remove(key); }
 
     /**
      * @param leftExist: Left interval is `[` when leftExist is true, otherwise '('
@@ -2136,20 +2157,26 @@ class BPlusTree {
             versionNode = node->readLockOrRestart(needRestart);
             if (needRestart) goto restart;
         }
-        node->checkOrRestart(versionNode, needRestart);
-        if (needRestart) goto restart;
         auto leaf = static_cast<BTreeLeaf *>(node);
-        unsigned pos = leaf->lowerBound(lowKey, keyComp_);
-        if (leaf == nullptr) return;
+        
 
         node->upgradeToWriteLockOrRestart(versionNode, needRestart);
         if (needRestart) {
-            node->readUnlockOrRestart(versionNode, needRestart);
             if (leavesTraversed == 0) {
                 lowKey = startKey;
             }
             goto restart;
         }
+        if (parent) {
+            parent->readUnlockOrRestart(versionParent, needRestart);
+            if (needRestart) {
+                node->writeUnlock();
+                goto restart;
+            }
+        }
+
+        unsigned pos = leaf->lowerBound(lowKey, keyComp_);
+
         bool quit = false;
         BTreeLeaf * nextLeaf = leaf->next_;
         for (unsigned p = pos; p < leaf->getCount(); ++p) {
@@ -2160,21 +2187,21 @@ class BPlusTree {
                 break;
             }
         }
+        node->writeUnlock();
         leavesTraversed++;
         if (quit == false && nextLeaf != nullptr) {
-            versionNode = nextLeaf->readLockOrRestart(needRestart);
-            assert(needRestart == false);
+            //versionNode = nextLeaf->readLockOrRestart(needRestart);
             if (nextLeaf->getCount() > 0) {
                 lowKey = nextLeaf->keys_[0];
             } else {
                 quit = true;
             }
-            nextLeaf->readUnlockOrRestart(versionNode, needRestart);
-            assert(needRestart == false);
+            //nextLeaf->readUnlockOrRestart(versionNode, needRestart);
+            //goto restart;
         } else {
             quit = true;
         }
-        node->writeUnlock();
+        
         if (quit == false) {
             goto restart;
         }
@@ -2200,7 +2227,13 @@ class BPlusTree {
         NodeBase *childNode = tope.node;
         uint64_t childVersion = tope.version;
         unsigned childPos = tope.pos;
-
+        {
+            bool restart = false;
+            childNode->checkOrRestart(childVersion, restart);
+            if (restart) {
+                return false;
+            }
+        }
 /*           R[1]
       A[1]           B[0] 
   A1[2] A2[2]      B1[1] 
@@ -2247,8 +2280,6 @@ class BPlusTree {
                     siblingPos = leftSiblingPos;
                     opt = MergeOperation::BorrowFromLeft;
                     return leftSibling;
-                } else {
-                    leftSibling->readUnlockOrRestart(siblingVersion, restart);
                 }
             }
             // try borrow from right sibling
@@ -2259,8 +2290,6 @@ class BPlusTree {
                     siblingPos = rightSiblingPos;
                     opt = MergeOperation::BorrowFromRight;
                     return rightSibling;
-                } else {
-                    rightSibling->readUnlockOrRestart(siblingVersion, restart);
                 }
             }
 
@@ -2274,8 +2303,6 @@ class BPlusTree {
                         siblingPos = leftSiblingPos;
                         opt = MergeOperation::RightToLeft;
                         return leftSibling;
-                    } else {
-                        leftSibling->readUnlockOrRestart(siblingVersion, restart);
                     }
                 }
                 // release the read lock of left sibling
@@ -2291,8 +2318,6 @@ class BPlusTree {
                         siblingPos = rightSiblingPos;
                         opt = MergeOperation::LeftToRight;
                         return rightSibling;
-                    } else {
-                        rightSibling->readUnlockOrRestart(siblingVersion, restart);
                     }
                 }
                 // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical();
@@ -2315,43 +2340,29 @@ class BPlusTree {
         
         parentNode->upgradeToWriteLockOrRestart(parentVersion, restart);
         if (restart) {
-            siblingNode->readUnlockOrRestart(siblingVersion, restart);
             return false;
         }
 
         if (opt == MergeOperation::LeftToRight || opt == MergeOperation::BorrowFromRight) {
             childNode->upgradeToWriteLockOrRestart(childVersion, restart);
             if (restart) {
-                if (childNode->getType() != NodeType::BTreeLeaf) {
-                    childNode->readUnlockOrRestart(childVersion, restart);
-                }
-                siblingNode->readUnlockOrRestart(siblingVersion, restart);
                 parentNode->writeUnlock();
                 return false;
             }
             siblingNode->upgradeToWriteLockOrRestart(siblingVersion, restart);
             if (restart) {
-                siblingNode->readUnlockOrRestart(siblingVersion, restart);
-                if (childNode->getType() == NodeType::BTreeLeaf) {
-                    childNode->downgradeToReadLock(childVersion);    
-                } else {
-                    childNode->writeUnlock();
-                }
+                childNode->writeUnlock();
                 parentNode->writeUnlock();
                 return false;
             }
         } else if (opt == MergeOperation::RightToLeft || opt == MergeOperation::BorrowFromLeft) {
             siblingNode->upgradeToWriteLockOrRestart(siblingVersion, restart);
             if (restart) {
-                siblingNode->readUnlockOrRestart(siblingVersion, restart);
                 parentNode->writeUnlock();
                 return false;
             }
             childNode->upgradeToWriteLockOrRestart(childVersion, restart);
             if (restart) {
-                if (childNode->getType() != NodeType::BTreeLeaf) {
-                    childNode->readUnlockOrRestart(childVersion, restart);
-                }
                 siblingNode->writeUnlock();
                 parentNode->writeUnlock();
                 return false;
@@ -2370,6 +2381,7 @@ class BPlusTree {
                 changeRoot = parentNode->erase(childPos);
                 // if (changeRoot && parentNode == root_.load()) {
                 if (changeRoot && parentNode == root_) {
+                    assert(((uint64_t)parentNode) != 0xffffffffffffffffull);
                     EBR<UpdateThreshold, Deallocator>::getLocalThreadData().addRetiredNode(parentNode);
                     root_.store(child);
                     // if (parentNode == root_) root_.store(child);
@@ -2382,6 +2394,7 @@ class BPlusTree {
                 changeRoot = parentNode->erase(siblingPos);
                 if (changeRoot && parentNode == root_.load()) {
                     // if (changeRoot) {
+                    assert(((uint64_t)parentNode) != 0xffffffffffffffffull);
                     EBR<UpdateThreshold, Deallocator>::getLocalThreadData().addRetiredNode(parentNode);
                     root_.store(sibling);
                 }
@@ -2401,6 +2414,7 @@ class BPlusTree {
                 changeRoot = parentNode->erase(childPos);
                 if (changeRoot && parentNode == root_.load()) {
                     // if (changeRoot) {
+                    assert(((uint64_t)parentNode) != 0xffffffffffffffffull);
                     EBR<UpdateThreshold, Deallocator>::getLocalThreadData().addRetiredNode(parentNode);
                     root_.store(child);
                 }
@@ -2411,6 +2425,7 @@ class BPlusTree {
                 changeRoot = parentNode->erase(siblingPos);
                 if (changeRoot && parentNode == root_.load()) {
                     // if (changeRoot) {
+                    assert(((uint64_t)parentNode) != 0xffffffffffffffffull);
                     EBR<UpdateThreshold, Deallocator>::getLocalThreadData().addRetiredNode(parentNode);
                     root_.store(sibling);
                 }
@@ -2433,9 +2448,10 @@ class BPlusTree {
             siblingNode->writeUnlock();
         }
 
-        parentNode->downgradeToReadLock(parentVersion);
+        parentNode->writeUnlock();
         if (parentNeedMerge) {
             stack.pop_back();
+            parentVersion = parentNode->readLockOrRestart(restart);
             stack.back().version = parentVersion;
             EraseMerge(stack);
         }
@@ -2633,6 +2649,15 @@ class BPlusTree {
             stack.push_back(StackNodeElement{node, int(pos), versionNode});
         }
 
+        if (parent) {
+            // check the version only, don't call `readUnlockOrRestart`
+            parent->checkOrRestart(versionParent, needRestart);
+            if (needRestart) {
+                node->readUnlockOrRestart(versionNode, needRestart);
+                assert(needRestart == false);
+                goto restart;
+            }
+        }
         // reach the leaf node
         BTreeLeaf *leafNode = static_cast<BTreeLeaf *>(node);
         unsigned pos = leafNode->lowerBound(element.first, keyComp_);
@@ -2726,7 +2751,7 @@ class BPlusTree {
     /**
      * @param flag Delete key and all its corresponding values when flag is true
      */
-    bool _remove(const KeyType &deleteKey, bool flag) {
+    bool _remove(const KeyType &deleteKey) {
         // EBR<UpdateThreshold, Deallocator>::getLocalThreadData().enterCritical();
         // btreeolc::DeferCode c([]() { EBR<UpdateThreshold, Deallocator>::getLocalThreadData().leaveCritical(); });
         int restartCount = 0;
@@ -2780,50 +2805,52 @@ class BPlusTree {
 
         // reach the leaf node
         BTreeLeaf *leafNode = static_cast<BTreeLeaf *>(node);
+        leafNode->upgradeToWriteLockOrRestart(versionNode, needRestart);
+        if (needRestart) {
+            goto restart;
+        }
+        if (parent) {
+            // check the version only, don't call `readUnlockOrRestart`
+            parent->checkOrRestart(versionParent, needRestart);
+            if (needRestart) {
+                leafNode->writeUnlock();
+                goto restart;
+            }
+        }
+
         unsigned pos = leafNode->lowerBound(deleteKey, keyComp_);
         bool success = false, leafNeedMerge = false;
-        if (pos < leafNode->getCount() && result_saved == false) {
+        if (pos < leafNode->getCount() && saved_success == false) {
             //const KeyValuePair &kv = leafNode->data_[pos];
             const KeyType & key = leafNode->keys_[pos];
             //const ValueType & value = leafNode->values_[pos];
             // the leaf node contains the key
             if (keyComp_(key, deleteKey) == 0) {
-                leafNode->upgradeToWriteLockOrRestart(versionNode, needRestart);
-                if (needRestart) {
-                    leafNode->readUnlockOrRestart(versionNode, needRestart);
-                    goto restart;
-                }
-                if (parent) {
-                    // check the version only, don't call `readUnlockOrRestart`
-                    parent->checkOrRestart(versionParent, needRestart);
-                    if (needRestart) {
-                        leafNode->writeUnlock();
-                        goto restart;
-                    }
-                }
-                success = leafNode->erase(pos, keyComp_, valueComp_, flag);
+                assert(keyComp_(leafNode->keys_[pos], deleteKey) == 0);
+                success = leafNode->erase(pos, keyComp_, valueComp_, false);
+                assert(success);
                 if (success) {
                     stats_.num_items--;
                 }
                 leafNeedMerge = leafNode->needMerge();
-                leafNode->downgradeToReadLock(versionNode);
 
                 saved_success = success;
                 result_saved = true;
-                // No merge if leaf is the root.
-                if (stack.size() > 1 && leafNeedMerge) {
-                    stack.back().version = versionNode;
-                    auto stack_copy = stack;
-                    if (!EraseMerge(stack_copy)) {
-                        leafNode->readUnlockOrRestart(versionNode, needRestart);
-                        // The leaf is under-utilize and EraseMerge failed due to conflicts, retry until it succeeds.
-                        // We save the result of delete operation to avoid deleting a key twice. 
-                        goto restart; 
-                    }
-                } else {
-                    leafNode->readUnlockOrRestart(versionNode, needRestart);
-                }
-                return success;
+                // // No merge if leaf is the root.
+                // if (stack.size() > 1 && leafNeedMerge) {
+                //     stack.back().version = versionNode;
+                //     auto stack_copy = stack;
+                //     if (!EraseMerge(stack_copy)) {
+                //         leafNode->readUnlockOrRestart(versionNode, needRestart);
+                //         // The leaf is under-utilize and EraseMerge failed due to conflicts, retry until it succeeds.
+                //         // We save the result of delete operation to avoid deleting a key twice. 
+                //         //goto restart; 
+                //         return saved_success;
+                //     }
+                // } else {
+                //     leafNode->readUnlockOrRestart(versionNode, needRestart);
+                // }
+                // return success;
             }
 
             // Could not find the key.
@@ -2839,20 +2866,26 @@ class BPlusTree {
 
         // Check if the leaf is under-utilized.
         leafNeedMerge = leafNode->needMerge();
+        leafNode->writeUnlock();
         // No merge if leaf is the root.
         if (stack.size() > 1 && leafNeedMerge) {
+            versionNode = leafNode->readLockOrRestart(needRestart);
+            if (needRestart) {
+                assert(result_saved);
+                assert(saved_success);
+                return saved_success;
+            }
             stack.back().version = versionNode;
             auto stack_copy = stack;
             if (!EraseMerge(stack_copy)) {
-                leafNode->readUnlockOrRestart(versionNode, needRestart);
                 // The leaf is under-utilize and EraseMerge failed due to conflict, retry until it succeeds.
-                goto restart; 
+                //goto restart; 
+                return saved_success;
             }
-        } else {
-            leafNode->readUnlockOrRestart(versionNode, needRestart);
         }
 
         assert(result_saved);
+        assert(saved_success);
         return saved_success;
     }
 
@@ -2899,9 +2932,7 @@ class BPlusTree {
 
         auto leaf = static_cast<BTreeLeaf *>(node);
         leaf->upgradeToWriteLockOrRestart(versionNode, needRestart);
-        // Optimization: do the search before taking the write lock.
         if (needRestart) {
-            leaf->readUnlockOrRestart(versionNode, needRestart);
             goto restart;
         }
         if (parent) {
@@ -2965,8 +2996,6 @@ class BPlusTree {
             versionNode = node->readLockOrRestart(needRestart);
             if (needRestart) goto restart;
         }
-        node->checkOrRestart(versionNode, needRestart);
-        if (needRestart) goto restart;
         auto leaf = static_cast<BTreeLeaf *>(node);
         unsigned pos = leaf->lowerBound(element.first, keyComp_);
         bool success = false;
@@ -2984,12 +3013,12 @@ class BPlusTree {
         if (parent) {
             parent->readUnlockOrRestart(versionParent, needRestart);
             if (needRestart) {
-                leaf->readUnlockOrRestart(versionNode, needRestart);
                 goto restart;
             } 
         }
         node->readUnlockOrRestart(versionNode, needRestart);
         if (needRestart) goto restart;
+
         return success;
     }
 

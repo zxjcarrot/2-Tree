@@ -12,7 +12,10 @@
 #include "twotree/PartitionedBTree.hpp"
 #include "twotree/TrieBTree.hpp"
 #include "twotree/TwoBTree.hpp"
+#include "twotree/TwoLSMT.hpp"
+#include "twotree/TrieLSMT.hpp"
 #include "twotree/ConcurrentTwoBTree.hpp"
+#include "twotree/ConcurrentPartitionedBTree.hpp"
 #include "anti-caching/AntiCache.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
@@ -36,6 +39,7 @@ DEFINE_bool(ycsb_scan, false, "");
 DEFINE_bool(ycsb_tx, true, "");
 DEFINE_bool(ycsb_count_unique_lookup_keys, true, "");
 DEFINE_double(ycsb_keyspace_access_ratio, 0.01, "");
+DEFINE_bool(inclusive_cache, false, "");
 // -------------------------------------------------------------------------------------
 using namespace leanstore;
 // -------------------------------------------------------------------------------------
@@ -88,9 +92,9 @@ int main(int argc, char** argv)
    } else if (FLAGS_cached_btree == 1 || FLAGS_cached_btree == 2 || FLAGS_cached_btree == 5 || FLAGS_cached_btree == 7 || FLAGS_cached_btree == 8){
       cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
-   } else if (FLAGS_cached_btree == 4 || FLAGS_cached_btree == 6) { // rocksdb with row cache
-      cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio; // row cache size
-      FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio); // block cache size
+   } else if (FLAGS_cached_btree == 4 || FLAGS_cached_btree == 6 || FLAGS_cached_btree == 10 || FLAGS_cached_btree == 11) {
+      cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio; // top_tree cache size
+      FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio); // bottom_tree cache size
    }
    cout << "cached_btree_size_gib " << cached_btree_size_gib << std::endl;
    cout << "wal=" << FLAGS_wal << std::endl;
@@ -137,8 +141,19 @@ int main(int argc, char** argv)
    } else if (FLAGS_cached_btree == 7) {
       adapter.reset(new BTreeCachedCompressedVSAdapter<YCSBKey, YCSBPayload, 4096>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
    } else if (FLAGS_cached_btree == 8) {
-      adapter.reset(new ConcurrentBTreeBTree<YCSBKey, YCSBPayload, 2048>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
+      adapter.reset(new ConcurrentBTreeBTree<YCSBKey, YCSBPayload, 2048>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+   } else if (FLAGS_cached_btree == 9) {
+      if (FLAGS_cached_btree) {
+         cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+         FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
+      }
+      adapter.reset(new ConcurrentPartitionedLeanstore<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, cached_btree_size_gib, FLAGS_inclusive_cache));
+   } else if (FLAGS_cached_btree == 10) {
+      adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+   } else if (FLAGS_cached_btree == 11) {
+      adapter.reset(new TrieRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    }
+
 
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
    db.registerConfigEntry("ycsb_target_gib", FLAGS_target_gib);
@@ -211,7 +226,7 @@ int main(int argc, char** argv)
    atomic<bool> keep_running = true;
    atomic<u64> running_threads_counter = 0;
    atomic<u64> txs = 0;
-   //adapter->evict_all();
+   adapter->evict_all();
 
    cout << "All evicted" << endl;
    begin = chrono::high_resolution_clock::now();

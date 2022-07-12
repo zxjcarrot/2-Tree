@@ -4,13 +4,32 @@
 #include "Units.hpp"
 #include "leanstore/storage/btree/BTreeLL.hpp"
 #include "leanstore/storage/btree/core/WALMacros.hpp"
-#include "ART/ARTIndex.hpp"
-#include "stx/btree_map.h"
-#include "leanstore/BTreeAdapter.hpp"
+#include "interface/StorageInterface.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
+static constexpr int max_eviction_workers = 4;
 namespace leanstore
 {
+
+class AdmissionControl {
+public:
+   int max_workers;
+   std::atomic<int> active_workers;
+   AdmissionControl(int max_workers = max_eviction_workers): max_workers(max_workers) {}
+   
+   bool enter() {
+      if (active_workers.fetch_add(1) < max_workers) {
+         return true;
+      } else {
+         active_workers.fetch_sub(1);
+         return false;
+      }
+   }
+
+   void exit() {
+      active_workers.fetch_sub(1);
+   }
+};
 
 #define HIT_STAT_START \
 auto old_miss = WorkerCounters::myCounters().io_reads.load();
@@ -51,7 +70,7 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
    uint64_t eviction_io_reads= 0;
    uint64_t io_reads_snapshot = 0;
    uint64_t io_reads_now = 0;
-   uint64_t hot_partition_item_count = 0;
+   std::atomic<uint64_t> hot_partition_item_count{0};
    struct TaggedPayload {
       Payload payload;
       bool modified = false;
@@ -62,6 +81,7 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
    Key clock_hand = std::numeric_limits<Key>::max();
    constexpr static u64 PartitionBitPosition = 63;
    constexpr static u64 PartitionBitMask = 0x8000000000000000;
+   std::atomic<bool> in_eviction{false};
    Key tag_with_hot_bit(Key key) {
       return key;
    }
@@ -160,30 +180,34 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
       auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
       btree.scanAscExclusive(key_bytes, fold(key_bytes, start_key),
-      [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
-         auto real_key = unfold(*(Key*)(key));
-         assert(key_length == sizeof(Key));
-         if (is_in_hot_partition(real_key) == false) {
-            clock_hand = std::numeric_limits<Key>::max();
-            return false;
-         }
-         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(value));
-         assert(value_length == sizeof(TaggedPayload));
-         if (tp->referenced == true) {
-            tp->referenced = false;
+         [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+            auto real_key = unfold(*(Key*)(key));
+            assert(key_length == sizeof(Key));
+            if (is_in_hot_partition(real_key) == false) {
+               clock_hand = std::numeric_limits<Key>::max();
+               return false;
+            }
+            TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(value));
+            assert(value_length == sizeof(TaggedPayload));
+            if (tp->inflight) { // skip inflight records
+               return true;
+            }
+            if (tp->referenced == true) {
+               tp->referenced = false;
+               return true;
+            }
+            tp->inflight = true;
+            evict_key = real_key;
+            clock_hand = real_key;
+            evict_payload = tp->payload;
+            victim_found = true;
+            evict_keys.push_back(real_key);
+            evict_payloads.emplace_back(*tp);
+            if (evict_keys.size() >= 100) {
+               return false;
+            }
             return true;
-         }
-         evict_key = real_key;
-         clock_hand = real_key;
-         evict_payload = tp->payload;
-         victim_found = true;
-         evict_keys.push_back(real_key);
-         evict_payloads.emplace_back(*tp);
-         if (evict_keys.size() >= 100) {
-            return false;
-         }
-         return true;
-      }, [](){});
+         }, [](){});
       auto new_miss = WorkerCounters::myCounters().io_reads.load();
       assert(new_miss >= old_miss);
       if (old_miss == new_miss) {
@@ -192,22 +216,25 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
          btree_buffer_miss += new_miss - old_miss;
       }
 
+      in_eviction.store(false);
       if (victim_found) {
          for (size_t i = 0; i< evict_keys.size(); ++i) {
             auto key = evict_keys[i];
             auto tagged_payload = evict_payloads[i];
-            assert(is_in_hot_partition(key));
-            auto op_res = btree.remove(key_bytes, fold(key_bytes, key));
-            hot_partition_item_count--;
-            assert(op_res == OP_RESULT::OK);
-            hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
             if (inclusive) {
                if (tagged_payload.modified) {
                   upsert_cold_partition(strip_off_partition_bit(key), tagged_payload.payload); // Cold partition
                }
             } else { // exclusive, put it back in the on-disk B-Tree
-               insert_partition(strip_off_partition_bit(key), tagged_payload.payload, true); // Cold partition
+               bool res = insert_partition(strip_off_partition_bit(key), tagged_payload.payload, true /* cold */, false /* inflight=false */); // Cold partition
+               assert(res);
             }
+
+            assert(is_in_hot_partition(key));
+            auto op_res = btree.remove(key_bytes, fold(key_bytes, key));
+            hot_partition_item_count--;
+            assert(op_res == OP_RESULT::OK);
+            hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
          }
          auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
          assert(io_reads_new >= io_reads_old);
@@ -218,35 +245,96 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
       }
    }
 
-
+   AdmissionControl control;
    void evict_till_safe() {
       while (cache_under_pressure()) {
-         evict_a_bunch();
+         if (in_eviction.load() == false) {
+            bool state = false;
+            if (in_eviction.compare_exchange_strong(state, true)) {
+               // Allow only one thread to perform the eviction
+               evict_a_bunch();
+               //in_eviction.store(false);
+            }
+         } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
+         }
       }
    }
 
 
-   void admit_element(Key k, Payload & v, bool dirty = false) {
+   bool admit_element(Key k, Payload & v, bool dirty = false) {
       if (cache_under_pressure())
          evict_till_safe();
-      insert_partition(strip_off_partition_bit(k), v, false, dirty); // Hot partition
+      bool res = insert_partition(strip_off_partition_bit(k), v, false /* hot*/, false /* inflight */, dirty); // Hot partition
+      assert(res);
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
+      return res;
+   }
+
+   void fill_lookup_placeholder(Key k, Payload &v) {
+      auto hot_key = tag_with_hot_bit(k);
+      u8 key_bytes[sizeof(Key)];
+      HIT_STAT_START;
+      auto op_res = btree.updateSameSize(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
+         TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
+         tp->referenced = true;
+         tp->modified = true;
+         tp->inflight = false;
+         memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+      }, Payload::wal_update_generator);
+      HIT_STAT_END;
+
+      assert(op_res == OP_RESULT::OK);
+   }
+
+   bool admit_lookup_placeholder_atomically(Key k) {
+      if (cache_under_pressure())
+         evict_till_safe();
+      Payload empty_payload;
+      bool res = insert_partition(strip_off_partition_bit(k), empty_payload, false /* hot*/, true /* inflight */, false);
+      if (res) {
+         hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
+         hot_partition_item_count++;
+      }
+      return res;
    }
 
    bool lookup(Key k, Payload& v) override
    {
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
-      TaggedPayload tp;
+      //TaggedPayload tp;
       // try hot partition first
       auto hot_key = tag_with_hot_bit(k);
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
+
+      retry:
+      bool inflight = false;
       bool found_in_cache = btree.lookupForUpdate(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
+         if (tp->inflight) {
+            inflight = true;
+            return;
+         }
          tp->referenced = true;
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
          }) ==
             OP_RESULT::OK;
+
+      if (inflight) {
+         goto retry;
+      }
+      
+      if (found_in_cache) {
+         return true;
+      }
+
+      if (admit_lookup_placeholder_atomically(k) == false) {
+         goto retry;
+      }
+
+      /* Now we have the inflight token placeholder, let's move the tuple from underlying btree to cache btree. */
+
       auto new_miss = WorkerCounters::myCounters().io_reads.load();
       assert(new_miss >= old_miss);
       if (old_miss == new_miss) {
@@ -254,13 +342,10 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
       } else {
          btree_buffer_miss += new_miss - old_miss;
       }
-      if (res) {
-         return res;
-      }
 
       auto cold_key = tag_with_cold_bit(k);
       old_miss = WorkerCounters::myCounters().io_reads.load();
-      res = btree.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused))) { 
+      bool res = btree.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused))) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
          }) ==
@@ -281,9 +366,13 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
             assert(op_res == OP_RESULT::OK);
             OLD_HIT_STAT_END
          }
-
-         // move to hot partition
-         admit_element(k, v);
+         // fill in the placeholder
+         fill_lookup_placeholder(k, v);
+      } else {
+         // Remove the lookup placeholder.
+         bool removeRes = btree.remove(key_bytes, fold(key_bytes, hot_key)) == OP_RESULT::OK;
+         // the placeholder must be there.
+         assert(removeRes);
       }
       return res;
    }
@@ -303,12 +392,13 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
       HIT_STAT_END;
 
       if (op_res == OP_RESULT::NOT_FOUND) {
-         insert_partition(k, v, true);
+         bool res = insert_partition(k, v, true /* cold */, false /* inflight=false */);
+         assert(res);
       }
    }
 
    // hot_or_cold: false => hot partition, true => cold partition
-   void insert_partition(Key k, Payload & v, bool hot_or_cold, bool modified = false) {
+   bool insert_partition(Key k, Payload & v, bool hot_or_cold, bool inflight, bool modified = false) {
       u8 key_bytes[sizeof(Key)];
       Key key = hot_or_cold == false ? tag_with_hot_bit(k) : tag_with_cold_bit(k);
       if (hot_or_cold == false) {
@@ -317,21 +407,27 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
       TaggedPayload tp;
       tp.referenced = true;
       tp.modified = modified;
+      tp.inflight = inflight;
       tp.payload = v;
       HIT_STAT_START;
       auto op_res = btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
-      assert(op_res == OP_RESULT::OK);
+      if (op_res != OP_RESULT::OK) {
+         assert(op_res == OP_RESULT::DUPLICATE);
+      }
+      //assert(op_res == OP_RESULT::OK);
       HIT_STAT_END;
+      return op_res == OP_RESULT::OK;
    }
 
    void insert(Key k, Payload& v) override
    {
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
-      //admit_element(k, v);
       if (inclusive) {
-         admit_element(k, v, true);
+         bool res = admit_element(k, v, true);
+         assert(res);
       } else {
-         admit_element(k, v);
+         bool res = admit_element(k, v);
+         assert(res);
       }
    }
 
@@ -339,69 +435,63 @@ struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
+
+      retry:
       HIT_STAT_START;
-      auto op_res = btree.updateSameSize(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
+      bool inflight = false;
+      bool found_in_cache = btree.updateSameSize(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
          TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
+         if (tp->inflight) {
+            inflight = true;
+            return;
+         }
          tp->referenced = true;
          tp->modified = true;
          memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
-      }, Payload::wal_update_generator);
+      }, Payload::wal_update_generator) == OP_RESULT::OK;
       HIT_STAT_END;
 
-      if (op_res == OP_RESULT::OK) {
-         return;
+      if (inflight) {
+         goto retry;
       }
-
-      Payload old_v;
-      auto cold_key = tag_with_cold_bit(k);
-      OLD_HIT_STAT_START;
-      auto res __attribute__((unused)) = btree.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
-         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         memcpy(&old_v, tp->payload.value, sizeof(tp->payload)); 
-         }) ==
-            OP_RESULT::OK;
-      assert(res);
-      OLD_HIT_STAT_END;
-
-      admit_element(k, old_v, false);
-      if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
-         auto cold_key = tag_with_cold_bit(k);
-         OLD_HIT_STAT_START;
-         // remove from the cold partition
-         auto op_res __attribute__((unused)) = btree.remove(key_bytes, fold(key_bytes, cold_key));
-         OLD_HIT_STAT_END;
+      
+      if (found_in_cache == false) {
+         Payload empty_v;
+         // on miss, perform a read first.
+         lookup(k, empty_v);
+         goto retry;
       }
-      update(k, v);
    }
 
 
    void put(Key k, Payload& v) override {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
-      u8 key_bytes[sizeof(Key)];
-      auto hot_key = tag_with_hot_bit(k);
-      HIT_STAT_START;
-      auto op_res = btree.updateSameSize(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
-         TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-         tp->referenced = true;
-         tp->modified = true;
-         memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
-      }, Payload::wal_update_generator);
-      HIT_STAT_END;
+      assert(false);
+      // DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      // u8 key_bytes[sizeof(Key)];
+      // auto hot_key = tag_with_hot_bit(k);
+      // HIT_STAT_START;
+      // auto op_res = btree.updateSameSize(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
+      //    TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
+      //    tp->referenced = true;
+      //    tp->modified = true;
+      //    memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+      // }, Payload::wal_update_generator);
+      // HIT_STAT_END;
 
-      if (op_res == OP_RESULT::OK) {
-         return;
-      }
+      // if (op_res == OP_RESULT::OK) {
+      //    return;
+      // }
 
-      if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
-         auto cold_key = tag_with_cold_bit(k);
-         OLD_HIT_STAT_START;
-         // remove from the cold partition
-         auto op_res __attribute__((unused)) = btree.remove(key_bytes, fold(key_bytes, cold_key));
-         assert(op_res == OP_RESULT::OK);
-         OLD_HIT_STAT_END;
-      }
-      // move to hot partition
-      admit_element(k, v, true);
+      // if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
+      //    auto cold_key = tag_with_cold_bit(k);
+      //    OLD_HIT_STAT_START;
+      //    // remove from the cold partition
+      //    auto op_res __attribute__((unused)) = btree.remove(key_bytes, fold(key_bytes, cold_key));
+      //    assert(op_res == OP_RESULT::OK);
+      //    OLD_HIT_STAT_END;
+      // }
+      // // move to hot partition
+      // admit_element(k, v, true);
    }
 
    void report(u64 entries, u64 pages) override {
