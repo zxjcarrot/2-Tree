@@ -5,6 +5,7 @@
 #include "leanstore/storage/btree/core/WALMacros.hpp"
 #include "ART/ARTIndex.hpp"
 #include "leanstore/BTreeAdapter.hpp"
+#include "rocksdb/filter_policy.h"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore
@@ -56,6 +57,8 @@ struct TrieRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       {
          rocksdb::BlockBasedTableOptions table_options;
          table_options.block_cache = rocksdb::NewLRUCache(top_block_cache_size, 0, true, 0);
+         table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
+         table_options.cache_index_and_filter_blocks = true;
          bottom_options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
          rocksdb::Status status = rocksdb::DB::Open(bottom_options, db_dir, &bottom_db);
          assert(status.ok());

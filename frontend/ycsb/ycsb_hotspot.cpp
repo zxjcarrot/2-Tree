@@ -40,6 +40,7 @@ DEFINE_bool(ycsb_tx, true, "");
 DEFINE_bool(ycsb_count_unique_lookup_keys, true, "");
 DEFINE_double(ycsb_keyspace_access_ratio, 0.01, "");
 DEFINE_bool(inclusive_cache, false, "");
+DEFINE_bool(blind_update, false, "");
 // -------------------------------------------------------------------------------------
 using namespace leanstore;
 // -------------------------------------------------------------------------------------
@@ -72,9 +73,6 @@ void zipf_stats(utils::ScrambledZipfGenerator * zipf_gen) {
    std::cout << "p99: " << generated_keys[0.99*generated_keys.size()] << ", covering " << generated_keys[0.99*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys"  << std::endl;
 }
 
-void TestBTreeOLC() {
-   
-}
 // -------------------------------------------------------------------------------------
 int main(int argc, char** argv)
 {
@@ -87,7 +85,7 @@ int main(int argc, char** argv)
    // -------------------------------------------------------------------------------------
    // LeanStore DB
    double cached_btree_size_gib = 0;
-   if (FLAGS_cached_btree == 3) {
+   if (FLAGS_cached_btree == 3 || FLAGS_cached_btree == 12) {
       cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
    } else if (FLAGS_cached_btree == 1 || FLAGS_cached_btree == 2 || FLAGS_cached_btree == 5 || FLAGS_cached_btree == 7 || FLAGS_cached_btree == 8){
       cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
@@ -105,10 +103,17 @@ int main(int argc, char** argv)
    LeanStore db;
    unique_ptr<BTreeInterface<YCSBKey, YCSBPayload>> adapter;
    leanstore::storage::btree::BTreeLL* btree_ptr = nullptr;
+   leanstore::storage::btree::BTreeLL* btree2_ptr = nullptr;
    if (FLAGS_recover) {
       btree_ptr = &db.retrieveBTreeLL("ycsb");
+      if (FLAGS_cached_btree == 12) {
+         btree2_ptr = &db.retrieveBTreeLL("ycsb_cold");
+      }
    } else {
       btree_ptr = &db.registerBTreeLL("ycsb");
+      if (FLAGS_cached_btree == 12) {
+         btree2_ptr = &db.registerBTreeLL("ycsb_cold");
+      }
    }
    if (FLAGS_cached_btree == 0) {
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id));
@@ -152,6 +157,12 @@ int main(int argc, char** argv)
       adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_cached_btree == 11) {
       adapter.reset(new TrieRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+   } else if (FLAGS_cached_btree == 12) {
+      if (FLAGS_cached_btree) {
+         cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+         FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
+      }
+      adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, cached_btree_size_gib));
    }
 
 
@@ -183,12 +194,12 @@ int main(int argc, char** argv)
       cout << "-------------------------------------------------------------------------------------" << endl;
       cout << "Inserting values" << endl;
       begin = chrono::high_resolution_clock::now();
+      vector<u64> keys(n);
+      std::iota(keys.begin(), keys.end(), 0);
+      std::random_shuffle(keys.begin(), keys.end());
       {
          tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
-            vector<u64> keys(range.size());
-            std::iota(keys.begin(), keys.end(), range.begin());
-            std::random_shuffle(keys.begin(), keys.end());
-            for (u64 t_i = 0; t_i < keys.size(); t_i++) {
+            for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
                YCSBPayload payload;
                utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
                auto& key = keys[t_i];
@@ -229,10 +240,10 @@ int main(int argc, char** argv)
    adapter->evict_all();
 
    cout << "All evicted" << endl;
+   adapter->clear_stats();
    begin = chrono::high_resolution_clock::now();
    for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
       db.getCRManager().scheduleJobAsync(t_i, [&]() {
-         adapter->clear_stats();
          running_threads_counter++;
          u64 tx = 0;
          while (keep_running) {
@@ -245,7 +256,11 @@ int main(int argc, char** argv)
             } else {
                YCSBPayload payload;
                utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-               table.update(key, payload);
+               if (FLAGS_blind_update) {
+                  table.put(key, payload);
+               } else {
+                  table.update(key, payload);
+               }
             }
             WorkerCounters::myCounters().tx++;
             ++tx;

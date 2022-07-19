@@ -14,6 +14,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include "rocksdb/filter_policy.h"
 template <typename Key, typename Payload>
 struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    rocksdb::DB* db;
@@ -22,10 +23,10 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    bool wal;
    u64 lazy_migration_threshold = 1;
    RocksDBAdapter(const std::string & db_dir, double row_cache_memory_budget_gib, double block_cache_memory_budget_gib, bool wal = false, bool lazy_migration = false): lazy_migration(lazy_migration), wal(wal) {
+      options.write_buffer_size = 8 * 1024 * 1024;
       std::cout << "RocksDB cache budget " << (block_cache_memory_budget_gib + row_cache_memory_budget_gib) << "gib" << std::endl;
       std::cout << "RocksDB write_buffer_size " << options.write_buffer_size << std::endl;
       std::cout << "RocksDB max_write_buffer_number " << options.max_write_buffer_number << std::endl;
-      options.write_buffer_size = 16 * 1024 * 1024;
       std::size_t block_cache_size = (row_cache_memory_budget_gib + block_cache_memory_budget_gib) * 1024ULL * 1024ULL * 1024ULL - options.write_buffer_size * options.max_write_buffer_number;
       std::cout << "RocksDB block cache size " << block_cache_size / 1024.0 /1024.0/1024 << " gib" << std::endl;
       rocksdb::DestroyDB(db_dir,options);
@@ -37,12 +38,19 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       options.use_direct_io_for_flush_and_compaction = true;
       rocksdb::BlockBasedTableOptions table_options;
       table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true, 0);
+      table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
+      table_options.cache_index_and_filter_blocks = true;
       options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
       rocksdb::Status status =
          rocksdb::DB::Open(options, db_dir, &db);
       assert(status.ok());
    }
     
+   void evict_all() {
+      rocksdb::FlushOptions fopts;
+      db->Flush(fopts);
+   }
+
    void clear_stats() {
       db->ResetStats();
    }
@@ -113,12 +121,12 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       // res = db->GetProperty("rocksdb.cfstats-no-file-histogram", &val);
       // assert(res);
       // std::cout << "RocksDB cfstats-no-file-histogram " <<val << std::endl;
-      // res = db->GetProperty("rocksdb.dbstats", &val);
-      // assert(res);
-      // std::cout << "RocksDB dbstats " <<val << std::endl;
+      res = db->GetProperty("rocksdb.dbstats", &val);
+      assert(res);
+      std::cout << "RocksDB dbstats " <<val << std::endl;
       res = db->GetProperty("rocksdb.levelstats", &val);
       assert(res);
-      std::cout << "RocksDB levelstats " <<val << std::endl;
+      std::cout << "RocksDB levelstats\n" <<val << std::endl;
       res = db->GetProperty("rocksdb.block-cache-entry-stats", &val);
       assert(res);
       std::cout << "RocksDB block-cache-entry-stats " <<val << std::endl;
