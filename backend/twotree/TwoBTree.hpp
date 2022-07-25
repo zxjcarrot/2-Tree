@@ -1064,6 +1064,8 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
    uint64_t io_reads_snapshot = 0;
    uint64_t io_reads_now = 0;
    uint64_t hot_partition_item_count = 0;
+   u64 lazy_migration_threshold = 30;
+   bool lazy_migration = false;
    struct TaggedPayload {
       Payload payload;
       bool modified = false;
@@ -1089,7 +1091,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       return key;
    }
 
-   TwoBTreeAdapter(leanstore::storage::btree::BTreeInterface& hot_btree, leanstore::storage::btree::BTreeInterface& cold_btree, double hot_partition_size_gb, bool inclusive = false) : hot_btree(hot_btree), cold_btree(cold_btree), hot_partition_capacity_bytes(hot_partition_size_gb * 1024ULL * 1024ULL * 1024ULL), inclusive(inclusive) {
+   TwoBTreeAdapter(leanstore::storage::btree::BTreeInterface& hot_btree, leanstore::storage::btree::BTreeInterface& cold_btree, double hot_partition_size_gb, bool inclusive = false, bool lazy_migration = false) : hot_btree(hot_btree), cold_btree(cold_btree), hot_partition_capacity_bytes(hot_partition_size_gb * 1024ULL * 1024ULL * 1024ULL), inclusive(inclusive), lazy_migration(lazy_migration) {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
    }
 
@@ -1217,6 +1219,13 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       insert_partition(strip_off_partition_bit(k), v, false, dirty); // Hot partition
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
    }
+   
+   bool should_migrate() {
+      if (lazy_migration) {
+         return utils::RandomGenerator::getRandU64(0, 100) < lazy_migration_threshold;
+      }
+      return true;
+   }
 
    bool lookup(Key k, Payload& v) override
    {
@@ -1259,16 +1268,17 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       }
 
       if (res) {
-         if (inclusive == false) {
-            OLD_HIT_STAT_START;
-            // remove from the cold partition
-            auto op_res __attribute__((unused))= cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
-            assert(op_res == OP_RESULT::OK);
-            OLD_HIT_STAT_END
+         if (should_migrate()) {
+            if (inclusive == false) {
+               OLD_HIT_STAT_START;
+               // remove from the cold partition
+               auto op_res __attribute__((unused))= cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
+               assert(op_res == OP_RESULT::OK);
+               OLD_HIT_STAT_END
+            }
+            // move to hot partition
+            admit_element(k, v);
          }
-
-         // move to hot partition
-         admit_element(k, v);
       }
       return res;
    }
@@ -1354,15 +1364,23 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       assert(res);
       OLD_HIT_STAT_END;
 
-      admit_element(k, old_v, false);
-      if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
-         auto cold_key = tag_with_cold_bit(k);
-         OLD_HIT_STAT_START;
-         // remove from the cold partition
-         auto op_res __attribute__((unused)) = cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
-         OLD_HIT_STAT_END;
+      if (should_migrate()) {
+         admit_element(k, old_v, false);
+         if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
+            OLD_HIT_STAT_START;
+            // remove from the cold partition
+            auto op_res __attribute__((unused)) = cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
+            OLD_HIT_STAT_END;
+         }
+         update(k, v);
+      } else {
+         cold_btree.updateSameSize(key_bytes, fold(key_bytes, cold_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
+            TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
+            tp->referenced = true;
+            tp->modified = true;
+            memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+         }, Payload::wal_update_generator);
       }
-      update(k, v);
    }
 
 

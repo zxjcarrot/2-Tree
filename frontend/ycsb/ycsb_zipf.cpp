@@ -1,5 +1,5 @@
 #include "Units.hpp"
-#include "interface/storage_interface.hpp"
+#include "interface/StorageInterface.hpp"
 #include "leanstore/BTreeAdapter.hpp"
 #include "leanstore/Config.hpp"
 #include "leanstore/LeanStore.hpp"
@@ -8,7 +8,15 @@
 #include "leanstore/utils/Files.hpp"
 #include "leanstore/utils/RandomGenerator.hpp"
 #include "leanstore/utils/ScrambledZipfGenerator.hpp"
-
+#include "lsmt/rocksdb_adapter.hpp"
+#include "twotree/PartitionedBTree.hpp"
+#include "twotree/TrieBTree.hpp"
+#include "twotree/TwoBTree.hpp"
+#include "twotree/TwoLSMT.hpp"
+#include "twotree/TrieLSMT.hpp"
+#include "twotree/ConcurrentTwoBTree.hpp"
+#include "twotree/ConcurrentPartitionedBTree.hpp"
+#include "anti-caching/AntiCache.hpp"
 //#include "rocksdb_adapter.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
@@ -24,7 +32,9 @@ DEFINE_uint32(ycsb_warmup_rounds, 0, "");
 DEFINE_uint32(ycsb_tx_rounds, 1, "");
 DEFINE_uint32(ycsb_tx_count, 0, "default = tuples");
 DEFINE_bool(verify, false, "");
+DEFINE_string(index_type, "BTree", "");
 DEFINE_uint32(cached_btree, 0, "");
+DEFINE_uint32(cached_btree_node_size_type, 0, "");
 DEFINE_bool(inclusive_cache, false, "");
 DEFINE_double(cached_btree_ram_ratio, 0.0, "");
 DEFINE_uint32(update_or_put, 0, "");
@@ -32,6 +42,18 @@ DEFINE_bool(cache_lazy_migration, false, "");
 DEFINE_bool(ycsb_scan, false, "");
 DEFINE_bool(ycsb_tx, true, "");
 DEFINE_bool(ycsb_count_unique_lookup_keys, true, "");
+
+const std::string kIndexTypeBTree = "BTree";
+const std::string kIndexTypeLSMT = "LSMT";
+
+const std::string kIndexTypeAntiCache = "AntiCache";
+
+const std::string kIndexType2BTree = "2BTree";
+const std::string kIndexType2LSMT = "2LSMT";
+const std::string kIndexTypeTrieLSMT = "Trie-LSMT";
+const std::string kIndexTypeTrieBTree = "Trie-BTree";
+
+
 // -------------------------------------------------------------------------------------
 using namespace leanstore;
 // -------------------------------------------------------------------------------------
@@ -44,23 +66,6 @@ double calculateMTPS(chrono::high_resolution_clock::time_point begin, chrono::hi
 {
    double tps = ((factor * 1.0 / (chrono::duration_cast<chrono::microseconds>(end - begin).count() / 1000000.0)));
    return (tps / 1000000.0);
-}
-
-void zipf_stats_vector(std::vector<YCSBKey> & generated_keys) {
-   std::unordered_set<YCSBKey> unique_keys;
-   for (size_t i = 0; i < generated_keys.size(); ++i) {
-      YCSBKey key = generated_keys[i];
-      unique_keys.insert(key);
-   }
-   sort(generated_keys.begin(), generated_keys.end());
-   std::cout << "Zipfian Stats: " << std::endl;
-   std::cout << "Skew factor: " << FLAGS_zipf_factor << std::endl;
-   std::cout << "# total keys: " << generated_keys.size() << std::endl;
-   std::cout << "# unique keys: " << unique_keys.size() << std::endl;
-   std::cout << "p50: " << generated_keys[0.5*generated_keys.size()] << ", covering " << generated_keys[0.5*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys"  << std::endl;
-   std::cout << "p75: " << generated_keys[0.75*generated_keys.size()] << ", covering " << generated_keys[0.75*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys"  << std::endl;
-   std::cout << "p90: " << generated_keys[0.90*generated_keys.size()] << ", covering " << generated_keys[0.90*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys"  << std::endl;
-   std::cout << "p99: " << generated_keys[0.99*generated_keys.size()] << ", covering " << generated_keys[0.99*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys"  << std::endl;
 }
 
 void zipf_stats(utils::ScrambledZipfGenerator * zipf_gen) {
@@ -93,18 +98,24 @@ int main(int argc, char** argv)
    chrono::high_resolution_clock::time_point begin, end;
    // -------------------------------------------------------------------------------------
    // LeanStore DB
-   double cached_btree_size_gib = 0;
-   if (FLAGS_cached_btree == 3) {
-      cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
-   } else if (FLAGS_cached_btree == 1 || FLAGS_cached_btree == 2){
-      cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+   double top_tree_size_gib = 0;
+   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexType2BTree) {
+      top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+   } else if (FLAGS_index_type == kIndexTypeLSMT || 
+              FLAGS_index_type == kIndexTypeAntiCache || 
+              FLAGS_index_type == kIndexTypeTrieBTree || 
+              FLAGS_index_type == kIndexType2LSMT || 
+              FLAGS_index_type == kIndexTypeTrieLSMT) {
+      top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
-   } else if (FLAGS_cached_btree == 4) { // rocksdb with row cache
-      cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio; // row cache size
-      FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio); // block cache size
+   } else {
+      cout << "Unknown index type " << FLAGS_index_type << std::endl;
+      assert(false);
+      exit(1);
    }
+
    cout << "FLAGS_dram_gib " << FLAGS_dram_gib << std::endl;
-   cout << "cached_btree_size_gib " << cached_btree_size_gib << std::endl;
+   cout << "top_tree_size_gib " << top_tree_size_gib << std::endl;
    cout << "wal=" << FLAGS_wal << std::endl;
    cout << "zipf_factor=" << FLAGS_zipf_factor << std::endl;
    cout << "ycsb_read_ratio=" << FLAGS_ycsb_read_ratio << std::endl;
@@ -112,30 +123,86 @@ int main(int argc, char** argv)
    LeanStore db;
    unique_ptr<BTreeInterface<YCSBKey, YCSBPayload>> adapter;
    leanstore::storage::btree::BTreeLL* btree_ptr = nullptr;
-   leanstore::storage::btree::BTreeLL* btree_ptr2 = nullptr;
+   leanstore::storage::btree::BTreeLL* btree2_ptr = nullptr;
    db.getCRManager().scheduleJobSync(0, [&](){
       if (FLAGS_recover) {
          btree_ptr = &db.retrieveBTreeLL("ycsb");
+         btree2_ptr = &db.retrieveBTreeLL("ycsb_cold");
       } else {
          btree_ptr = &db.registerBTreeLL("ycsb");
+         btree2_ptr = &db.registerBTreeLL("ycsb_cold");
       }
    });
    
-   if (FLAGS_cached_btree == 0) {
+   if (FLAGS_index_type == kIndexTypeBTree) {
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id));
-   } else if (FLAGS_cached_btree == 1) {
-      adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
-   } else if (FLAGS_cached_btree == 2) {
-      adapter.reset(new BTreeCachedNoninlineVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
-   } else if (FLAGS_cached_btree == 3) {
-      if (FLAGS_cached_btree) {
-         cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
-         FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
-      }
-      adapter.reset(new BTreeVSHotColdPartitionedAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, cached_btree_size_gib, FLAGS_inclusive_cache));
-   } else if (FLAGS_cached_btree == 4) {
-      //adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib));
+   } else if (FLAGS_index_type == kIndexType2BTree) {
+      adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_index_type == kIndexTypeTrieBTree) {
+      adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_index_type == kIndexTypeLSMT) {
+      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_index_type == kIndexType2LSMT) {
+      adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+   } else if (FLAGS_index_type == kIndexTypeTrieLSMT) {
+      adapter.reset(new TrieRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+   } else { // 
+      assert(FLAGS_index_type == kIndexTypeAntiCache);
+      adapter.reset(new AntiCacheAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib));
    }
+   // if () {
+   //    top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+   // } else if (FLAGS_index_type == kIndexTypeTrieBTree || FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeTrieLSMT) {
+   //    top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+   //    FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
+   // }
+   // if (FLAGS_cached_btree == 0) {
+      
+   // } else if (FLAGS_cached_btree == 1) {
+   //    if (FLAGS_cached_btree_node_size_type == 0) {
+   //       adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload, 1024>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration));
+   //    } else if (FLAGS_cached_btree_node_size_type == 1) {
+   //       adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload, 2048>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration));
+   //    } else if (FLAGS_cached_btree_node_size_type == 2) {
+   //       adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload, 4096>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration));
+   //    } else if (FLAGS_cached_btree_node_size_type == 3) {
+   //       adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload, 8192>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration));
+   //    } else if (FLAGS_cached_btree_node_size_type == 4) {
+   //       adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload, 16384>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration));
+   //    }
+   // } else if (FLAGS_cached_btree == 2) {
+   //    adapter.reset(new BTreeCachedNoninlineVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration));
+   // } else if (FLAGS_cached_btree == 3) {
+   //    top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+   //    FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
+   //    adapter.reset(new BTreeVSHotColdPartitionedAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, top_tree_size_gib));
+   // } else if (FLAGS_cached_btree == 4) {
+   //    adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
+   // } else if (FLAGS_cached_btree == 5) {
+   //    adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration));
+   // } else if (FLAGS_cached_btree == 6) {
+   //    adapter.reset(new AntiCacheAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib));
+   // } else if (FLAGS_cached_btree == 7) {
+   //    adapter.reset(new BTreeCachedCompressedVSAdapter<YCSBKey, YCSBPayload, 4096>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration));
+   // } else if (FLAGS_cached_btree == 8) {
+   //    adapter.reset(new ConcurrentBTreeBTree<YCSBKey, YCSBPayload, 2048>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+   // } else if (FLAGS_cached_btree == 9) {
+   //    if (FLAGS_cached_btree) {
+   //       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+   //       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
+   //    }
+   //    adapter.reset(new ConcurrentPartitionedLeanstore<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, top_tree_size_gib, FLAGS_inclusive_cache));
+   // } else if (FLAGS_cached_btree == 10) {
+   //    adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+   // } else if (FLAGS_cached_btree == 11) {
+   //    adapter.reset(new TrieRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+   // } else if (FLAGS_cached_btree == 12) {
+   //    if (FLAGS_cached_btree) {
+   //       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+   //       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
+   //    }
+   //    adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib));
+   // }
 
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
    db.registerConfigEntry("ycsb_target_gib", FLAGS_target_gib);
@@ -146,6 +213,8 @@ int main(int argc, char** argv)
                                     ? FLAGS_ycsb_tuple_count
                                     : FLAGS_target_gib * 1024 * 1024 * 1024 * 1.0 / 2.0 / (sizeof(YCSBKey) + sizeof(YCSBPayload));
    // Insert values
+   const u64 n = ycsb_tuple_count;
+   vector<u64> keys(n);
    if (FLAGS_recover) {
       // Warmup
       const u64 n = ycsb_tuple_count;
@@ -161,32 +230,21 @@ int main(int argc, char** argv)
       cout << calculateMTPS(begin, end, n) << " M tps" << endl;
       cout << "-------------------------------------------------------------------------------------" << endl;
    } else {
-      const u64 n = ycsb_tuple_count;
       cout << "-------------------------------------------------------------------------------------" << endl;
       cout << "Inserting values" << endl;
+      
+      std::iota(keys.begin(), keys.end(), 0);
+      std::random_shuffle(keys.begin(), keys.end());
       begin = chrono::high_resolution_clock::now();
       {
-         db.getCRManager().scheduleJobSync(0, [&](){
-            constexpr size_t block_size = 80000;
-            for (size_t block_idx = 0; block_idx < n; block_idx += block_size) {
-               u64 count = std::min(n - block_idx, block_size);
-               vector<u64> keys(count);
-               std::iota(keys.begin(), keys.end(), block_idx);
-               std::random_shuffle(keys.begin(), keys.end());
-               cr::Worker::my().startTX();
-               for (u64 t_i = 0; t_i < keys.size(); t_i++) {
-                  YCSBPayload payload;
-                  utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-                  auto& key = keys[t_i];
-                  table.insert(key, payload);
-               }
-               cr::Worker::my().commitTX();
+         tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+            for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
+               YCSBPayload payload;
+               utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+               auto& key = keys[t_i];
+               table.insert(key, payload);
             }
          });
-         //tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
-         //   cout << "Range.size() " << range.size() << " range.begin() " << range.begin() << endl;
-            
-         //});
       }
       end = chrono::high_resolution_clock::now();
       cout << "time elapsed = " << (chrono::duration_cast<chrono::microseconds>(end - begin).count() / 1000000.0) << endl;
@@ -227,6 +285,9 @@ int main(int argc, char** argv)
    cout << "-------------------------------------------------------------------------------------" << endl;
    cout << "~Transactions" << endl;
    adapter->report_cache();
+   adapter->evict_all();
+
+   cout << "All evicted" << endl;
    atomic<bool> keep_running = true;
    atomic<u64> running_threads_counter = 0;
    atomic<u64> txs = 0;
@@ -241,7 +302,7 @@ int main(int argc, char** argv)
          
          while (keep_running) {
             //YCSBKey key = utils::RandomGenerator::getRandU64() % ycsb_tuple_count;
-            YCSBKey key = zipf_random->rand();
+            YCSBKey key = keys[zipf_random->rand() % ycsb_tuple_count];
             //generated_keys.push_back(key);
             
             assert(key < ycsb_tuple_count);
@@ -276,7 +337,6 @@ int main(int argc, char** argv)
       // -------------------------------------------------------------------------------------
       cout << "Total commit: " << calculateMTPS(begin, end, txs.load()) << " M tps" << endl;
       zipf_stats(zipf_random.get());
-      //zipf_stats_vector(generated_keys);
       adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
       cout << "-------------------------------------------------------------------------------------" << endl;
       db.getCRManager().joinAll();
