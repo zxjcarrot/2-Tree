@@ -40,11 +40,11 @@ struct TrieRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
 
       bottom_options.write_buffer_size = 8 * 1024 * 1024;
-      std::cout << "RocksDB bottom cache budget " << (bottomtree_cache_budget_gib) << " gib" << std::endl;
-      std::cout << "RocksDB bottom write_buffer_size " << bottom_options.write_buffer_size << std::endl;
-      std::cout << "RocksDB bottom max_write_buffer_number " << bottom_options.max_write_buffer_number << std::endl;
+      std::cout << "RocksDB cache budget " << (bottomtree_cache_budget_gib) << " gib" << std::endl;
+      std::cout << "RocksDB write_buffer_size " << bottom_options.write_buffer_size << std::endl;
+      std::cout << "RocksDB max_write_buffer_number " << bottom_options.max_write_buffer_number << std::endl;
       std::size_t top_block_cache_size = (bottomtree_cache_budget_gib) * 1024ULL * 1024ULL * 1024ULL - bottom_options.write_buffer_size * bottom_options.max_write_buffer_number;
-      std::cout << "RocksDB top block cache size " << top_block_cache_size / 1024.0 /1024.0/1024 << " gib" << std::endl;
+      std::cout << "RocksDB block cache size " << top_block_cache_size / 1024.0 /1024.0/1024 << " gib" << std::endl;
       mkdir(db_dir.c_str(), 0777);
       rocksdb::DestroyDB(db_dir,bottom_options);
       bottom_options.manual_wal_flush = false;
@@ -87,7 +87,7 @@ struct TrieRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    }
 
    void evict_all() override {
-      while (cache.size() > 100) {
+      while (cache.size() > 200) {
          evict_one();
       }
    }

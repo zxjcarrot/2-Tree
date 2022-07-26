@@ -1,5 +1,5 @@
-sh scripts/1tree_ycsb_zipf.sh
-sh scripts/anticache_ycsb_zipf.sh
+#sh scripts/1tree_ycsb_zipf.sh
+#sh scripts/anticache_ycsb_zipf.sh
 sh scripts/2tree_ycsb_zipf.sh
 
 # sh scripts/anticache_ycsb_zipf.sh 

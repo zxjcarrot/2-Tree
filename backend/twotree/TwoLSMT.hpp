@@ -93,9 +93,7 @@ struct TwoRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    }
    
    void evict_all() override {
-      while (cache_size_bytes > 0) {
-         evict_a_bunch();
-      }
+      evict_all_items();
       rocksdb::FlushOptions fopts;
       top_db->Flush(fopts);
       std::cout << "After deleting all entries, rocksdb files size " << toptree_options.sst_file_manager->GetTotalSize();
@@ -129,10 +127,61 @@ struct TwoRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    }
 
    bool cache_under_pressure() {
-      return cache_size_bytes >= cache_capacity_bytes * eviction_threshold || 
+      return //cache_size_bytes >= cache_capacity_bytes * eviction_threshold || 
              toptree_options.sst_file_manager->GetTotalSize() >= 2 * cache_capacity_bytes * eviction_threshold;
    }
 
+   void evict_all_items() {
+      Key start_key = std::numeric_limits<Key>::min();
+
+      rocksdb::ReadOptions options;
+
+      auto it = top_db->NewIterator(options);
+      u8 key_bytes[sizeof(Key)];
+      std::vector<Key> evict_keys;
+      std::vector<TaggedPayload> evict_payloads;
+      Key evict_key;
+      Payload evict_payload;
+      bool victim_found = false;
+
+      leanstore::fold(key_bytes, start_key);
+      for (it->Seek(rocksdb::Slice((const char *)key_bytes, sizeof(key_bytes))); it->Valid(); it->Next()) {
+         assert(it->value().size() == sizeof(TaggedPayload));
+         auto tp = ((TaggedPayload*)(it->value().data()));
+         auto real_key = leanstore::unfold(*(Key*)(it->key().data()));
+         evict_key = real_key;
+         clock_hand = real_key;
+         victim_found = true;
+         evict_keys.push_back(real_key);
+         evict_payloads.emplace_back(*tp);
+      }
+
+      delete it;
+      
+      if (victim_found) {
+         for (size_t i = 0; i< evict_keys.size(); ++i) {
+            auto key = evict_keys[i];
+            auto tagged_payload = evict_payloads[i];
+            rocksdb::WriteOptions options;
+            options.disableWAL = true;
+            leanstore::fold(key_bytes, key);
+            rocksdb::Status s = top_db->Delete(options, rocksdb::Slice((const char *)key_bytes, sizeof(key_bytes)));
+            assert(s == rocksdb::Status::OK());
+
+            //cache_size_bytes -= (sizeof(Key) + sizeof(TaggedPayload));
+            //--topdb_item_count;
+            if (inclusive) {
+               if (tagged_payload.modified) {
+                  put_bottom_db(key, tagged_payload.payload); // put it back in the on-disk LSMT
+               }
+            } else { // exclusive, put it back in the on-disk LSMT
+               put_bottom_db(key, tagged_payload.payload);
+            }
+         }
+      } else {
+         clock_hand = std::numeric_limits<Key>::max();
+      }
+   }
 
    void evict_a_bunch() {
       Key start_key = clock_hand;
@@ -185,8 +234,8 @@ struct TwoRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
             rocksdb::Status s = top_db->Delete(options, rocksdb::Slice((const char *)key_bytes, sizeof(key_bytes)));
             assert(s == rocksdb::Status::OK());
 
-            cache_size_bytes -= (sizeof(Key) + sizeof(TaggedPayload));
-            --topdb_item_count;
+            // cache_size_bytes -= (sizeof(Key) + sizeof(TaggedPayload));
+            // --topdb_item_count;
             if (inclusive) {
                if (tagged_payload.modified) {
                   put_bottom_db(key, tagged_payload.payload); // put it back in the on-disk LSMT
@@ -235,10 +284,10 @@ struct TwoRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       auto key_len = leanstore::fold(key_bytes, k);
       auto status = top_db->Put(options, rocksdb::Slice((const char *)key_bytes, key_len), rocksdb::Slice((const char *)&tp, sizeof(tp)));
       assert(status == rocksdb::Status::OK());
-      if (insert) {
-         cache_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
-         topdb_item_count++;
-      }
+      // if (insert) {
+      //    cache_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
+      //    topdb_item_count++;
+      // }
    }
 
    bool lookup(Key k, Payload& v) {

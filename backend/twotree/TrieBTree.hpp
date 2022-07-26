@@ -76,7 +76,7 @@ struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
    }
 
    void evict_all() override {
-      while (cache.size() > 100) {
+      while (cache.size() > 200) {
          evict_one();
       }
    }

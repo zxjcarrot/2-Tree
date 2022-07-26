@@ -62,6 +62,13 @@ class RandomGenerator
    }
    static void getRandString(u8* dst, u64 size);
 };
+
+class Generator {
+public:
+   virtual ~Generator() {}
+   virtual u64 rand()=0;
+};
+
 // -------------------------------------------------------------------------------------
 }  // namespace utils
 }  // namespace leanstore
