@@ -78,7 +78,7 @@ OP_RESULT BTreeLL::lookupForUpdate(u8* key, u16 key_length, function<void(const 
          if (pos != -1) {
             payload_callback(leaf->getPayload(pos), leaf->getPayloadLength(pos));
             leaf.recheck();
-            leaf.incrementGSN();
+            //leaf.incrementGSN();
             jumpmu_return OP_RESULT::OK;
          } else {
             leaf.recheck();
@@ -144,7 +144,6 @@ OP_RESULT BTreeLL::scanAscExclusive(u8* start_key,
             if (iterator.next() != OP_RESULT::OK) {
                jumpmu_return OP_RESULT::NOT_FOUND;
             }
-            iterator.leaf.incrementGSN();
          }
       }
    }

@@ -36,7 +36,10 @@ struct TrieRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    bool lazy_migration;
    bool inclusive;
    u64 lazy_migration_threshold = 10;
-   TrieRocksDBAdapter(const std::string & db_dir, double toptree_cache_budget_gib, double bottomtree_cache_budget_gib, bool lazy_migration = false, bool inclusive = false) : cache_capacity_bytes(toptree_cache_budget_gib * 1024ULL * 1024ULL * 1024ULL), lazy_migration(lazy_migration), inclusive(inclusive) {
+   TrieRocksDBAdapter(const std::string & db_dir, double toptree_cache_budget_gib, double bottomtree_cache_budget_gib, int lazy_migration_sampling_rate = false, bool inclusive = false) : cache_capacity_bytes(toptree_cache_budget_gib * 1024ULL * 1024ULL * 1024ULL), lazy_migration(lazy_migration_sampling_rate < 100), inclusive(inclusive) {
+      if (lazy_migration_sampling_rate < 100) {
+         lazy_migration_threshold = lazy_migration_sampling_rate;
+      }
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
 
       bottom_options.write_buffer_size = 8 * 1024 * 1024;

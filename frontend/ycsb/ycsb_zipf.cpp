@@ -40,7 +40,7 @@ DEFINE_uint32(cached_btree_node_size_type, 0, "");
 DEFINE_bool(inclusive_cache, false, "");
 DEFINE_double(cached_btree_ram_ratio, 0.0, "");
 DEFINE_uint32(update_or_put, 0, "");
-DEFINE_bool(cache_lazy_migration, false, "");
+DEFINE_uint32(cache_lazy_migration, 100, "lazy upward migration sampling rate(%)");
 DEFINE_bool(ycsb_scan, false, "");
 DEFINE_bool(ycsb_tx, true, "");
 DEFINE_bool(ycsb_count_unique_lookup_keys, true, "");
@@ -79,21 +79,26 @@ double calculateMTPS(chrono::high_resolution_clock::time_point begin, chrono::hi
 
 void keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
    std::vector<YCSBKey> generated_keys;
-   std::unordered_set<YCSBKey> unique_keys;
-   for (size_t i = 0; i < FLAGS_ycsb_tuple_count; ++i) {
+   std::unordered_map<YCSBKey, int> unique_keys;
+   for (size_t i = 0; i < FLAGS_ycsb_tuple_count * 2; ++i) {
       YCSBKey key = zipf_gen->zipf_generator.rand() % FLAGS_ycsb_tuple_count;
       generated_keys.push_back(key);
-      unique_keys.insert(key);
+      unique_keys[key]++;
    }
    sort(generated_keys.begin(), generated_keys.end());
    std::cout << "Keyspace Stats: " << std::endl;
    std::cout << "Skew factor: " << FLAGS_zipf_factor << std::endl;
    std::cout << "# total keys: " << generated_keys.size() << std::endl;
    std::cout << "# unique keys: " << unique_keys.size() << std::endl;
-   std::cout << "p50: " << generated_keys[0.5*generated_keys.size()] << ", covering " << generated_keys[0.5*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys"  << std::endl;
-   std::cout << "p75: " << generated_keys[0.75*generated_keys.size()] << ", covering " << generated_keys[0.75*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys"  << std::endl;
-   std::cout << "p90: " << generated_keys[0.90*generated_keys.size()] << ", covering " << generated_keys[0.90*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys"  << std::endl;
-   std::cout << "p99: " << generated_keys[0.99*generated_keys.size()] << ", covering " << generated_keys[0.99*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys"  << std::endl;
+   std::cout << "Most frequent key occurrence: " << unique_keys[generated_keys[0]] << std::endl;
+   auto print_percentile_info = [&](int p) {
+      double pd = p / 100.0;
+      std::cout << "p" << p  << ": " << generated_keys[pd*generated_keys.size()] << ", covering " << generated_keys[pd*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys, occurrence :" << unique_keys[generated_keys[pd*generated_keys.size()]] << std::endl;
+   };
+   for (size_t i = 5; i <= 95; i += 5) {
+      print_percentile_info(i);
+   }
+   print_percentile_info(99);
 }
 
 // -------------------------------------------------------------------------------------
@@ -160,7 +165,7 @@ int main(int argc, char** argv)
    } else if (FLAGS_index_type == kIndexType2BTree) {
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeTrieBTree) {
-      adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration));
+      adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeLSMT) {
       adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2LSMT) {
@@ -256,19 +261,19 @@ int main(int argc, char** argv)
    
    
    {
-      cout << "Warming up" << endl;
-      auto t_start = std::chrono::high_resolution_clock::now();
-      // warm up for 100 seconds
-      // scramble the database
-      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 100000) {
-         YCSBKey key = keys[utils::RandomGenerator::getRandU64() % ycsb_tuple_count];
-         assert(key < ycsb_tuple_count);
-         YCSBPayload result;
-         YCSBPayload payload;
-         utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-         table.update(key, payload);
-      }
-      cout << "Warmed up" << endl;
+      // cout << "Warming up" << endl;
+      // auto t_start = std::chrono::high_resolution_clock::now();
+      // // warm up for 100 seconds
+      // // scramble the database
+      // while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 100000) {
+      //    YCSBKey key = keys[utils::RandomGenerator::getRandU64() % ycsb_tuple_count];
+      //    assert(key < ycsb_tuple_count);
+      //    YCSBPayload result;
+      //    YCSBPayload payload;
+      //    utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+      //    table.update(key, payload);
+      // }
+      // cout << "Warmed up" << endl;
    }
 
    adapter->evict_all();

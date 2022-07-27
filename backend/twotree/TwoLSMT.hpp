@@ -42,7 +42,10 @@ struct TwoRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    };
    rocksdb::SstFileManager * top_file_manager;
 
-   TwoRocksDBAdapter(const std::string & db_dir, double toptree_cache_budget_gib, double bottomtree_cache_budget_gib, bool wal = false, bool lazy_migration = false, bool inclusive = false): lazy_migration(lazy_migration), wal(wal), inclusive(inclusive) {
+   TwoRocksDBAdapter(const std::string & db_dir, double toptree_cache_budget_gib, double bottomtree_cache_budget_gib, bool wal = false, int lazy_migration_sampling_rate = 100, bool inclusive = false): lazy_migration(lazy_migration_sampling_rate < 100), wal(wal), inclusive(inclusive) {
+      if (lazy_migration_sampling_rate < 100) {
+         lazy_migration_threshold = lazy_migration_sampling_rate;
+      }
       this->cache_size_bytes = 0;
       this->cache_capacity_bytes = toptree_cache_budget_gib * 1024 * 1024 * 1024;
       toptree_options.write_buffer_size = 8 * 1024 * 1024;

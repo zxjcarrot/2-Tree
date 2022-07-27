@@ -22,7 +22,10 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    bool lazy_migration;
    bool wal;
    u64 lazy_migration_threshold = 1;
-   RocksDBAdapter(const std::string & db_dir, double row_cache_memory_budget_gib, double block_cache_memory_budget_gib, bool wal = false, bool lazy_migration = false): lazy_migration(lazy_migration), wal(wal) {
+   RocksDBAdapter(const std::string & db_dir, double row_cache_memory_budget_gib, double block_cache_memory_budget_gib, bool wal = false, int lazy_migration_sampling_rate = 100): lazy_migration(lazy_migration_sampling_rate < 100), wal(wal) {
+      if (lazy_migration_sampling_rate < 100) {
+         lazy_migration_threshold = lazy_migration_sampling_rate;
+      }
       options.write_buffer_size = 8 * 1024 * 1024;
       std::cout << "RocksDB cache budget " << (block_cache_memory_budget_gib + row_cache_memory_budget_gib) << "gib" << std::endl;
       std::cout << "RocksDB write_buffer_size " << options.write_buffer_size << std::endl;

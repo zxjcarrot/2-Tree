@@ -36,7 +36,10 @@ struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
    bool lazy_migration;
    bool inclusive;
    u64 lazy_migration_threshold = 10;
-   BTreeTrieCachedVSAdapter(leanstore::storage::btree::BTreeInterface& btree, double cache_size_gb, bool lazy_migration = false, bool inclusive = false) : btree(btree), cache_capacity_bytes(cache_size_gb * 1024ULL * 1024ULL * 1024ULL), lazy_migration(lazy_migration), inclusive(inclusive) {
+   BTreeTrieCachedVSAdapter(leanstore::storage::btree::BTreeInterface& btree, double cache_size_gb, int lazy_migration_sampling_rate = 100, bool inclusive = false) : btree(btree), cache_capacity_bytes(cache_size_gb * 1024ULL * 1024ULL * 1024ULL), lazy_migration(lazy_migration_sampling_rate < 100), inclusive(inclusive) {
+      if (lazy_migration_sampling_rate < 100) {
+         lazy_migration_threshold = lazy_migration_sampling_rate;
+      }
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
    }
 

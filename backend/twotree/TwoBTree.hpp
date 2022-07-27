@@ -1058,13 +1058,13 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
    std::size_t hot_partition_capacity_bytes;
    std::size_t hot_partition_size_bytes = 0;
    bool inclusive = false;
-   static constexpr double eviction_threshold = 0.99;
+   static constexpr double eviction_threshold = 0.7;
    uint64_t eviction_items = 0;
    uint64_t eviction_io_reads= 0;
    uint64_t io_reads_snapshot = 0;
    uint64_t io_reads_now = 0;
    uint64_t hot_partition_item_count = 0;
-   u64 lazy_migration_threshold = 30;
+   u64 lazy_migration_threshold = 10;
    bool lazy_migration = false;
    struct TaggedPayload {
       Payload payload;
@@ -1091,7 +1091,10 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       return key;
    }
 
-   TwoBTreeAdapter(leanstore::storage::btree::BTreeInterface& hot_btree, leanstore::storage::btree::BTreeInterface& cold_btree, double hot_partition_size_gb, bool inclusive = false, bool lazy_migration = false) : hot_btree(hot_btree), cold_btree(cold_btree), hot_partition_capacity_bytes(hot_partition_size_gb * 1024ULL * 1024ULL * 1024ULL), inclusive(inclusive), lazy_migration(lazy_migration) {
+   TwoBTreeAdapter(leanstore::storage::btree::BTreeInterface& hot_btree, leanstore::storage::btree::BTreeInterface& cold_btree, double hot_partition_size_gb, bool inclusive = false, int lazy_migration_sampling_rate = 100) : hot_btree(hot_btree), cold_btree(cold_btree), hot_partition_capacity_bytes(hot_partition_size_gb * 1024ULL * 1024ULL * 1024ULL), inclusive(inclusive), lazy_migration(lazy_migration_sampling_rate < 100) {
+      if (lazy_migration_sampling_rate < 100) {
+         lazy_migration_threshold = lazy_migration_sampling_rate;
+      }
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
    }
 
@@ -1150,7 +1153,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       bool victim_found = false;
       auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
-      hot_btree.scanAscExclusive(key_bytes, fold(key_bytes, start_key),
+      hot_btree.scanAsc(key_bytes, fold(key_bytes, start_key),
       [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
          auto real_key = unfold(*(Key*)(key));
          assert(key_length == sizeof(Key));
@@ -1235,7 +1238,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       // try hot partition first
       auto hot_key = tag_with_hot_bit(k);
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
-      auto res = hot_btree.lookupForUpdate(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+      auto res = hot_btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          tp->referenced = true;
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
