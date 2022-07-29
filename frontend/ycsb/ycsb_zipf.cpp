@@ -59,6 +59,7 @@ const std::string kIndexTypeAntiCache = "AntiCache";
 
 const std::string kIndexType2BTree = "2BTree";
 const std::string kIndexType2LSMT = "2LSMT";
+const std::string kIndexType2LSMT_CF = "2LSMT-CF";
 const std::string kIndexTypeTrieLSMT = "Trie-LSMT";
 const std::string kIndexTypeTrieBTree = "Trie-BTree";
 
@@ -113,7 +114,7 @@ int main(int argc, char** argv)
    // -------------------------------------------------------------------------------------
    // LeanStore DB
    double top_tree_size_gib = 0;
-   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexType2BTree) {
+   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
    } else if (FLAGS_index_type == kIndexTypeLSMT || 
               FLAGS_index_type == kIndexTypeAntiCache || 
@@ -128,6 +129,7 @@ int main(int argc, char** argv)
       exit(1);
    }
 
+   cout << "index type " << FLAGS_index_type << std::endl; 
    cout << "request distribution " << FLAGS_ycsb_request_dist << std::endl;
    cout << "dram_gib " << FLAGS_dram_gib << std::endl;
    cout << "top_tree_size_gib " << top_tree_size_gib << std::endl;
@@ -170,6 +172,8 @@ int main(int argc, char** argv)
       adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2LSMT) {
       adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+   } else if (FLAGS_index_type == kIndexType2LSMT_CF){
+      adapter.reset(new RocksDBTwoCFAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeTrieLSMT) {
       adapter.reset(new TrieRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else { // 
@@ -218,6 +222,14 @@ int main(int argc, char** argv)
                table.insert(key, payload);
             }
          });
+         // tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+         //    for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
+         //       YCSBPayload payload;
+         //       utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+         //       YCSBKey key = keys[t_i];
+         //       table.insert(key, payload);
+         //    }
+         // });
       }
       end = chrono::high_resolution_clock::now();
       cout << "time elapsed = " << (chrono::duration_cast<chrono::microseconds>(end - begin).count() / 1000000.0) << endl;
@@ -227,6 +239,7 @@ int main(int argc, char** argv)
       const u64 mib = written_pages * PAGE_SIZE / 1024 / 1024;
       cout << "Inserted volume: (pages, MiB) = (" << written_pages << ", " << mib << ")" << endl;
       cout << "-------------------------------------------------------------------------------------" << endl;
+      adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
    }
    // -------------------------------------------------------------------------------------
    
@@ -259,21 +272,21 @@ int main(int argc, char** argv)
    adapter->report_cache();
 
    
-   
+   if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF)
    {
-      // cout << "Warming up" << endl;
-      // auto t_start = std::chrono::high_resolution_clock::now();
-      // // warm up for 100 seconds
-      // // scramble the database
-      // while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 100000) {
-      //    YCSBKey key = keys[utils::RandomGenerator::getRandU64() % ycsb_tuple_count];
-      //    assert(key < ycsb_tuple_count);
-      //    YCSBPayload result;
-      //    YCSBPayload payload;
-      //    utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-      //    table.update(key, payload);
-      // }
-      // cout << "Warmed up" << endl;
+      cout << "Warming up" << endl;
+      auto t_start = std::chrono::high_resolution_clock::now();
+      // warm up for 100 seconds
+      // scramble the database
+      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 100000) {
+         YCSBKey key = keys[utils::RandomGenerator::getRandU64() % ycsb_tuple_count];
+         assert(key < ycsb_tuple_count);
+         YCSBPayload result;
+         YCSBPayload payload;
+         utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+         table.put(key, payload);
+      }
+      cout << "Warmed up" << endl;
    }
 
    adapter->evict_all();

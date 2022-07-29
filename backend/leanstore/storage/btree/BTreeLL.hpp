@@ -67,6 +67,7 @@ class BTreeLL : public BTreeInterface, public BTreeGeneric
    virtual u64 getHeight() override;
    // -------------------------------------------------------------------------------------
    static ParentSwipHandler findParent(void* btree_object, BufferFrame& to_find);
+   static bool isBTreeLeaf(void* btree_object, BufferFrame& to_find);
    static void undo(void* btree_object, const u8* wal_entry_ptr, const u64 tts);
    static void todo(void* btree_object, const u8* wal_entry_ptr, const u64 tts);
    static std::unordered_map<std::string, std::string> serialize(void* btree_object);

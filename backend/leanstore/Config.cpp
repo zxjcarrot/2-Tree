@@ -23,6 +23,7 @@ DEFINE_bool(print_tx_console, true, "");
 DEFINE_uint32(print_debug_interval_s, 1, "");
 DEFINE_bool(profiling, false, "");
 DEFINE_bool(enable_perf, false, "Enable perf profiling");
+DEFINE_string(iostat_dev, "", "device to profile for");
 // -------------------------------------------------------------------------------------
 DEFINE_uint32(worker_threads, 4, "");
 DEFINE_bool(pin_threads, false, "Responsibility of the driver");

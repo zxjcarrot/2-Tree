@@ -308,6 +308,7 @@ struct DTRegistry::DTMeta BTreeLL::getMeta()
 {
    DTRegistry::DTMeta btree_meta = {.iterate_children = iterateChildrenSwips,
                                     .find_parent = findParent,
+                                    .is_btree_leaf = isBTreeLeaf,
                                     .check_space_utilization = checkSpaceUtilization,
                                     .checkpoint = checkpoint,
                                     .undo = undo,
@@ -317,6 +318,15 @@ struct DTRegistry::DTMeta BTreeLL::getMeta()
    return btree_meta;
 }
 // -------------------------------------------------------------------------------------
+bool BTreeLL::isBTreeLeaf(void* btree_object, BufferFrame& to_find)
+{
+   auto& c_node = *reinterpret_cast<BTreeNode*>(to_find.page.dt);
+   if (c_node.is_leaf) {
+      return true;
+   }
+   return false;
+}
+
 struct ParentSwipHandler BTreeLL::findParent(void* btree_object, BufferFrame& to_find)
 {
    return BTreeGeneric::findParent(*static_cast<BTreeGeneric*>(reinterpret_cast<BTreeLL*>(btree_object)), to_find);

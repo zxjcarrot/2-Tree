@@ -31,6 +31,7 @@ struct DTRegistry {
    struct DTMeta {
       std::function<void(void*, BufferFrame&, std::function<bool(Swip<BufferFrame>&)>)> iterate_children;
       std::function<ParentSwipHandler(void*, BufferFrame&)> find_parent;
+      std::function<bool(void*, BufferFrame&)> is_btree_leaf;
       std::function<bool(void*, BufferFrame&, OptimisticGuard&, ParentSwipHandler&)> check_space_utilization;
       std::function<void(void* btree_object, BufferFrame& bf, u8* dest)> checkpoint;
       // -------------------------------------------------------------------------------------
@@ -58,6 +59,7 @@ struct DTRegistry {
    void iterateChildrenSwips(DTID dtid, BufferFrame&, std::function<bool(Swip<BufferFrame>&)>);
    ParentSwipHandler findParent(DTID dtid, BufferFrame&);
    bool checkSpaceUtilization(DTID dtid, BufferFrame&, OptimisticGuard&, ParentSwipHandler&);
+   bool isBTreeLeaf(DTID dtid, BufferFrame& bf);
    // Pre: bf is shared/exclusive latched
    void checkpoint(DTID dt_id, BufferFrame& bf, u8*);
    // -------------------------------------------------------------------------------------

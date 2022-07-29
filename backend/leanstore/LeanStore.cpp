@@ -99,9 +99,27 @@ LeanStore::~LeanStore()
    }
    //  close(ssd_fd);
 }
+std::string exec_cmd(const char* cmd) {
+    std::array<char, 128> buffer;
+    std::string result;
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
+    if (!pipe) {
+        throw std::runtime_error("popen() failed!");
+    }
+    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+        result += buffer.data();
+    }
+    return result;
+}
+
 // -------------------------------------------------------------------------------------
 void LeanStore::startProfilingThread()
 {
+   double read_iops = 0;
+   double write_iops = 0;
+   double read_bw = 0;
+   double write_bw = 0;
+   double dev_util = 0;
    std::thread profiling_thread([&]() {
       profiling::BMTable bm_table(*buffer_manager.get());
       profiling::DTTable dt_table(*buffer_manager.get());
@@ -169,11 +187,12 @@ void LeanStore::startProfilingThread()
          if (FLAGS_print_tx_console) {
             tabulate::Table table;
             table.add_row({"t", "TX P", "TX A", "TX C", "W MiB", "R MiB", "Instrs/TX", "Cycles/TX", "CPUs", "LLC-miss/TX", "WAL T", "WAL R G", "WAL W G",
-                           "GCT Rounds", "Split/Merge"});
+                           "GCT Rounds", "Split/Merge", "IO Read/s", "IO Write/s", "Read BW(MB/s)", "Write BW(MB/s)", "IO Util(%)"});
             table.add_row({std::to_string(seconds), cr_table.get("0", "tx"), cr_table.get("0", "tx_abort"), cr_table.get("0", "gct_committed_tx"),
                            bm_table.get("0", "w_mib"), bm_table.get("0", "r_mib"), std::to_string(instr_per_tx), std::to_string(cycles_per_tx),
                            std::to_string(cpu_table.workers_agg_events["CPU"]), std::to_string(l1_per_tx), cr_table.get("0", "wal_total"),
-                           cr_table.get("0", "wal_read_gib"), cr_table.get("0", "wal_write_gib"), cr_table.get("0", "gct_rounds"), dt_table.get("0", "split_merge_count")});
+                           cr_table.get("0", "wal_read_gib"), cr_table.get("0", "wal_write_gib"), cr_table.get("0", "gct_rounds"), dt_table.get("0", "split_merge_count"),
+                           std::to_string(read_iops), std::to_string(write_iops), std::to_string(read_bw), std::to_string(write_bw), std::to_string(dev_util)});
             // -------------------------------------------------------------------------------------
             table.format().width(10);
             table.column(0).format().width(5);
@@ -199,7 +218,14 @@ void LeanStore::startProfilingThread()
                print_table(table, [](u64 line_n) { return line_n == 4; });
             }
             // -------------------------------------------------------------------------------------
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            if (FLAGS_iostat_dev != "") {
+               std::string cmd = "iostat -x 1 2 -m | grep " + FLAGS_iostat_dev + " | tail -n 1 | awk '{print $2,$3,$4,$5,$16}'";
+               std::stringstream cmd_result(exec_cmd(cmd.c_str()));
+               cmd_result >> read_iops >> write_iops >> read_bw >> write_bw >> dev_util;
+            } else {
+               std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            }
+
             seconds += 1;
             std::locale::global(std::locale::classic());
          }

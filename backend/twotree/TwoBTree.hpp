@@ -1428,7 +1428,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       std::cout << "BTree # pages " << pages << std::endl;
       std::cout << "Hot BTree height " << hot_btree.getHeight() << std::endl;
       std::cout << "Cold BTree height " << cold_btree.getHeight() << std::endl;
-      auto minimal_pages = entries * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;
+      auto minimal_pages = (num_btree_entries) * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;
       std::cout << "BTree average fill factor " <<  (minimal_pages + 0.0) / pages << std::endl;
       double btree_hit_rate = btree_buffer_hit / (btree_buffer_hit + btree_buffer_miss + 1.0);
       std::cout << "BTree buffer hits/misses " <<  btree_buffer_hit << "/" << btree_buffer_miss << std::endl;
