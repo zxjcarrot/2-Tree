@@ -498,8 +498,8 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       std::vector<rocksdb::ColumnFamilyDescriptor> column_families;
       // have to open default column family
       auto top_cf_options = rocksdb::ColumnFamilyOptions(db_options);
+      top_cf_options.compaction_pri = rocksdb::kOldestLargestSeqFirst;
       auto bottom_cf_options = rocksdb::ColumnFamilyOptions(db_options);
-
 
       std::cout << "RocksDB top cf write buffer size " << top_cf_options.write_buffer_size / 1024.0 /1024.0 << " mb" << std::endl;
       std::cout << "RocksDB bottom cf write buffer size " << top_cf_options.write_buffer_size / 1024.0 /1024.0 << " mb" << std::endl;
@@ -517,6 +517,10 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    
    void evict_all() override {
       evict_all_items();
+      rocksdb::CompactRangeOptions options;
+      auto s = db->CompactRange(options, top_handle, nullptr, nullptr);
+      assert(s == rocksdb::Status::OK());
+      std::cout << "After full compaction, top column family size " << top_db_approximate_size();
       //rocksdb::FlushOptions fopts;
       // db->Flush(fopts);
       // std::cout << "After deleting all entries, rocksdb files size " << toptree_options.sst_file_manager->GetTotalSize();
@@ -622,7 +626,9 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
          u8 end_key_bytes[sizeof(Key)];
          leanstore::fold(begin_key_bytes, std::numeric_limits<Key>::min());
          leanstore::fold(end_key_bytes, std::numeric_limits<Key>::max());
-         rocksdb::Status s = db->DeleteRange(options, top_handle, rocksdb::Slice((const char *)begin_key_bytes, sizeof(begin_key_bytes)), rocksdb::Slice((const char *)end_key_bytes, sizeof(end_key_bytes)));
+         rocksdb::Status s = db->DeleteRange(options, top_handle, 
+                                             rocksdb::Slice((const char *)begin_key_bytes, sizeof(begin_key_bytes)), 
+                                             rocksdb::Slice((const char *)end_key_bytes, sizeof(end_key_bytes)));
          assert(s.ok());
       } else {
          clock_hand = std::numeric_limits<Key>::max();

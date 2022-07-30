@@ -239,7 +239,6 @@ int main(int argc, char** argv)
       const u64 mib = written_pages * PAGE_SIZE / 1024 / 1024;
       cout << "Inserted volume: (pages, MiB) = (" << written_pages << ", " << mib << ")" << endl;
       cout << "-------------------------------------------------------------------------------------" << endl;
-      adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
    }
    // -------------------------------------------------------------------------------------
    
@@ -269,7 +268,6 @@ int main(int argc, char** argv)
    // -------------------------------------------------------------------------------------
    cout << "-------------------------------------------------------------------------------------" << endl;
    cout << "~Transactions" << endl;
-   adapter->report_cache();
 
    
    if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF)
@@ -292,6 +290,8 @@ int main(int argc, char** argv)
    adapter->evict_all();
 
    cout << "All evicted" << endl;
+
+   adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
    atomic<bool> keep_running = true;
    atomic<u64> running_threads_counter = 0;
    atomic<u64> txs = 0;

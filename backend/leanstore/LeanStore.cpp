@@ -99,17 +99,21 @@ LeanStore::~LeanStore()
    }
    //  close(ssd_fd);
 }
-std::string exec_cmd(const char* cmd) {
-    std::array<char, 128> buffer;
-    std::string result;
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
-    if (!pipe) {
-        throw std::runtime_error("popen() failed!");
-    }
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
-    return result;
+std::string exec_cmd(const char* command) {
+   char tmpname [L_tmpnam];
+   std::tmpnam ( tmpname );
+   std::string scommand = command;
+   std::string cmd = scommand + " >> " + tmpname;
+   std::system(cmd.c_str());
+   std::ifstream file(tmpname, std::ios::in | std::ios::binary );
+   std::string result;
+   if (file) {
+      while (!file.eof()) result.push_back(file.get())
+         ;
+      file.close();
+   }
+   remove(tmpname);
+   return result;
 }
 
 // -------------------------------------------------------------------------------------
@@ -220,7 +224,9 @@ void LeanStore::startProfilingThread()
             // -------------------------------------------------------------------------------------
             if (FLAGS_iostat_dev != "") {
                std::string cmd = "iostat -x 1 2 -m | grep " + FLAGS_iostat_dev + " | tail -n 1 | awk '{print $2,$3,$4,$5,$16}'";
+               std::cout << cmd << std::endl;
                std::stringstream cmd_result(exec_cmd(cmd.c_str()));
+               std::cout << cmd << "done" << std::endl;
                cmd_result >> read_iops >> write_iops >> read_bw >> write_bw >> dev_util;
             } else {
                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
