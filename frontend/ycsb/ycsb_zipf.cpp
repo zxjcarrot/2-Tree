@@ -211,25 +211,25 @@ int main(int argc, char** argv)
       std::random_shuffle(keys.begin(), keys.end());
       begin = chrono::high_resolution_clock::now();
       {
-         tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
-            vector<u64> range_keys(range.end() - range.begin());
-            std::iota(range_keys.begin(), range_keys.end(), range.begin());
-            std::random_shuffle(range_keys.begin(), range_keys.end());
-            for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
-               YCSBPayload payload;
-               utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-               YCSBKey key = range_keys[t_i - range.begin()];
-               table.insert(key, payload);
-            }
-         });
          // tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+         //    vector<u64> range_keys(range.end() - range.begin());
+         //    std::iota(range_keys.begin(), range_keys.end(), range.begin());
+         //    std::random_shuffle(range_keys.begin(), range_keys.end());
          //    for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
          //       YCSBPayload payload;
          //       utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-         //       YCSBKey key = keys[t_i];
+         //       YCSBKey key = range_keys[t_i - range.begin()];
          //       table.insert(key, payload);
          //    }
          // });
+         tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+            for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
+               YCSBPayload payload;
+               utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+               YCSBKey key = keys[t_i];
+               table.insert(key, payload);
+            }
+         });
       }
       end = chrono::high_resolution_clock::now();
       cout << "time elapsed = " << (chrono::duration_cast<chrono::microseconds>(end - begin).count() / 1000000.0) << endl;
@@ -276,13 +276,22 @@ int main(int argc, char** argv)
       auto t_start = std::chrono::high_resolution_clock::now();
       // warm up for 100 seconds
       // scramble the database
-      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 100000) {
-         YCSBKey key = keys[utils::RandomGenerator::getRandU64() % ycsb_tuple_count];
+      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 200000) {
+         YCSBKey key = keys[random_generator->rand() % ycsb_tuple_count];
+
          assert(key < ycsb_tuple_count);
          YCSBPayload result;
-         YCSBPayload payload;
-         utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-         table.put(key, payload);
+         if (FLAGS_ycsb_read_ratio == 100 || utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
+            table.lookup(key, result);
+         } else {
+            YCSBPayload payload;
+            utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+            if (FLAGS_update_or_put == 0) {
+               table.update(key, payload);
+            } else {
+               table.put(key, payload);
+            }
+         }
       }
       cout << "Warmed up" << endl;
    }

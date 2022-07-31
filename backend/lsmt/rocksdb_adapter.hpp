@@ -15,6 +15,8 @@
 #include <string>
 #include <thread>
 #include "rocksdb/filter_policy.h"
+#include "rocksdb/iostats_context.h"
+#include "rocksdb/perf_context.h"
 template <typename Key, typename Payload>
 struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    rocksdb::DB* db;
@@ -22,6 +24,7 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    bool lazy_migration;
    bool wal;
    u64 lazy_migration_threshold = 1;
+   std::size_t total_lookups = 0;
    RocksDBAdapter(const std::string & db_dir, double row_cache_memory_budget_gib, double block_cache_memory_budget_gib, bool wal = false, int lazy_migration_sampling_rate = 100): lazy_migration(lazy_migration_sampling_rate < 100), wal(wal) {
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
@@ -40,13 +43,16 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       options.compression = rocksdb::kNoCompression;
       options.use_direct_io_for_flush_and_compaction = true;
       rocksdb::BlockBasedTableOptions table_options;
+      table_options.block_size = 16 * 1024;
       table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true, 0);
       table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
       table_options.cache_index_and_filter_blocks = true;
       options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
+      options.statistics = rocksdb::CreateDBStatistics();
       rocksdb::Status status =
          rocksdb::DB::Open(options, db_dir, &db);
       assert(status.ok());
+      rocksdb::SetPerfLevel(rocksdb::PerfLevel::kEnableTimeExceptForMutex);
    }
     
    void evict_all() {
@@ -55,7 +61,12 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
    }
 
    void clear_stats() {
+      // rocksdb::FlushOptions fopts;
+      // db->Flush(fopts);
       db->ResetStats();
+      rocksdb::get_iostats_context()->Reset();
+      rocksdb::get_perf_context()->Reset();
+      total_lookups = 0;
    }
 
    bool should_migrate() {
@@ -65,6 +76,7 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       return true;
    }
    bool lookup(Key k, Payload& v) {
+      ++total_lookups;
       rocksdb::ReadOptions options;
       u8 key_bytes[sizeof(Key)];
       auto key_len = leanstore::fold(key_bytes, k);
@@ -136,6 +148,8 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       res = db->GetProperty("rocksdb.block-cache-entry-stats", &val);
       assert(res);
       std::cout << "RocksDB block-cache-entry-stats " <<val << std::endl;
-      
+      std::cout << total_lookups<< " lookups" << std::endl;
+      std::cout << "perf stat " << rocksdb::get_perf_context()->ToString() << std::endl;
+      std::cout << "io stat " << rocksdb::get_iostats_context()->ToString() << std::endl;
    }
 };

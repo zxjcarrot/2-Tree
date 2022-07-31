@@ -10,6 +10,8 @@
 #include "rocksdb/sst_file_manager.h"
 #include "rocksdb/filter_policy.h"
 #include "rocksdb/merge_operator.h"
+#include "rocksdb/iostats_context.h"
+#include "rocksdb/perf_context.h"
 
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
@@ -511,11 +513,13 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       std::size_t block_cache_size = (dram_budget_gib) * 1024ULL * 1024ULL * 1024ULL - db_options.write_buffer_size * db_options.max_write_buffer_number;
       std::cout << "RocksDB block cache size " << block_cache_size / 1024.0 /1024.0/1024 << " gib" << std::endl;
 
+      table_options.block_size = 16 * 1024;
       table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true, 0);
       table_options.cache_index_and_filter_blocks = true;
       table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
       db_options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
-      
+      db_options.statistics = rocksdb::CreateDBStatistics();
+
       assert(status.ok());
 
       db_options.merge_operator.reset(new ToggleReferenceBitOperator());
@@ -541,6 +545,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       top_handle = handles[1];
       bottom_handle = handles[0];
       assert(status.ok());
+      rocksdb::SetPerfLevel(rocksdb::PerfLevel::kEnableTimeExceptForMutex);
    }
    
    void evict_all() override {
@@ -563,6 +568,10 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       db->ResetStats();
       lookup_hit_top = 0;
       total_lookups = 0;
+      // rocksdb::FlushOptions fopts;
+      // db->Flush(fopts);
+      rocksdb::get_iostats_context()->Reset();
+      rocksdb::get_perf_context()->Reset();
    }
 
    bool sample() {
@@ -788,7 +797,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       auto key_len = leanstore::fold(key_bytes, k);
       rocksdb::Status s = db->Merge(options, top_handle, rocksdb::Slice((const char*)key_bytes, key_len), 
                                     rocksdb::Slice(&kToggleReferenceBitOn, sizeof(kToggleReferenceBitOn)));
-      assert(status == rocksdb::Status::OK());
+      assert(s == rocksdb::Status::OK());
    }
 
    bool lookup(Key k, Payload& v) {
@@ -919,6 +928,8 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       report_db(db, "top", top_handle);
       report_db(db, "bottom", bottom_handle);
       std::cout << total_lookups<< " lookups, "  << lookup_hit_top << " lookup hit top" << std::endl;
+      std::cout << "perf stat " << rocksdb::get_perf_context()->ToString() << std::endl;
+      std::cout << "io stat " << rocksdb::get_iostats_context()->ToString() << std::endl;
    }
 };
 
