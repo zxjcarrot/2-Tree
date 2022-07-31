@@ -173,7 +173,7 @@ int main(int argc, char** argv)
    } else if (FLAGS_index_type == kIndexType2LSMT) {
       adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexType2LSMT_CF){
-      adapter.reset(new RocksDBTwoCFAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+      adapter.reset(new RocksDBTwoCFAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeTrieLSMT) {
       adapter.reset(new TrieRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else { // 
@@ -287,7 +287,7 @@ int main(int argc, char** argv)
       cout << "Warmed up" << endl;
    }
 
-   adapter->evict_all();
+   //adapter->evict_all();
 
    cout << "All evicted" << endl;
 

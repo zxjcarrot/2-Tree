@@ -9,6 +9,7 @@
 #include "leanstore/BTreeAdapter.hpp"
 #include "rocksdb/sst_file_manager.h"
 #include "rocksdb/filter_policy.h"
+#include "rocksdb/merge_operator.h"
 
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
@@ -436,6 +437,8 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    std::size_t topdb_item_count = 0;
    std::size_t cache_size_bytes;
    std::size_t cache_capacity_bytes;
+   std::size_t lookup_hit_top = 0;
+   std::size_t total_lookups = 0;
    static constexpr double eviction_threshold = 0.99;
 
    Key clock_hand = std::numeric_limits<Key>::max();
@@ -447,17 +450,38 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    };
    rocksdb::SstFileManager * top_file_manager;
 
-   RocksDBTwoCFAdapter(const std::string & db_dir, double dram_budget_gib, int lazy_migration_sampling_rate = 100, bool inclusive = false): lazy_migration(lazy_migration_sampling_rate < 100), inclusive(inclusive) {
+   class ToggleReferenceBitOperator : public rocksdb::AssociativeMergeOperator {
+   public:
+      virtual ~ToggleReferenceBitOperator() {}
+      virtual bool Merge(const rocksdb::Slice& key, const rocksdb::Slice* existing_value,
+                         const rocksdb::Slice& value, std::string* new_value,
+                         rocksdb::Logger* logger) const override {
+         assert(existing_value != nullptr);
+         assert(existing_value->size() == sizeof(TaggedPayload));
+         TaggedPayload new_payload = *((TaggedPayload*)(existing_value->data()));
+         char toggle_value = value.data()[0];
+         assert(toggle_value == kToggleReferenceBitOff || toggle_value == kToggleReferenceBitOn);
+         new_payload.referenced = (bool)toggle_value;
+         *new_value = std::string((const char *)&new_payload, sizeof(new_payload));
+         return true;// always return true for this, since we treat all errors as "zero".
+      }
+
+      virtual const char* Name() const override {
+         return "ToggleReferenceBitOperator";
+      }
+   };
+   RocksDBTwoCFAdapter(const std::string & db_dir, double toptree_cache_budget_gib, double dram_budget_gib, int lazy_migration_sampling_rate = 100, bool inclusive = false): lazy_migration(lazy_migration_sampling_rate < 100), inclusive(inclusive) {
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
       }
       this->cache_size_bytes = 0;
-      this->cache_capacity_bytes = dram_budget_gib * 1024 * 1024 * 1024;
+      this->cache_capacity_bytes = toptree_cache_budget_gib * 1024 * 1024 * 1024;
       db_options.write_buffer_size = 8 * 1024 * 1024;
       db_options.create_if_missing = true;
       std::cout << "lazy_migration_threshold " << lazy_migration_threshold << std::endl;
       std::cout << "lazy_migration " << lazy_migration << std::endl;
       std::cout << "inclusive cache  " << inclusive << std::endl;
+      std::cout << "2LSMT top tree size " << (toptree_cache_budget_gib) << " gib" << std::endl;
       std::cout << "RocksDB cache budget " << (dram_budget_gib) << " gib" << std::endl;
       std::cout << "RocksDB write_buffer_size " << db_options.write_buffer_size << std::endl;
       std::cout << "RocksDB max_write_buffer_number " << db_options.max_write_buffer_number << std::endl;
@@ -494,13 +518,16 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       
       assert(status.ok());
 
+      db_options.merge_operator.reset(new ToggleReferenceBitOperator());
       // open DB with two column families
       std::vector<rocksdb::ColumnFamilyDescriptor> column_families;
       // have to open default column family
       auto top_cf_options = rocksdb::ColumnFamilyOptions(db_options);
-      top_cf_options.compaction_pri = rocksdb::kOldestLargestSeqFirst;
+      //top_cf_options.compaction_pri = rocksdb::kOldestLargestSeqFirst;
+      assert(top_cf_options.merge_operator.get());
       auto bottom_cf_options = rocksdb::ColumnFamilyOptions(db_options);
-
+      assert(bottom_cf_options.merge_operator.get());
+      //bottom_cf_options.merge_operator.reset();
       std::cout << "RocksDB top cf write buffer size " << top_cf_options.write_buffer_size / 1024.0 /1024.0 << " mb" << std::endl;
       std::cout << "RocksDB bottom cf write buffer size " << top_cf_options.write_buffer_size / 1024.0 /1024.0 << " mb" << std::endl;
       column_families.push_back(rocksdb::ColumnFamilyDescriptor(
@@ -508,6 +535,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       // open the new one, too
       column_families.push_back(rocksdb::ColumnFamilyDescriptor(
             "t", bottom_cf_options));
+      
       std::vector<rocksdb::ColumnFamilyHandle*> handles;
       status = rocksdb::DB::Open(db_options, db_dir, column_families, &handles, &db);
       top_handle = handles[1];
@@ -533,6 +561,8 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
 
    void clear_stats() {
       db->ResetStats();
+      lookup_hit_top = 0;
+      total_lookups = 0;
    }
 
    bool sample() {
@@ -565,14 +595,14 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       rocksdb::SizeApproximationOptions options;
  
       options.include_memtables = true;
-      options.files_size_error_margin = 0.1;
+      options.files_size_error_margin = 0.05;
       rocksdb::Status s = db->GetApproximateSizes(options, top_handle, ranges.data(), 1, sizes.data());
       assert(s.ok());
       return sizes[0];
    }
 
    bool cache_under_pressure() {
-      return top_db_approximate_size() >= 2 * cache_capacity_bytes * eviction_threshold;
+      return top_db_approximate_size() >= 1 * cache_capacity_bytes * eviction_threshold;
    }
 
    void evict_all_items() {
@@ -635,6 +665,8 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       }
    }
    
+   char kToggleReferenceBitOff = 0;
+   char kToggleReferenceBitOn = 1;
    int empty_slots = 0;
    void evict_a_bunch() {
       Key start_key = clock_hand;
@@ -660,7 +692,8 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
             tp2.referenced = false;
             rocksdb::WriteOptions options;
             options.disableWAL = true;
-            auto s = db->Put(options, top_handle, it->key(), rocksdb::Slice((const char *)&tp2, sizeof(TaggedPayload)));
+            //auto s = db->Put(options, top_handle, it->key(), rocksdb::Slice((const char *)&tp2, sizeof(TaggedPayload)));
+            rocksdb::Status s = db->Merge(options, top_handle, it->key(), rocksdb::Slice(&kToggleReferenceBitOff, sizeof(kToggleReferenceBitOff)));
             assert(s == rocksdb::Status::OK());
             continue;
          }
@@ -714,6 +747,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    }
 
    int measure_size_countdown = 1000;
+
    void admit_element(Key k, Payload & v, bool dirty = false, bool insert = false) {
       if (empty_slots <= 0) {
          if (--measure_size_countdown == 0) {
@@ -739,21 +773,51 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       }
    }
 
+   void set_referencet_bit(Key k) {
+      if (empty_slots <= 0) {
+         if (--measure_size_countdown == 0) {
+            if (cache_under_pressure()) {
+               evict_a_bunch();
+            }
+            measure_size_countdown = 1000;
+         }
+      }
+      rocksdb::WriteOptions options;
+      options.disableWAL = true;
+      u8 key_bytes[sizeof(Key)];
+      auto key_len = leanstore::fold(key_bytes, k);
+      rocksdb::Status s = db->Merge(options, top_handle, rocksdb::Slice((const char*)key_bytes, key_len), 
+                                    rocksdb::Slice(&kToggleReferenceBitOn, sizeof(kToggleReferenceBitOn)));
+      assert(status == rocksdb::Status::OK());
+   }
+
    bool lookup(Key k, Payload& v) {
+      if (--measure_size_countdown == 0) {
+         if (cache_under_pressure()) {
+            evict_a_bunch();
+         }
+         measure_size_countdown = 1000;
+      }
       rocksdb::ReadOptions options;
+      total_lookups++;
       u8 key_bytes[sizeof(Key)];
       auto key_len = leanstore::fold(key_bytes, k);
       std::string value;
       auto status = db->Get(options, top_handle, rocksdb::Slice((const char *)key_bytes, key_len), &value);
 
       if (status == rocksdb::Status::OK()) {
+         lookup_hit_top++;
          assert(sizeof(TaggedPayload) == value.size());
          auto tp = ((TaggedPayload*)(value.data()));
          v = tp->payload;
          if (tp->referenced == false) {
             // set reference bit
-            admit_element(k, v, tp->modified, false);
+            //admit_element(k, v, tp->modified, false);
+            set_referencet_bit(k);
          }
+         // if (leanstore::utils::RandomGenerator::getRandU64(0, 100) < 1) {
+         //    admit_element(k, tp->payload, tp->modified, false);
+         // }
          return true;
       }
 
@@ -854,6 +918,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    void report(u64, u64) override {
       report_db(db, "top", top_handle);
       report_db(db, "bottom", bottom_handle);
+      std::cout << total_lookups<< " lookups, "  << lookup_hit_top << " lookup hit top" << std::endl;
    }
 };
 

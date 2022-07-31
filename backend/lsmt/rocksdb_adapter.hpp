@@ -77,6 +77,9 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
          // if (should_migrate()) {
          //    put(k, v);
          // }
+         // if (leanstore::utils::RandomGenerator::getRandU64(0, 100) < 10) {
+         //    put(k, v);
+         // }
          return true;
       }
       return false;
