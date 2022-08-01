@@ -1071,7 +1071,8 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       bool modified = false;
       bool referenced = false;
    };
-   
+   uint64_t total_lookups = 0;
+   uint64_t lookups_hit_top = 0;
    Key clock_hand = std::numeric_limits<Key>::max();
    constexpr static u64 PartitionBitPosition = 63;
    constexpr static u64 PartitionBitMask = 0x8000000000000000;
@@ -1106,6 +1107,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       btree_buffer_miss = btree_buffer_hit = 0;
       eviction_items = eviction_io_reads = 0;
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
+      lookups_hit_top = total_lookups = 0;
    }
 
    std::size_t btree_hot_entries() {
@@ -1169,7 +1171,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
          victim_found = true;
          evict_keys.push_back(real_key);
          evict_payloads.emplace_back(*tp);
-         if (evict_keys.size() >= 100) {
+         if (evict_keys.size() >= 512) {
             return false;
          }
          return true;
@@ -1232,6 +1234,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
 
    bool lookup(Key k, Payload& v) override
    {
+      ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       TaggedPayload tp;
@@ -1252,6 +1255,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
          btree_buffer_miss += new_miss - old_miss;
       }
       if (res) {
+         ++lookups_hit_top;
          return res;
       }
 
@@ -1434,6 +1438,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       std::cout << "BTree buffer hits/misses " <<  btree_buffer_hit << "/" << btree_buffer_miss << std::endl;
       std::cout << "BTree buffer hit rate " <<  btree_hit_rate << " miss rate " << (1 - btree_hit_rate) << std::endl;
       std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
+      std::cout << total_lookups<< " lookups, "  << lookups_hit_top << " lookup hit top" << std::endl;
    }
 };
 

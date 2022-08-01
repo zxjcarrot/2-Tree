@@ -211,25 +211,28 @@ int main(int argc, char** argv)
       std::random_shuffle(keys.begin(), keys.end());
       begin = chrono::high_resolution_clock::now();
       {
-         // tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
-         //    vector<u64> range_keys(range.end() - range.begin());
-         //    std::iota(range_keys.begin(), range_keys.end(), range.begin());
-         //    std::random_shuffle(range_keys.begin(), range_keys.end());
-         //    for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
-         //       YCSBPayload payload;
-         //       utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-         //       YCSBKey key = range_keys[t_i - range.begin()];
-         //       table.insert(key, payload);
-         //    }
-         // });
-         tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
-            for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
-               YCSBPayload payload;
-               utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-               YCSBKey key = keys[t_i];
-               table.insert(key, payload);
-            }
-         });
+         if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeLSMT) {
+            tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+               for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
+                  YCSBPayload payload;
+                  utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+                  YCSBKey key = keys[t_i];
+                  table.insert(key, payload);
+               }
+            });
+         } else {
+            tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+               vector<u64> range_keys(range.end() - range.begin());
+               std::iota(range_keys.begin(), range_keys.end(), range.begin());
+               std::random_shuffle(range_keys.begin(), range_keys.end());
+               for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
+                  YCSBPayload payload;
+                  utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+                  YCSBKey key = range_keys[t_i - range.begin()];
+                  table.insert(key, payload);
+               }
+            });
+         }
       }
       end = chrono::high_resolution_clock::now();
       cout << "time elapsed = " << (chrono::duration_cast<chrono::microseconds>(end - begin).count() / 1000000.0) << endl;
@@ -270,7 +273,7 @@ int main(int argc, char** argv)
    cout << "~Transactions" << endl;
 
    
-   if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF)
+   // if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeLSMT)
    {
       cout << "Warming up" << endl;
       auto t_start = std::chrono::high_resolution_clock::now();
