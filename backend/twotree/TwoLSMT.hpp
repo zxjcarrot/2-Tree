@@ -674,10 +674,12 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       }
    }
    
-   char kToggleReferenceBitOff = 0;
-   char kToggleReferenceBitOn = 1;
+   constexpr static char kToggleReferenceBitOff = 0;
+   constexpr static char kToggleReferenceBitOn = 1;
    int empty_slots = 0;
    void evict_a_bunch() {
+      static constexpr int kClockWalkSteps = 2048;
+      int steps = kClockWalkSteps;
       Key start_key = clock_hand;
       if (start_key == std::numeric_limits<Key>::max()) {
          start_key = std::numeric_limits<Key>::min();
@@ -694,6 +696,9 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
 
       leanstore::fold(key_bytes, start_key);
       for (it->Seek(rocksdb::Slice((const char *)key_bytes, sizeof(key_bytes))); it->Valid(); it->Next()) {
+         if (--steps == 0) {
+            break;
+         }
          assert(it->value().size() == sizeof(TaggedPayload));
          auto tp = ((TaggedPayload*)(it->value().data()));
          if (tp->referenced == true) {
@@ -712,7 +717,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
          victim_found = true;
          evict_keys.push_back(real_key);
          evict_payloads.emplace_back(*tp);
-         if (evict_keys.size() >= 5000) {
+         if (evict_keys.size() >= 1024) {
             break;
          }
       }
@@ -738,7 +743,9 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
             }
          }
       } else {
-         clock_hand = std::numeric_limits<Key>::max();
+         if (steps == kClockWalkSteps) {
+            clock_hand = std::numeric_limits<Key>::max();
+         }
       }
    }
 
@@ -755,16 +762,21 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       assert(s == rocksdb::Status::OK());
    }
 
-   int measure_size_countdown = 1000;
+   static constexpr int kEvictionCheckInterval = 50;
+   int measure_size_countdown = kEvictionCheckInterval;
+
+   void try_eviction() {
+      if (--measure_size_countdown == 0) {
+         if (cache_under_pressure()) {
+            evict_a_bunch();
+         }
+         measure_size_countdown = kEvictionCheckInterval;
+      }
+   }
 
    void admit_element(Key k, Payload & v, bool dirty = false, bool insert = false) {
       if (empty_slots <= 0) {
-         if (--measure_size_countdown == 0) {
-            if (cache_under_pressure()) {
-               evict_a_bunch();
-            }
-            measure_size_countdown = 1000;
-         }
+         try_eviction();
       }
          
       rocksdb::WriteOptions options;
@@ -784,12 +796,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
 
    void set_referencet_bit(Key k) {
       if (empty_slots <= 0) {
-         if (--measure_size_countdown == 0) {
-            if (cache_under_pressure()) {
-               evict_a_bunch();
-            }
-            measure_size_countdown = 1000;
-         }
+         try_eviction();
       }
       rocksdb::WriteOptions options;
       options.disableWAL = true;
@@ -801,12 +808,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    }
 
    bool lookup(Key k, Payload& v) {
-      if (--measure_size_countdown == 0) {
-         if (cache_under_pressure()) {
-            evict_a_bunch();
-         }
-         measure_size_countdown = 1000;
-      }
+      try_eviction();
       rocksdb::ReadOptions options;
       total_lookups++;
       u8 key_bytes[sizeof(Key)];
@@ -856,6 +858,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    }
 
    void update(Key k, Payload& v) {
+      try_eviction();
       Payload t;
       // //read
       // auto status __attribute__((unused)) = lookup(k, t);

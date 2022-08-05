@@ -134,15 +134,92 @@ struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
       }
    }
 
+   void evict_a_bunch() {
+      int steps = 128;
+      std::vector<Key> evict_keys;
+      std::vector<TaggedPayload*> evict_payloads;
+      bool victim_found = false;
+      int cnt = 0;
+      Key key = clock_hand;
+      typename ARTIndex<Key, TaggedPayload>::Iterator it;
+      if (key == std::numeric_limits<Key>::max()) {
+         it = cache.begin();
+      } else {
+         it = cache.lower_bound(key);
+      }
+      auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
+      while (it.end() == false) {
+         ++cnt;
+         it++;
+         auto tagged_payload = it.value();
+         if (tagged_payload == nullptr) {
+            clock_hand = std::numeric_limits<Key>::max();
+            break;
+         }
+         if (--steps == 0) {
+            break;
+         }
+         clock_hand = it.key();
+
+         if (tagged_payload->referenced == true) {
+            tagged_payload->referenced = false;
+         } else {
+            evict_keys.push_back(it.key());
+            evict_payloads.emplace_back(it.value());
+            victim_found = true;
+            if (evict_keys.size() >= 64) {
+               break;
+            }
+         }
+      }
+      auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
+      assert(io_reads_new >= io_reads_old);
+      eviction_io_reads += io_reads_new - io_reads_old;
+
+      if (victim_found) {
+         io_reads_old = WorkerCounters::myCounters().io_reads.load();
+         for (size_t i = 0; i< evict_keys.size(); ++i) {
+            auto key = evict_keys[i];
+            auto tagged_payload = evict_payloads[i];
+            cache.erase(key);
+            if (inclusive) {
+               if (tagged_payload->modified) {
+                  upsert_btree(key, tagged_payload->payload);
+               }
+            } else { // exclusive, put it back in the on-disk B-Tree
+               insert_btree(key, tagged_payload->payload);
+            }
+            delete tagged_payload;
+         }
+         auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
+         assert(io_reads_new >= io_reads_old);
+         eviction_io_reads += io_reads_new - io_reads_old;
+         eviction_items += evict_keys.size();
+      } else {
+         if (steps == 128) {
+            clock_hand = std::numeric_limits<Key>::max();
+         }
+      }
+   }
+
    void evict_till_safe() {
       while (cache_under_pressure()) {
          evict_one();
       }
    }
 
+   int eviction_count_down = 50;
+   void try_eviction() {
+      if (--eviction_count_down == 0) {
+         if (cache_under_pressure()) {
+            evict_a_bunch();
+         }
+         eviction_count_down = 50;
+      }
+   }
+
    void admit_element(Key k, Payload & v, bool dirty = false) {
-      if (cache_under_pressure())
-         evict_till_safe();
+      try_eviction();
       assert(cache.exists(k) == false);
       cache.insert(k, new TaggedPayload{k, v, dirty, true});
       assert(cache.exists(k) == true);
@@ -150,7 +227,7 @@ struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
 
    bool lookup(Key k, Payload& v) override
    {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
       TaggedPayload * v_ptr = nullptr;
       if (cache.find(k, v_ptr) == true) {
          v_ptr->referenced = true;
@@ -229,7 +306,7 @@ struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
 
    void update(Key k, Payload& v) override
    {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();try_eviction();});
       TaggedPayload * v_ptr = nullptr;
       if (cache.find(k, v_ptr)) {
          v_ptr->referenced = true;
@@ -275,7 +352,7 @@ struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
 
    void put(Key k, Payload& v) override
    {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
       TaggedPayload * v_ptr = nullptr;
       if (cache.find(k, v_ptr)) {
          v_ptr->referenced = true;

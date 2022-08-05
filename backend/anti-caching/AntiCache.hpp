@@ -80,6 +80,9 @@ public:
       options.compression = rocksdb::kNoCompression;
       options.use_direct_io_for_flush_and_compaction = true;
       rocksdb::BlockBasedTableOptions table_options;
+      table_options.block_size = 16 * 1024;
+      table_options.cache_index_and_filter_blocks = true;
+      table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
       table_options.block_cache = rocksdb::NewLRUCache(storage_block_cache_size_gb * 1024ULL * 1024ULL * 1024ULL - options.write_buffer_size * options.max_write_buffer_number, 0, false, 0);
       options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
       rocksdb::Status status =

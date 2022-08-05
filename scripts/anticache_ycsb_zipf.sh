@@ -1,6 +1,6 @@
-cache_dram_ratio=0.94
+cache_dram_ratio=0.9
 
-for dram_budget in 5 0.3
+for dram_budget in 0.3 #2
 do
 run_time=540
 log_file="anticache_ycsb_zipf_dram_${dram_budget}gib.log"

@@ -1,4 +1,4 @@
-cache_dram_ratio=0.94
+cache_dram_ratio=0.9
 log_file="anticache_ycsb_hotspot.log"
 # empty log file
 cat /dev/null > $log_file

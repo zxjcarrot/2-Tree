@@ -375,7 +375,10 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
    bool lazy_migration;
    bool inclusive;
    u64 lazy_migration_threshold = 10;
-   BTreeCachedVSAdapter(leanstore::storage::btree::BTreeInterface& btree, double cache_size_gb, bool lazy_migration = false, bool inclusive = false) : btree(btree), cache_capacity_bytes(cache_size_gb * 1024ULL * 1024ULL * 1024ULL), lazy_migration(lazy_migration), inclusive(inclusive) {
+   BTreeCachedVSAdapter(leanstore::storage::btree::BTreeInterface& btree, double cache_size_gb, int lazy_migration_sampling_rate = 100, bool inclusive = false) : btree(btree), cache_capacity_bytes(cache_size_gb * 1024ULL * 1024ULL * 1024ULL), lazy_migration(lazy_migration_sampling_rate < 100), inclusive(inclusive) {
+      if (lazy_migration_sampling_rate < 100) {
+         lazy_migration_threshold = lazy_migration_sampling_rate;
+      }
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
    }
 
@@ -464,6 +467,73 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
          clock_hand = std::numeric_limits<Key>::max();
       }
    }
+   static constexpr int kClockWalkSteps = 128;
+   void evict_a_bunch() {
+      int steps = kClockWalkSteps;
+      Key key = clock_hand;
+      typename cache_type::iterator it;
+      if (key == std::numeric_limits<Key>::max()) {
+         it = cache.begin();
+      } else {
+         it = cache.lower_bound(key);
+      }
+
+      std::vector<Key> evict_keys;
+      std::vector<TaggedPayload> evict_payloads;
+      bool victim_found = false;
+      auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
+      while (it != cache.end()) {
+         if (--steps == 0) {
+            break;
+         }
+         if (it.data().referenced == true) {
+            it.data().referenced = false;
+            clock_hand = it.key();
+            ++it;
+         } else {
+            auto tmp = it;
+            ++tmp;
+            if (tmp == cache.end()) {
+               clock_hand = std::numeric_limits<Key>::max();
+            } else {
+               clock_hand = tmp.key();
+            }
+
+            evict_keys.push_back(it.key());
+            evict_payloads.emplace_back(it.data());
+            victim_found = true;
+            if (evict_keys.size() >= 64) {
+               break;
+            }
+            it = tmp;
+         }
+      }
+      auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
+      assert(io_reads_new >= io_reads_old);
+      eviction_io_reads += io_reads_new - io_reads_old;
+      if (victim_found) {
+         for (size_t i = 0; i< evict_keys.size(); ++i) {
+            auto key = evict_keys[i];
+            auto tagged_payload = evict_payloads[i];
+            cache.erase(key);
+            if (inclusive) {
+               if (tagged_payload.modified) {
+                  upsert_btree(key, tagged_payload.payload);
+               }
+            } else { // exclusive, put it back in the on-disk B-Tree
+               insert_btree(key, tagged_payload.payload);
+            }
+         }
+         auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
+         assert(io_reads_new >= io_reads_old);
+         eviction_io_reads += io_reads_new - io_reads_old;
+         eviction_items += evict_keys.size();
+      } else {
+         if (steps == kClockWalkSteps) {
+            clock_hand = std::numeric_limits<Key>::max();
+         }
+      }
+   }
 
    void evict_till_safe() {
       while (cache_under_pressure()) {
@@ -471,16 +541,24 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
       }
    }
 
+   static constexpr int kEvictionCheckInterval = 50;
+   int eviction_check_countdown = kEvictionCheckInterval;
+   void try_eviction() {
+      if (--eviction_check_countdown == 0) {
+         if (cache_under_pressure())
+            evict_a_bunch();
+         eviction_check_countdown = kEvictionCheckInterval;
+      }
+   }
    void admit_element(Key k, Payload & v, bool dirty = false) {
-      if (cache_under_pressure())
-         evict_till_safe();
+      try_eviction();
       assert(cache.find(k) == cache.end());
       cache[k] = TaggedPayload{v, dirty, true};
    }
 
    bool lookup(Key k, Payload& v) override
    {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
       auto it = cache.find(k);
       if (it != cache.end()) {
          it.data().referenced = true;
@@ -519,7 +597,6 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
       auto op_res = btree.updateSameSize(key_bytes, fold(key_bytes, k), [&](u8* payload, u16 payload_length) { memcpy(payload, &v, payload_length); });
       auto new_miss = WorkerCounters::myCounters().io_reads.load();
-      assert(op_res == OP_RESULT::OK);
       if (old_miss != new_miss) {
          miss_count += new_miss - old_miss;
       }
@@ -559,7 +636,7 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
 
    void update(Key k, Payload& v) override
    {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
       auto it = cache.find(k);
       if (it != cache.end()) {
          it.data().referenced = true;
@@ -1141,7 +1218,9 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       }
    }
 
+   static constexpr int kClockWalkSteps = 1024;
    void evict_a_bunch() {
+      int steps = kClockWalkSteps; // number of steps to walk
       Key start_key = clock_hand;
       if (start_key == std::numeric_limits<Key>::max()) {
          start_key = tag_with_hot_bit(std::numeric_limits<Key>::min());
@@ -1157,6 +1236,9 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
       hot_btree.scanAsc(key_bytes, fold(key_bytes, start_key),
       [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+         if (--steps == 0) {
+            return false;
+         }
          auto real_key = unfold(*(Key*)(key));
          assert(key_length == sizeof(Key));
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(value));
@@ -1206,7 +1288,9 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
          eviction_io_reads += io_reads_new - io_reads_old;
          eviction_items += evict_keys.size();
       } else {
-         clock_hand = std::numeric_limits<Key>::max();
+         if (steps == kClockWalkSteps) {
+            clock_hand = std::numeric_limits<Key>::max();
+         }
       }
    }
 
@@ -1216,11 +1300,20 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
          evict_a_bunch();
       }
    }
-
+   
+   static constexpr int kEvictionCheckInterval = 50;
+   int eviction_count_down = kEvictionCheckInterval;
+   void try_eviction() {
+      if (--eviction_count_down == 0) {
+         if (cache_under_pressure()) {
+            evict_a_bunch();
+         }
+         eviction_count_down = kEvictionCheckInterval;
+      }
+   }
 
    void admit_element(Key k, Payload & v, bool dirty = false) {
-      if (cache_under_pressure())
-         evict_till_safe();
+      try_eviction();
       insert_partition(strip_off_partition_bit(k), v, false, dirty); // Hot partition
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
    }
@@ -1235,53 +1328,40 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
    bool lookup(Key k, Payload& v) override
    {
       ++total_lookups;
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
       u8 key_bytes[sizeof(Key)];
       TaggedPayload tp;
       // try hot partition first
       auto hot_key = tag_with_hot_bit(k);
-      auto old_miss = WorkerCounters::myCounters().io_reads.load();
+      uint64_t old_miss, new_miss;
+      OLD_HIT_STAT_START;
       auto res = hot_btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          tp->referenced = true;
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
          }) ==
             OP_RESULT::OK;
-      auto new_miss = WorkerCounters::myCounters().io_reads.load();
-      assert(new_miss >= old_miss);
-      if (old_miss == new_miss) {
-         btree_buffer_hit++;
-      } else {
-         btree_buffer_miss += new_miss - old_miss;
-      }
+      OLD_HIT_STAT_END;
       if (res) {
          ++lookups_hit_top;
          return res;
       }
 
       auto cold_key = tag_with_cold_bit(k);
-      old_miss = WorkerCounters::myCounters().io_reads.load();
       res = cold_btree.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused))) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
          }) ==
             OP_RESULT::OK;
-      new_miss = WorkerCounters::myCounters().io_reads.load();
-      assert(new_miss >= old_miss);
-      if (old_miss == new_miss) {
-         btree_buffer_hit++;
-      } else {
-         btree_buffer_miss += new_miss - old_miss;
-      }
 
       if (res) {
          if (should_migrate()) {
             if (inclusive == false) {
-               OLD_HIT_STAT_START;
+               //OLD_HIT_STAT_START;
                // remove from the cold partition
                auto op_res __attribute__((unused))= cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
                assert(op_res == OP_RESULT::OK);
-               OLD_HIT_STAT_END
+               //OLD_HIT_STAT_END
             }
             // move to hot partition
             admit_element(k, v);
@@ -1296,13 +1376,13 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       TaggedPayload tp;
       tp.referenced = true;
       tp.payload = v;
-      HIT_STAT_START;
+      //HIT_STAT_START;
       auto op_res = cold_btree.updateSameSize(key_bytes, fold(key_bytes, key), [&](u8* payload, u16 payload_length) {
          TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
          tp->referenced = true;
          memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
       }, Payload::wal_update_generator);
-      HIT_STAT_END;
+      //HIT_STAT_END;
 
       if (op_res == OP_RESULT::NOT_FOUND) {
          insert_partition(k, v, true);
@@ -1320,16 +1400,16 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       tp.referenced = true;
       tp.modified = modified;
       tp.payload = v;
-      HIT_STAT_START;
+      
       if (hot_or_cold == false) {
+         HIT_STAT_START;
          auto op_res = hot_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
          assert(op_res == OP_RESULT::OK);
+         HIT_STAT_END;
       } else {
          auto op_res = cold_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
          assert(op_res == OP_RESULT::OK);
       }
-      
-      HIT_STAT_END;
    }
 
    void insert(Key k, Payload& v) override
@@ -1344,7 +1424,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
    }
 
    void update(Key k, Payload& v) override {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
       HIT_STAT_START;
@@ -1362,24 +1442,23 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
 
       Payload old_v;
       auto cold_key = tag_with_cold_bit(k);
-      OLD_HIT_STAT_START;
+      //OLD_HIT_STAT_START;
       auto res __attribute__((unused)) = cold_btree.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          memcpy(&old_v, tp->payload.value, sizeof(tp->payload)); 
          }) ==
             OP_RESULT::OK;
       assert(res);
-      OLD_HIT_STAT_END;
+      //OLD_HIT_STAT_END;
 
       if (should_migrate()) {
-         admit_element(k, old_v, false);
+         admit_element(k, v, true);
          if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
-            OLD_HIT_STAT_START;
+            //OLD_HIT_STAT_START;
             // remove from the cold partition
             auto op_res __attribute__((unused)) = cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
-            OLD_HIT_STAT_END;
+            //OLD_HIT_STAT_END;
          }
-         update(k, v);
       } else {
          cold_btree.updateSameSize(key_bytes, fold(key_bytes, cold_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
             TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
@@ -1392,7 +1471,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
 
 
    void put(Key k, Payload& v) override {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
       HIT_STAT_START;

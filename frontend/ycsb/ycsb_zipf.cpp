@@ -62,6 +62,7 @@ const std::string kIndexType2LSMT = "2LSMT";
 const std::string kIndexType2LSMT_CF = "2LSMT-CF";
 const std::string kIndexTypeTrieLSMT = "Trie-LSMT";
 const std::string kIndexTypeTrieBTree = "Trie-BTree";
+const std::string kIndexTypeIM2BTree = "IM2BTree";
 
 
 // -------------------------------------------------------------------------------------
@@ -119,6 +120,7 @@ int main(int argc, char** argv)
    } else if (FLAGS_index_type == kIndexTypeLSMT || 
               FLAGS_index_type == kIndexTypeAntiCache || 
               FLAGS_index_type == kIndexTypeTrieBTree || 
+              FLAGS_index_type == kIndexTypeIM2BTree ||
               FLAGS_index_type == kIndexType2LSMT || 
               FLAGS_index_type == kIndexTypeTrieLSMT) {
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
@@ -166,6 +168,8 @@ int main(int argc, char** argv)
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexType2BTree) {
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_index_type == kIndexTypeIM2BTree) {
+      adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeTrieBTree) {
       adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeLSMT) {
@@ -279,7 +283,7 @@ int main(int argc, char** argv)
       auto t_start = std::chrono::high_resolution_clock::now();
       // warm up for 100 seconds
       // scramble the database
-      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 200000) {
+      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 100000) {
          YCSBKey key = keys[random_generator->rand() % ycsb_tuple_count];
 
          assert(key < ycsb_tuple_count);
@@ -295,6 +299,7 @@ int main(int argc, char** argv)
                table.put(key, payload);
             }
          }
+         WorkerCounters::myCounters().tx++;
       }
       cout << "Warmed up" << endl;
    }
