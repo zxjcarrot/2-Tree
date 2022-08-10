@@ -551,7 +551,8 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
       }
    }
    void admit_element(Key k, Payload & v, bool dirty = false) {
-      try_eviction();
+      if (cache_under_pressure())
+         evict_a_bunch();
       assert(cache.find(k) == cache.end());
       cache[k] = TaggedPayload{v, dirty, true};
    }
@@ -1128,7 +1129,7 @@ template <typename Key, typename Payload>
 struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& hot_btree;
    leanstore::storage::btree::BTreeInterface& cold_btree;
-
+   uint64_t hot_tree_ios = 0;
    uint64_t btree_buffer_miss = 0;
    uint64_t btree_buffer_hit = 0;
    DTID dt_id;
@@ -1141,6 +1142,8 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
    uint64_t io_reads_snapshot = 0;
    uint64_t io_reads_now = 0;
    uint64_t hot_partition_item_count = 0;
+   std::size_t upward_migrations = 0;
+   std::size_t downward_migrations = 0;
    u64 lazy_migration_threshold = 10;
    bool lazy_migration = false;
    struct TaggedPayload {
@@ -1185,23 +1188,27 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       eviction_items = eviction_io_reads = 0;
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
       lookups_hit_top = total_lookups = 0;
+      hot_tree_ios = 0;
+      upward_migrations = downward_migrations = 0;
    }
 
-   std::size_t btree_hot_entries() {
-      return btree_entries(hot_btree);
-   }
-
-   std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btree) {
+   std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btree, std::size_t & pages) {
       Key start_key = std::numeric_limits<Key>::min();
       u8 key_bytes[sizeof(Key)];
       std::size_t entries = 0;
+      pages = 0;
+      const char * last_leaf_frame = nullptr;
       while (true) {
          bool good = false;
          btree.scanAsc(key_bytes, fold(key_bytes, start_key),
-         [&](const u8 * key, u16, const u8 *, u16) -> bool {
+         [&](const u8 * key, u16, const u8 *, u16, const char * leaf_frame) -> bool {
             auto real_key = unfold(*(Key*)(key));
             good = true;
             start_key = real_key + 1;
+            if (last_leaf_frame != leaf_frame) {
+               last_leaf_frame = leaf_frame;
+               ++pages;
+            }
             return false;
          }, [](){});
          if (good == false) {
@@ -1282,6 +1289,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
             } else { // exclusive, put it back in the on-disk B-Tree
                insert_partition(strip_off_partition_bit(key), tagged_payload.payload, true); // Cold partition
             }
+            ++downward_migrations;
          }
          auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
          assert(io_reads_new >= io_reads_old);
@@ -1342,6 +1350,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
          }) ==
             OP_RESULT::OK;
       OLD_HIT_STAT_END;
+      hot_tree_ios += new_miss - old_miss;
       if (res) {
          ++lookups_hit_top;
          return res;
@@ -1356,6 +1365,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
 
       if (res) {
          if (should_migrate()) {
+            ++upward_migrations;
             if (inclusive == false) {
                //OLD_HIT_STAT_START;
                // remove from the cold partition
@@ -1364,7 +1374,10 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
                //OLD_HIT_STAT_END
             }
             // move to hot partition
+            OLD_HIT_STAT_START;
             admit_element(k, v);
+            OLD_HIT_STAT_END;
+            hot_tree_ios += new_miss - old_miss;
          }
       }
       return res;
@@ -1424,6 +1437,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
    }
 
    void update(Key k, Payload& v) override {
+      ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
@@ -1435,8 +1449,9 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
          memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
       }, Payload::wal_update_generator);
       HIT_STAT_END;
-
+      hot_tree_ios += new_miss - old_miss;
       if (op_res == OP_RESULT::OK) {
+         ++lookups_hit_top;
          return;
       }
 
@@ -1452,7 +1467,11 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       //OLD_HIT_STAT_END;
 
       if (should_migrate()) {
+         ++upward_migrations;
+         OLD_HIT_STAT_START;
          admit_element(k, v, true);
+         OLD_HIT_STAT_END;
+         hot_tree_ios += new_miss - old_miss;
          if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
             //OLD_HIT_STAT_START;
             // remove from the cold partition
@@ -1489,35 +1508,50 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
 
       if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
          auto cold_key = tag_with_cold_bit(k);
-         OLD_HIT_STAT_START;
+         //OLD_HIT_STAT_START;
          // remove from the cold partition
          auto op_res __attribute__((unused)) = cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
          assert(op_res == OP_RESULT::OK);
-         OLD_HIT_STAT_END;
+         //OLD_HIT_STAT_END;
       }
       // move to hot partition
       admit_element(k, v, true);
    }
 
+   double hot_btree_utilization(u64 entries, u64 pages) {
+      u64 minimal_pages = (entries) * (sizeof(Key) + sizeof(TaggedPayload)) / leanstore::storage::PAGE_SIZE;
+      return minimal_pages / (pages + 0.0);
+   }
+
+   double cold_btree_utilization(u64 entries, u64 pages) {
+      u64 minimal_pages = (entries) * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;
+      return minimal_pages / (pages + 0.0);
+   }
+
    void report(u64 entries, u64 pages) override {
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
-      auto num_btree_hot_entries = btree_hot_entries();
-      auto num_btree_entries = btree_entries(cold_btree) + num_btree_hot_entries;
+      std::size_t hot_btree_pages = 0;
+      auto num_btree_hot_entries = btree_entries(hot_btree, hot_btree_pages);
+      std::size_t cold_btree_pages = 0;
+      auto num_btree_cold_entries = btree_entries(cold_btree, cold_btree_pages);
+      pages = hot_btree_pages + cold_btree_pages;
+      auto num_btree_entries = num_btree_cold_entries + num_btree_hot_entries;
       std::cout << "Hot partition capacity in bytes " << hot_partition_capacity_bytes << std::endl;
       std::cout << "Hot partition size in bytes " << hot_partition_size_bytes << std::endl;
       std::cout << "BTree # entries " << num_btree_entries << std::endl;
       std::cout << "BTree # hot entries " << num_btree_hot_entries << std::endl;
       std::cout << "BTree # pages " << pages << std::endl;
-      std::cout << "Hot BTree height " << hot_btree.getHeight() << std::endl;
-      std::cout << "Cold BTree height " << cold_btree.getHeight() << std::endl;
+      std::cout << "Hot BTree height " << hot_btree.getHeight() << " # pages " << hot_btree_pages << " util " << hot_btree_utilization(num_btree_hot_entries, hot_btree_pages) << std::endl;
+      std::cout << "Cold BTree height " << cold_btree.getHeight() << " # pages " << cold_btree_pages << " util " << hot_btree_utilization(num_btree_cold_entries, cold_btree_pages) << std::endl;
       auto minimal_pages = (num_btree_entries) * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;
       std::cout << "BTree average fill factor " <<  (minimal_pages + 0.0) / pages << std::endl;
       double btree_hit_rate = btree_buffer_hit / (btree_buffer_hit + btree_buffer_miss + 1.0);
       std::cout << "BTree buffer hits/misses " <<  btree_buffer_hit << "/" << btree_buffer_miss << std::endl;
       std::cout << "BTree buffer hit rate " <<  btree_hit_rate << " miss rate " << (1 - btree_hit_rate) << std::endl;
       std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
-      std::cout << total_lookups<< " lookups, "  << lookups_hit_top << " lookup hit top" << std::endl;
+      std::cout << total_lookups<< " lookups, "  << lookups_hit_top << " lookup hit top" << " hot_tree_ios " << hot_tree_ios << " ios/tophit " << hot_tree_ios / (lookups_hit_top + 0.00)  << std::endl;
+      std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations" << std::endl;
    }
 };
 

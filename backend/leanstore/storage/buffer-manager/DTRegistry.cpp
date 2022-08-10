@@ -33,6 +33,11 @@ bool DTRegistry::isBTreeLeaf(DTID dtid, BufferFrame& bf)
    auto dt_meta = dt_instances_ht[dtid];
    return dt_types_ht[std::get<0>(dt_meta)].is_btree_leaf(std::get<1>(dt_meta), bf);
 }
+
+bool DTRegistry::keepInMemory(DTID dtid) {
+   auto dt_meta = dt_instances_ht[dtid];
+   return dt_types_ht[std::get<0>(dt_meta)].keep_in_memory(std::get<1>(dt_meta));
+}
 // -------------------------------------------------------------------------------------
 void DTRegistry::checkpoint(DTID dtid, BufferFrame& bf, u8* dest)
 {

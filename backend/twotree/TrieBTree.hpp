@@ -219,7 +219,8 @@ struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
    }
 
    void admit_element(Key k, Payload & v, bool dirty = false) {
-      try_eviction();
+      if (cache_under_pressure())
+         evict_a_bunch();
       assert(cache.exists(k) == false);
       cache.insert(k, new TaggedPayload{k, v, dirty, true});
       assert(cache.exists(k) == true);

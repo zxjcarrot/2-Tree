@@ -122,6 +122,35 @@ OP_RESULT BTreeLL::scanAsc(u8* start_key,
    jumpmuCatch() { ensure(false); }
 }
 
+OP_RESULT BTreeLL::scanAsc(u8* start_key,
+                           u16 key_length,
+                           std::function<bool(const u8* key, u16 key_length, const u8* payload, u16 payload_length, const char * leaf_frame)> callback,
+                           function<void()>)
+{
+   Slice key(start_key, key_length);
+   jumpmuTry()
+   {
+      BTreeSharedIterator iterator(*static_cast<BTreeGeneric*>(this));
+      auto ret = iterator.seek(key);
+      if (ret != OP_RESULT::OK) {
+         jumpmu_return ret;
+      }
+      while (true) {
+         auto key = iterator.key();
+         auto value = iterator.value();
+         if (!callback(key.data(), key.length(), value.data(), value.length(), iterator.leafFrame())) {
+            jumpmu_return OP_RESULT::OK;
+         } else {
+            if (iterator.next() != OP_RESULT::OK) {
+               jumpmu_return OP_RESULT::NOT_FOUND;
+            }
+         }
+      }
+   }
+   jumpmuCatch() { ensure(false); }
+}
+
+
 OP_RESULT BTreeLL::scanAscExclusive(u8* start_key,
                            u16 key_length,
                            std::function<bool(const u8* key, u16 key_length, const u8* payload, u16 payload_length)> callback,
@@ -311,6 +340,7 @@ struct DTRegistry::DTMeta BTreeLL::getMeta()
                                     .is_btree_leaf = isBTreeLeaf,
                                     .check_space_utilization = checkSpaceUtilization,
                                     .checkpoint = checkpoint,
+                                    .keep_in_memory = keepInMemory,
                                     .undo = undo,
                                     .todo = todo,
                                     .serialize = serialize,
@@ -325,6 +355,10 @@ bool BTreeLL::isBTreeLeaf(void* btree_object, BufferFrame& to_find)
       return true;
    }
    return false;
+}
+
+bool BTreeLL::keepInMemory(void* btree_object) {
+   return reinterpret_cast<BTreeLL*>(btree_object)->keep_in_memory;
 }
 
 struct ParentSwipHandler BTreeLL::findParent(void* btree_object, BufferFrame& to_find)

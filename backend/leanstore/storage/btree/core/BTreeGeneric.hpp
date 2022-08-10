@@ -37,6 +37,7 @@ class BTreeGeneric
    friend class BTreePessimisticIterator;
    // -------------------------------------------------------------------------------------
    BufferFrame* meta_node_bf;  // kept in memory
+   bool keep_in_memory = false;
    atomic<u64> height = 1;
    DTID dt_id;
    // -------------------------------------------------------------------------------------

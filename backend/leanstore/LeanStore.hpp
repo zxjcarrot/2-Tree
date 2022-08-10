@@ -44,8 +44,8 @@ class LeanStore
    u64 getConfigHash();
    GlobalStats getGlobalStats();
    // -------------------------------------------------------------------------------------
-   storage::btree::BTreeLL& registerBTreeLL(string name);
-   storage::btree::BTreeLL& retrieveBTreeLL(string name) { return btrees_ll[name]; }
+   storage::btree::BTreeLL& registerBTreeLL(string name, bool keep_in_memory = false);
+   storage::btree::BTreeLL& retrieveBTreeLL(string name, bool keep_in_memory = false) { return btrees_ll[name]; }
    // -------------------------------------------------------------------------------------
    storage::BufferManager& getBufferManager() { return *buffer_manager; }
    cr::CRManager& getCRManager() { return *cr_manager; }

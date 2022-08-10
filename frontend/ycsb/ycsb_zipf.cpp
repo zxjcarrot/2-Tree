@@ -9,6 +9,7 @@
 #include "leanstore/utils/RandomGenerator.hpp"
 #include "leanstore/utils/ScrambledZipfGenerator.hpp"
 #include "leanstore/utils/HotspotGenerator.hpp"
+#include "leanstore/utils/SelfSimilarGenerator.hpp"
 #include "lsmt/rocksdb_adapter.hpp"
 #include "twotree/PartitionedBTree.hpp"
 #include "twotree/TrieBTree.hpp"
@@ -18,6 +19,7 @@
 #include "twotree/ConcurrentTwoBTree.hpp"
 #include "twotree/ConcurrentPartitionedBTree.hpp"
 #include "anti-caching/AntiCache.hpp"
+#include "anti-caching/AntiCacheBTree.hpp"
 
 //#include "rocksdb_adapter.hpp"
 // -------------------------------------------------------------------------------------
@@ -48,15 +50,17 @@ DEFINE_bool(ycsb_count_unique_lookup_keys, true, "");
 DEFINE_string(ycsb_request_dist, "hotspot", "");
 DEFINE_double(ycsb_request_hotspot_keyspace_fraction, 0.2, "");
 DEFINE_double(ycsb_request_hotspot_op_fraction, 1.0, "");
+DEFINE_double(ycsb_request_selfsimilar_skew, 0.2, "");
 
 const std::string kRequestDistributionZipfian = "zipfian";
+const std::string kRequestDistributionSelfSimilar = "selfsimilar";
 const std::string kRequestDistributionHotspot = "hotspot";
 
 const std::string kIndexTypeBTree = "BTree";
 const std::string kIndexTypeLSMT = "LSMT";
 
 const std::string kIndexTypeAntiCache = "AntiCache";
-
+const std::string kIndexTypeAntiCacheB = "AntiCacheB";
 const std::string kIndexType2BTree = "2BTree";
 const std::string kIndexType2LSMT = "2LSMT";
 const std::string kIndexType2LSMT_CF = "2LSMT-CF";
@@ -79,7 +83,7 @@ double calculateMTPS(chrono::high_resolution_clock::time_point begin, chrono::hi
    return (tps / 1000000.0);
 }
 
-void keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
+void zipf_keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
    std::vector<YCSBKey> generated_keys;
    std::unordered_map<YCSBKey, int> unique_keys;
    for (size_t i = 0; i < FLAGS_ycsb_tuple_count * 2; ++i) {
@@ -90,6 +94,31 @@ void keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
    sort(generated_keys.begin(), generated_keys.end());
    std::cout << "Keyspace Stats: " << std::endl;
    std::cout << "Skew factor: " << FLAGS_zipf_factor << std::endl;
+   std::cout << "# total keys: " << generated_keys.size() << std::endl;
+   std::cout << "# unique keys: " << unique_keys.size() << std::endl;
+   std::cout << "Most frequent key occurrence: " << unique_keys[generated_keys[0]] << std::endl;
+   auto print_percentile_info = [&](int p) {
+      double pd = p / 100.0;
+      std::cout << "p" << p  << ": " << generated_keys[pd*generated_keys.size()] << ", covering " << generated_keys[pd*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys, occurrence :" << unique_keys[generated_keys[pd*generated_keys.size()]] << std::endl;
+   };
+   for (size_t i = 5; i <= 95; i += 5) {
+      print_percentile_info(i);
+   }
+   print_percentile_info(99);
+}
+
+
+void selfsimilar_keyspace_stats(utils::SelfSimilarGenerator * ss_gen) {
+   std::vector<YCSBKey> generated_keys;
+   std::unordered_map<YCSBKey, int> unique_keys;
+   for (size_t i = 0; i < FLAGS_ycsb_tuple_count * 2; ++i) {
+      YCSBKey key = ss_gen->rand() % FLAGS_ycsb_tuple_count;
+      generated_keys.push_back(key);
+      unique_keys[key]++;
+   }
+   sort(generated_keys.begin(), generated_keys.end());
+   std::cout << "Keyspace Stats: " << std::endl;
+   std::cout << "Skew factor: " << FLAGS_ycsb_request_selfsimilar_skew << std::endl;
    std::cout << "# total keys: " << generated_keys.size() << std::endl;
    std::cout << "# unique keys: " << unique_keys.size() << std::endl;
    std::cout << "Most frequent key occurrence: " << unique_keys[generated_keys[0]] << std::endl;
@@ -119,6 +148,7 @@ int main(int argc, char** argv)
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
    } else if (FLAGS_index_type == kIndexTypeLSMT || 
               FLAGS_index_type == kIndexTypeAntiCache || 
+              FLAGS_index_type == kIndexTypeAntiCacheB || 
               FLAGS_index_type == kIndexTypeTrieBTree || 
               FLAGS_index_type == kIndexTypeIM2BTree ||
               FLAGS_index_type == kIndexType2LSMT || 
@@ -145,10 +175,14 @@ int main(int argc, char** argv)
    std::unique_ptr<leanstore::utils::Generator> random_generator;
    if (FLAGS_ycsb_request_dist == kRequestDistributionZipfian) {
       random_generator.reset(new utils::ScrambledZipfGenerator(0, ycsb_tuple_count, FLAGS_zipf_factor));
-   } else {
+   } else if (FLAGS_ycsb_request_dist == kRequestDistributionHotspot){
       cout << "hotspot_keyspace_fraction=" << FLAGS_ycsb_request_hotspot_keyspace_fraction << std::endl;
       cout << "hotspot_op_fraction=" << FLAGS_ycsb_request_hotspot_op_fraction << std::endl;
       random_generator.reset(new utils::HotspotGenerator(0, ycsb_tuple_count, FLAGS_ycsb_request_hotspot_keyspace_fraction, FLAGS_ycsb_request_hotspot_op_fraction));
+   } else {
+      //kRequestDistributionSelfSimilar
+      cout << "selfsimilar_skew=" << FLAGS_ycsb_request_selfsimilar_skew << std::endl;
+      random_generator.reset(new utils::SelfSimilarGenerator(0, ycsb_tuple_count, FLAGS_ycsb_request_selfsimilar_skew));
    }
    LeanStore db;
    unique_ptr<BTreeInterface<YCSBKey, YCSBPayload>> adapter;
@@ -156,22 +190,22 @@ int main(int argc, char** argv)
    leanstore::storage::btree::BTreeLL* btree2_ptr = nullptr;
    db.getCRManager().scheduleJobSync(0, [&](){
       if (FLAGS_recover) {
-         btree_ptr = &db.retrieveBTreeLL("ycsb");
+         btree_ptr = &db.retrieveBTreeLL("ycsb", true);
          btree2_ptr = &db.retrieveBTreeLL("ycsb_cold");
       } else {
-         btree_ptr = &db.registerBTreeLL("ycsb");
+         btree_ptr = &db.registerBTreeLL("ycsb", true);
          btree2_ptr = &db.registerBTreeLL("ycsb_cold");
       }
    });
    
    if (FLAGS_index_type == kIndexTypeBTree) {
-      adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id));
+      adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, btree2_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexType2BTree) {
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeIM2BTree) {
-      adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+      adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeTrieBTree) {
-      adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+      adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeLSMT) {
       adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2LSMT) {
@@ -180,9 +214,11 @@ int main(int argc, char** argv)
       adapter.reset(new RocksDBTwoCFAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeTrieLSMT) {
       adapter.reset(new TrieRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
-   } else { // 
-      assert(FLAGS_index_type == kIndexTypeAntiCache);
+   } else if (FLAGS_index_type == kIndexTypeAntiCache) { 
       adapter.reset(new AntiCacheAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib));
+   } else {
+      assert(FLAGS_index_type == kIndexTypeAntiCacheB);
+      adapter.reset(new AntiCacheBTreeAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, top_tree_size_gib));
    }
 
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
@@ -222,6 +258,7 @@ int main(int argc, char** argv)
                   utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
                   YCSBKey key = keys[t_i];
                   table.insert(key, payload);
+                  WorkerCounters::myCounters().tx++;
                }
             });
          } else {
@@ -234,6 +271,7 @@ int main(int argc, char** argv)
                   utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
                   YCSBKey key = range_keys[t_i - range.begin()];
                   table.insert(key, payload);
+                  WorkerCounters::myCounters().tx++;
                }
             });
          }
@@ -276,7 +314,7 @@ int main(int argc, char** argv)
    cout << "-------------------------------------------------------------------------------------" << endl;
    cout << "~Transactions" << endl;
 
-   
+   //adapter->evict_all();
    // if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeLSMT)
    {
       cout << "Warming up" << endl;
@@ -304,7 +342,7 @@ int main(int argc, char** argv)
       cout << "Warmed up" << endl;
    }
 
-   //adapter->evict_all();
+   
 
    cout << "All evicted" << endl;
 
@@ -355,7 +393,9 @@ int main(int argc, char** argv)
       // -------------------------------------------------------------------------------------
       cout << "Total commit: " << calculateMTPS(begin, end, txs.load()) << " M tps" << endl;
       if (FLAGS_ycsb_request_dist == kRequestDistributionZipfian) {
-         keyspace_stats((utils::ScrambledZipfGenerator*)random_generator.get());
+         zipf_keyspace_stats((utils::ScrambledZipfGenerator*)random_generator.get());
+      } else if (FLAGS_ycsb_request_dist == kRequestDistributionSelfSimilar) {
+         selfsimilar_keyspace_stats((utils::SelfSimilarGenerator*)random_generator.get());
       }
       
       adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());

@@ -441,6 +441,9 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    std::size_t cache_capacity_bytes;
    std::size_t lookup_hit_top = 0;
    std::size_t total_lookups = 0;
+   std::size_t upward_migrations = 0;
+   std::size_t downward_migrations = 0;
+   std::size_t blocks_read = 0;
    static constexpr double eviction_threshold = 0.99;
 
    Key clock_hand = std::numeric_limits<Key>::max();
@@ -515,6 +518,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
 
       table_options.block_size = 16 * 1024;
       table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true, 0);
+      //table_options.pin_l0_filter_and_index_blocks_in_cache = true;
       table_options.cache_index_and_filter_blocks = true;
       table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
       db_options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
@@ -529,7 +533,11 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       auto top_cf_options = rocksdb::ColumnFamilyOptions(db_options);
       //top_cf_options.compaction_pri = rocksdb::kOldestLargestSeqFirst;
       assert(top_cf_options.merge_operator.get());
+      //top_cf_options.memtable_prefix_bloom_size_ratio = 0.05;
+      //top_cf_options.memtable_whole_key_filtering = true;
       auto bottom_cf_options = rocksdb::ColumnFamilyOptions(db_options);
+      //bottom_cf_options.memtable_prefix_bloom_size_ratio = 0.05;
+      //bottom_cf_options.memtable_whole_key_filtering = true;
       assert(bottom_cf_options.merge_operator.get());
       //bottom_cf_options.merge_operator.reset();
       std::cout << "RocksDB top cf write buffer size " << top_cf_options.write_buffer_size / 1024.0 /1024.0 << " mb" << std::endl;
@@ -572,6 +580,8 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       // db->Flush(fopts);
       rocksdb::get_iostats_context()->Reset();
       rocksdb::get_perf_context()->Reset();
+      downward_migrations = upward_migrations = 0;
+      blocks_read = 0;
    }
 
    bool sample() {
@@ -678,7 +688,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    constexpr static char kToggleReferenceBitOn = 1;
    int empty_slots = 0;
    void evict_a_bunch() {
-      static constexpr int kClockWalkSteps = 2048;
+      static constexpr int kClockWalkSteps = 512;
       int steps = kClockWalkSteps;
       Key start_key = clock_hand;
       if (start_key == std::numeric_limits<Key>::max()) {
@@ -702,8 +712,8 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
          assert(it->value().size() == sizeof(TaggedPayload));
          auto tp = ((TaggedPayload*)(it->value().data()));
          if (tp->referenced == true) {
-            TaggedPayload tp2 = *tp;
-            tp2.referenced = false;
+            // TaggedPayload tp2 = *tp;
+            // tp2.referenced = false;
             rocksdb::WriteOptions options;
             options.disableWAL = true;
             //auto s = db->Put(options, top_handle, it->key(), rocksdb::Slice((const char *)&tp2, sizeof(TaggedPayload)));
@@ -717,7 +727,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
          victim_found = true;
          evict_keys.push_back(real_key);
          evict_payloads.emplace_back(*tp);
-         if (evict_keys.size() >= 1024) {
+         if (evict_keys.size() >= 256) {
             break;
          }
       }
@@ -741,6 +751,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
             } else { // exclusive, put it back in the on-disk LSMT
                put_bottom_db(key, tagged_payload.payload);
             }
+            downward_migrations++;
          }
       } else {
          if (steps == kClockWalkSteps) {
@@ -750,7 +761,16 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    }
 
    void put(Key k, Payload& v) {
-      admit_element(k, v, true, false);
+      rocksdb::ReadOptions ropts;
+      std::string value;
+      u8 key_bytes[sizeof(Key)];
+      leanstore::fold(key_bytes, k);
+      if (should_migrate() || 
+         db->KeyMayExist(ropts, top_handle, rocksdb::Slice((const char *)key_bytes, sizeof(key_bytes)), &value, nullptr, nullptr)) {
+         admit_element(k, v, true);
+      } else {
+         put_bottom_db(k, v);
+      }
    }
 
    void put_bottom_db(Key k, Payload & v) {
@@ -774,7 +794,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       }
    }
 
-   void admit_element(Key k, Payload & v, bool dirty = false, bool insert = false) {
+   void admit_element(Key k, Payload & v, bool dirty = false) {
       if (empty_slots <= 0) {
          try_eviction();
       }
@@ -794,7 +814,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       }
    }
 
-   void set_referencet_bit(Key k) {
+   void set_referenced_bit(Key k) {
       if (empty_slots <= 0) {
          try_eviction();
       }
@@ -814,8 +834,10 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       u8 key_bytes[sizeof(Key)];
       auto key_len = leanstore::fold(key_bytes, k);
       std::string value;
+      auto blocks_read_old = rocksdb::get_perf_context()->block_read_count;
       auto status = db->Get(options, top_handle, rocksdb::Slice((const char *)key_bytes, key_len), &value);
-
+      assert(rocksdb::get_perf_context()->block_read_count - blocks_read_old >= 0);
+      blocks_read += rocksdb::get_perf_context()->block_read_count - blocks_read_old;
       if (status == rocksdb::Status::OK()) {
          lookup_hit_top++;
          assert(sizeof(TaggedPayload) == value.size());
@@ -824,7 +846,10 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
          if (tp->referenced == false) {
             // set reference bit
             //admit_element(k, v, tp->modified, false);
-            set_referencet_bit(k);
+            blocks_read_old = rocksdb::get_perf_context()->block_read_count;
+            set_referenced_bit(k);
+            assert(rocksdb::get_perf_context()->block_read_count - blocks_read_old >= 0);
+            blocks_read += rocksdb::get_perf_context()->block_read_count - blocks_read_old;
          }
          // if (leanstore::utils::RandomGenerator::getRandU64(0, 100) < 1) {
          //    admit_element(k, tp->payload, tp->modified, false);
@@ -840,12 +865,13 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
          assert(sizeof(Payload) == value.size());
          v = *((Payload*)(value.data()));
          if (should_migrate()) {
+            upward_migrations++;
             if (inclusive == false) {
                rocksdb::WriteOptions write_options;
                write_options.disableWAL = true;
                db->Delete(write_options, bottom_handle, rocksdb::Slice((const char *)key_bytes, key_len));
             }
-            admit_element(k, v, false, true /* insert */ );
+            admit_element(k, v, false /* modified */);
          }
          return true;
       }
@@ -854,7 +880,8 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    }
 
    void insert(Key k, Payload& v) {
-      admit_element(k, v, true/* dirty */, true/* insert */);
+      put(k, v);
+      //admit_element(k, v, true/* dirty */, true/* insert */);
    }
 
    void update(Key k, Payload& v) {
@@ -871,12 +898,16 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       u8 key_bytes[sizeof(Key)];
       auto key_len = leanstore::fold(key_bytes, k);
       std::string value;
+      auto blocks_read_old = rocksdb::get_perf_context()->block_read_count;
       auto status = db->Get(options, top_handle, rocksdb::Slice((const char *)key_bytes, key_len), &value);
-
+      assert(rocksdb::get_perf_context()->block_read_count - blocks_read_old >= 0);
+      blocks_read += rocksdb::get_perf_context()->block_read_count - blocks_read_old;
       if (status == rocksdb::Status::OK()) {
          assert(sizeof(TaggedPayload) == value.size());
          // update top tree
-         admit_element(k, v, /* dirty */ true, false);
+         blocks_read_old = rocksdb::get_perf_context()->block_read_count;
+         admit_element(k, v, /* modifed */ true);
+         blocks_read += rocksdb::get_perf_context()->block_read_count - blocks_read_old;
          return;
       }
 
@@ -885,6 +916,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
 
       if (status == rocksdb::Status::OK()) {
          if (should_migrate()) {
+            upward_migrations++;
             assert(sizeof(Payload) == value.size());
             if (inclusive == false) {
                rocksdb::WriteOptions write_options;
@@ -892,7 +924,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
                status = db->Delete(write_options, bottom_handle, rocksdb::Slice((const char *)key_bytes, key_len));
                assert(status == rocksdb::Status::OK());
             }
-            admit_element(k, v, /* dirty */ true, /* insert */ false  );
+            admit_element(k, v, /* modified */ true);
          } else {
             put_bottom_db(k, v);
          }
@@ -930,9 +962,10 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    void report(u64, u64) override {
       report_db(db, "top", top_handle);
       report_db(db, "bottom", bottom_handle);
-      std::cout << total_lookups<< " lookups, "  << lookup_hit_top << " lookup hit top" << std::endl;
       std::cout << "perf stat " << rocksdb::get_perf_context()->ToString() << std::endl;
       std::cout << "io stat " << rocksdb::get_iostats_context()->ToString() << std::endl;
+      std::cout << total_lookups<< " lookups, "  << lookup_hit_top << " lookup hit top " << " topdb blocks read " << blocks_read << std::endl;
+      std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations" << std::endl;
    }
 };
 

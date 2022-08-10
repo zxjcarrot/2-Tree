@@ -40,6 +40,7 @@ class BTreePessimisticIteratorInterface : public BTreeIteratorInterface
    virtual Slice keyWithoutPrefix() = 0;
    virtual Slice keyPrefix() = 0;
    virtual Slice value() = 0;
+   virtual char* leafFrame() { return nullptr;}
 };
 using BTreeSharedIteratorInterface = BTreePessimisticIteratorInterface;
 // -------------------------------------------------------------------------------------

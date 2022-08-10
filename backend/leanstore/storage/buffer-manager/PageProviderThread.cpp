@@ -80,10 +80,21 @@ void BufferManager::pageProviderThread(u64 p_begin, u64 p_end)  // [p_begin, p_e
                // -------------------------------------------------------------------------------------
                // Performance crticial: we should cross cool (unswizzle), otherwise write performance will drop
                [[maybe_unused]] const u64 partition_i = getPartitionID(r_buffer->header.pid);
-               const bool is_cooling_candidate = (!r_buffer->header.keep_in_memory && !r_buffer->header.isWB &&
+               bool is_cooling_candidate;
+               if (FLAGS_lower_eviction_prob_for_hot_data) {
+                  is_cooling_candidate = (!r_buffer->header.keep_in_memory && !r_buffer->header.isWB &&
+                                                  !(r_buffer->header.latch.isExclusivelyLatched())
+                                                  // && (partition_i) >= p_begin && (partition_i) <= p_end
+                                                  && r_buffer->header.state == BufferFrame::STATE::HOT
+                                                  && (!getDTRegistry().keepInMemory(r_buffer->page.dt_id) ||
+                                                      utils::RandomGenerator::getRand<u64>(0, 100) < 2));
+               } else {
+                  is_cooling_candidate = (!r_buffer->header.keep_in_memory && !r_buffer->header.isWB &&
                                                   !(r_buffer->header.latch.isExclusivelyLatched())
                                                   // && (partition_i) >= p_begin && (partition_i) <= p_end
                                                   && r_buffer->header.state == BufferFrame::STATE::HOT);
+               }
+
                repickIf(!is_cooling_candidate);
                r_guard.recheck();
                // -------------------------------------------------------------------------------------

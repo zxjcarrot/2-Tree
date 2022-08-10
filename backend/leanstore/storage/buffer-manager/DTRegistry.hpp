@@ -34,6 +34,7 @@ struct DTRegistry {
       std::function<bool(void*, BufferFrame&)> is_btree_leaf;
       std::function<bool(void*, BufferFrame&, OptimisticGuard&, ParentSwipHandler&)> check_space_utilization;
       std::function<void(void* btree_object, BufferFrame& bf, u8* dest)> checkpoint;
+      std::function<bool(void*)> keep_in_memory;
       // -------------------------------------------------------------------------------------
       // MVCC / SI
       std::function<void(void* btree_object, const u8* entry, u64 tts)> undo;
@@ -60,6 +61,7 @@ struct DTRegistry {
    ParentSwipHandler findParent(DTID dtid, BufferFrame&);
    bool checkSpaceUtilization(DTID dtid, BufferFrame&, OptimisticGuard&, ParentSwipHandler&);
    bool isBTreeLeaf(DTID dtid, BufferFrame& bf);
+   bool keepInMemory(DTID dtid);
    // Pre: bf is shared/exclusive latched
    void checkpoint(DTID dt_id, BufferFrame& bf, u8*);
    // -------------------------------------------------------------------------------------

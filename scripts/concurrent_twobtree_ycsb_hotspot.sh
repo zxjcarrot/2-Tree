@@ -8,7 +8,7 @@ for cache_btree_node_size in 1 #0 1 2 3 4
 do
 for access_ratio in 0.001 0.01 0.1 0.2 0.3 0.4 0.5
 do
-build/frontend/ycsb_hotspot --trunc=1 --ycsb_tuple_count=10000000 --dram_gib=0.3 --worker_threads=14 --cached_btree=8 --ycsb_keyspace_access_ratio=$access_ratio  --cached_btree_ram_ratio=$cache_dram_ratio --ycsb_read_ratio=80 --ssd_path=/mnt/disks/nvme/leanstore --run_for_seconds=400 --xmerge --cached_btree_node_size_type=$cache_btree_node_size >> $log_file 2>&1
+build/frontend/ycsb_hotspot --trunc=1 --ycsb_tuple_count=10000000 --dram_gib=0.3 --worker_threads=14 --cached_btree=8 --ycsb_keyspace_access_ratio=$access_ratio  --cached_btree_ram_ratio=$cache_dram_ratio --ycsb_read_ratio=80 --ssd_path=/mnt/disks/nvme/leanstore --run_for_seconds=500 --xmerge --cached_btree_node_size_type=$cache_btree_node_size >> $log_file 2>&1
 done
 done
 done
@@ -24,7 +24,7 @@ for cache_btree_node_size in 1 #0 1 2 3 4
 do
 for access_ratio in 0.001 0.01 0.1 0.2 0.3 0.4 0.5
 do
-build/frontend/ycsb_hotspot --trunc=1 --ycsb_tuple_count=10000000 --dram_gib=0.3 --worker_threads=14 --cached_btree=8 --ycsb_keyspace_access_ratio=$access_ratio  --cached_btree_ram_ratio=$cache_dram_ratio --ycsb_read_ratio=80 --ssd_path=/mnt/disks/nvme/leanstore --run_for_seconds=400 --xmerge --inclusive_cache=1 --cached_btree_node_size_type=$cache_btree_node_size >> $log_file 2>&1
+build/frontend/ycsb_hotspot --trunc=1 --ycsb_tuple_count=10000000 --dram_gib=0.3 --worker_threads=14 --cached_btree=8 --ycsb_keyspace_access_ratio=$access_ratio  --cached_btree_ram_ratio=$cache_dram_ratio --ycsb_read_ratio=80 --ssd_path=/mnt/disks/nvme/leanstore --run_for_seconds=500 --xmerge --inclusive_cache=1 --cached_btree_node_size_type=$cache_btree_node_size >> $log_file 2>&1
 done
 done
 done

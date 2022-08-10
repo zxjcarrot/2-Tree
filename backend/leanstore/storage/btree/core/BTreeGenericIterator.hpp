@@ -181,6 +181,7 @@ class BTreePessimisticIterator : public BTreePessimisticIteratorInterface
    virtual Slice keyWithoutPrefix() override { return Slice(leaf->getKey(cur), leaf->getKeyLen(cur)); }
    virtual u16 valueLength() { return leaf->getPayloadLength(cur); }
    virtual Slice value() override { return Slice(leaf->getPayload(cur), leaf->getPayloadLength(cur)); }
+   virtual char* leafFrame() { return reinterpret_cast<char*>(leaf.bf);}
 };  // namespace btree
 // -------------------------------------------------------------------------------------
 using BTreeSharedIterator = BTreePessimisticIterator<LATCH_FALLBACK_MODE::SHARED>;

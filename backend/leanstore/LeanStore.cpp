@@ -243,7 +243,7 @@ void LeanStore::startProfilingThread()
    profiling_thread.detach();
 }
 // -------------------------------------------------------------------------------------
-storage::btree::BTreeLL& LeanStore::registerBTreeLL(string name)
+storage::btree::BTreeLL& LeanStore::registerBTreeLL(string name, bool keep_in_memory)
 {
    assert(btrees_ll.find(name) == btrees_ll.end());
    auto& btree = btrees_ll[name];
@@ -252,6 +252,7 @@ storage::btree::BTreeLL& LeanStore::registerBTreeLL(string name)
    Guard guard(bf.header.latch, GUARD_STATE::EXCLUSIVE);
    bf.header.keep_in_memory = true;
    bf.page.dt_id = dtid;
+   btree.keep_in_memory = keep_in_memory;
    guard.unlock();
    btree.create(dtid, &bf);
    return btree;

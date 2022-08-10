@@ -26,6 +26,7 @@ DECLARE_bool(print_tx_console);
 DECLARE_bool(profiling);
 DECLARE_uint32(print_debug_interval_s);
 DECLARE_bool(enable_perf);
+DECLARE_bool(lower_eviction_prob_for_hot_data);
 DECLARE_string(iostat_dev);
 // -------------------------------------------------------------------------------------
 DECLARE_bool(contention_split);

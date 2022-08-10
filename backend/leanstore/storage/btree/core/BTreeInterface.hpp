@@ -44,6 +44,10 @@ class BTreeInterface
                              u16 key_length,
                              function<bool(const u8* key, u16 key_length, const u8* value, u16 value_length)>,
                              function<void()>) = 0;
+   virtual OP_RESULT scanAsc(u8* start_key,
+                           u16 key_length,
+                           std::function<bool(const u8* key, u16 key_length, const u8* payload, u16 payload_length, const char * leaf_frame)> callback,
+                           function<void()>) = 0;
    virtual OP_RESULT scanAscExclusive(u8* start_key,
                              u16 key_length,
                              function<bool(const u8* key, u16 key_length, const u8* value, u16 value_length)>,

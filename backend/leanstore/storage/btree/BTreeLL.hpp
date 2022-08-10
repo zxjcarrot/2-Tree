@@ -53,6 +53,10 @@ class BTreeLL : public BTreeInterface, public BTreeGeneric
                              u16 key_length,
                              function<bool(const u8* key, u16 key_length, const u8* value, u16 value_length)>,
                              function<void()>) override;
+   virtual OP_RESULT scanAsc(u8* start_key,
+                           u16 key_length,
+                           std::function<bool(const u8* key, u16 key_length, const u8* payload, u16 payload_length, const char * leaf_frame)> callback,
+                           function<void()>);
    virtual OP_RESULT scanAscExclusive(u8* start_key,
                              u16 key_length,
                              function<bool(const u8* key, u16 key_length, const u8* value, u16 value_length)>,
@@ -68,6 +72,7 @@ class BTreeLL : public BTreeInterface, public BTreeGeneric
    // -------------------------------------------------------------------------------------
    static ParentSwipHandler findParent(void* btree_object, BufferFrame& to_find);
    static bool isBTreeLeaf(void* btree_object, BufferFrame& to_find);
+   static bool keepInMemory(void* btree_object);
    static void undo(void* btree_object, const u8* wal_entry_ptr, const u64 tts);
    static void todo(void* btree_object, const u8* wal_entry_ptr, const u64 tts);
    static std::unordered_map<std::string, std::string> serialize(void* btree_object);
