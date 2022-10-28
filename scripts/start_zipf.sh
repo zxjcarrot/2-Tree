@@ -3,7 +3,7 @@ sh scripts/1tree_ycsb_zipf.sh
 # sh scripts/2tree_ycsb_zipf_exclusive_eager.sh
 # sh scripts/2tree_ycsb_zipf_inclusive_eager.sh
 sh scripts/2tree_ycsb_zipf_inclusive_lazy.sh
-#sh scripts/anticache_ycsb_zipf.sh
+sh scripts/anticache_ycsb_zipf.sh
 #sh scripts/lsmt_ycsb_put_zipf.sh
 
 

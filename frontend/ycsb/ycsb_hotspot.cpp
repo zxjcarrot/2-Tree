@@ -152,7 +152,7 @@ int main(int argc, char** argv)
          cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
          FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
       }
-      adapter.reset(new ConcurrentPartitionedLeanstore<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, cached_btree_size_gib, FLAGS_inclusive_cache));
+      //adapter.reset(new ConcurrentPartitionedLeanstore<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, cached_btree_size_gib, FLAGS_inclusive_cache));
    } else if (FLAGS_cached_btree == 10) {
       adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_cached_btree == 11) {

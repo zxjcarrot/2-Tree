@@ -160,7 +160,7 @@ public:
       //auto status = block_table->Put(options, rocksdb::Slice((const char *)key_bytes, key_len), rocksdb::Slice((const char *)&block[0], block.size()));
       //assert(status == rocksdb::Status::OK());
       auto op_res = btree.insert(key_bytes, key_len, reinterpret_cast<u8*>(block.data()), block.size());
-      assert(op_res == OP_RESULT::OK);
+      assert(op_res == leanstore::storage::btree::OP_RESULT::OK);
    }
 
    void evict_till_safe() {
@@ -200,7 +200,7 @@ public:
          block.resize(payload_length); 
          memcpy(&block[0], payload, payload_length); });
 
-      assert(op_res == OP_RESULT::OK);
+      assert(status == leanstore::storage::btree::OP_RESULT::OK);
       //assert(evict_block_size >= block.size());
 
       auto tuple_size = sizeof(TaggedPayload) - sizeof(TaggedPayload::prev) - sizeof(TaggedPayload::next);
@@ -229,7 +229,7 @@ public:
       // status = block_table->Delete(write_options, rocksdb::Slice((const char *)key_bytes, key_len));
       // assert(status == rocksdb::Status::OK());
       auto op_res __attribute__((unused)) = btree.remove(key_bytes, key_len);
-      assert(op_res == OP_RESULT::OK);
+      assert(op_res == leanstore::storage::btree::OP_RESULT::OK);
 
       if (cache_under_pressure())
          evict_till_safe();

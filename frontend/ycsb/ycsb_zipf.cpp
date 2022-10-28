@@ -62,6 +62,7 @@ const std::string kIndexTypeLSMT = "LSMT";
 const std::string kIndexTypeAntiCache = "AntiCache";
 const std::string kIndexTypeAntiCacheB = "AntiCacheB";
 const std::string kIndexType2BTree = "2BTree";
+const std::string kIndexTypeC2BTree = "C2BTree";
 const std::string kIndexType2LSMT = "2LSMT";
 const std::string kIndexType2LSMT_CF = "2LSMT-CF";
 const std::string kIndexTypeTrieLSMT = "Trie-LSMT";
@@ -138,13 +139,13 @@ int main(int argc, char** argv)
    gflags::SetUsageMessage("Leanstore Frontend");
    gflags::ParseCommandLineFlags(&argc, &argv, true);
    // -------------------------------------------------------------------------------------
-   tbb::task_scheduler_init taskScheduler(FLAGS_worker_threads);
+   tbb::task_scheduler_init taskScheduler(1);
    // -------------------------------------------------------------------------------------
    chrono::high_resolution_clock::time_point begin, end;
    // -------------------------------------------------------------------------------------
    // LeanStore DB
    double top_tree_size_gib = 0;
-   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
+   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
    } else if (FLAGS_index_type == kIndexTypeLSMT || 
               FLAGS_index_type == kIndexTypeAntiCache || 
@@ -152,7 +153,8 @@ int main(int argc, char** argv)
               FLAGS_index_type == kIndexTypeTrieBTree || 
               FLAGS_index_type == kIndexTypeIM2BTree ||
               FLAGS_index_type == kIndexType2LSMT || 
-              FLAGS_index_type == kIndexTypeTrieLSMT) {
+              FLAGS_index_type == kIndexTypeTrieLSMT ||
+              FLAGS_index_type == kIndexTypeC2BTree) {
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
    } else {
@@ -202,6 +204,8 @@ int main(int argc, char** argv)
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, btree2_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexType2BTree) {
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_index_type == kIndexTypeC2BTree) {
+      adapter.reset(new ConcurrentPartitionedLeanstore<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeIM2BTree) {
       adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeTrieBTree) {

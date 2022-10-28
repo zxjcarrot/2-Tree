@@ -17,6 +17,44 @@ namespace storage
 namespace btree
 {
 // -------------------------------------------------------------------------------------
+OP_RESULT BTreeLL::lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback, uint64_t & retries)
+{
+   volatile u32 mask = 1;
+   while (true) {
+      jumpmuTry()
+      {
+         ++retries;
+         HybridPageGuard<BTreeNode> leaf;
+         findLeafCanJump(leaf, key, key_length);
+         // -------------------------------------------------------------------------------------
+         DEBUG_BLOCK()
+         {
+            s16 sanity_check_result = leaf->compareKeyWithBoundaries(key, key_length);
+            leaf.recheck();
+            if (sanity_check_result != 0) {
+               cout << leaf->count << endl;
+            }
+            ensure(sanity_check_result == 0);
+         }
+         // -------------------------------------------------------------------------------------
+         s16 pos = leaf->lowerBound<true>(key, key_length);
+         if (pos != -1) {
+            payload_callback(leaf->getPayload(pos), leaf->getPayloadLength(pos));
+            leaf.recheck();
+            jumpmu_return OP_RESULT::OK;
+         } else {
+            leaf.recheck();
+            //raise(SIGTRAP);
+            jumpmu_return OP_RESULT::NOT_FOUND;
+         }
+      }
+      jumpmuCatch()
+      {
+         BACKOFF_STRATEGIES()
+         WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
+      }
+   }
+}
 OP_RESULT BTreeLL::lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback)
 {
    volatile u32 mask = 1;
@@ -55,7 +93,7 @@ OP_RESULT BTreeLL::lookup(u8* key, u16 key_length, function<void(const u8*, u16)
    }
 }
 
-OP_RESULT BTreeLL::lookupForUpdate(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback)
+OP_RESULT BTreeLL::lookupForUpdate(u8* key, u16 key_length, function<bool(const u8*, u16)> payload_callback)
 {
    volatile u32 mask = 1;
    while (true) {
@@ -76,9 +114,11 @@ OP_RESULT BTreeLL::lookupForUpdate(u8* key, u16 key_length, function<void(const 
          // -------------------------------------------------------------------------------------
          s16 pos = leaf->lowerBound<true>(key, key_length);
          if (pos != -1) {
-            payload_callback(leaf->getPayload(pos), leaf->getPayloadLength(pos));
+            bool updated = payload_callback(leaf->getPayload(pos), leaf->getPayloadLength(pos));
             leaf.recheck();
-            //leaf.incrementGSN();
+            if (updated) {
+               leaf.incrementGSN();
+            }
             jumpmu_return OP_RESULT::OK;
          } else {
             leaf.recheck();
@@ -174,6 +214,7 @@ OP_RESULT BTreeLL::scanAscExclusive(u8* start_key,
                jumpmu_return OP_RESULT::NOT_FOUND;
             }
          }
+         iterator.leaf.incrementGSN();
       }
    }
    jumpmuCatch() { ensure(false); }

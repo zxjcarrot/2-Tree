@@ -192,11 +192,11 @@ void LeanStore::startProfilingThread()
          if (FLAGS_print_tx_console) {
             tabulate::Table table;
             table.add_row({"t", "TX P", "TX A", "TX C", "W MiB", "R MiB", "Instrs/TX", "Cycles/TX", "CPUs", "LLC-miss/TX", "WAL T", "WAL R G", "WAL W G",
-                           "GCT Rounds", "Split/Merge", "IO Read/s", "IO Write/s", "Read BW(MB/s)", "Write BW(MB/s)", "IO Util(%)"});
+                           "GCT Rounds", "Split/Merge", "RdRestarts", "IO Read/s", "IO Write/s", "Read BW(MB/s)", "Write BW(MB/s)", "IO Util(%)"});
             table.add_row({std::to_string(seconds), cr_table.get("0", "tx"), cr_table.get("0", "tx_abort"), cr_table.get("0", "gct_committed_tx"),
                            bm_table.get("0", "w_mib"), bm_table.get("0", "r_mib"), std::to_string(instr_per_tx), std::to_string(cycles_per_tx),
                            std::to_string(cpu_table.workers_agg_events["CPU"]), std::to_string(l1_per_tx), cr_table.get("0", "wal_total"),
-                           cr_table.get("0", "wal_read_gib"), cr_table.get("0", "wal_write_gib"), cr_table.get("0", "gct_rounds"), dt_table.get("0", "split_merge_count"),
+                           cr_table.get("0", "wal_read_gib"), cr_table.get("0", "wal_write_gib"), cr_table.get("0", "gct_rounds"), dt_table.get("0", "split_merge_count"), dt_table.get("0", "dt_restarts_read"),
                            std::to_string(read_iops), std::to_string(write_iops), std::to_string(read_bw), std::to_string(write_bw), std::to_string(dev_util)});
             // -------------------------------------------------------------------------------------
             table.format().width(10);

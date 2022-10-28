@@ -46,7 +46,7 @@ struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       table_options.block_size = 16 * 1024;
       table_options.cache_index_and_filter_blocks = true;
       table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
-      table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true, 0);
+      table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true);
       
       options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
       options.statistics = rocksdb::CreateDBStatistics();

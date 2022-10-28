@@ -236,7 +236,7 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
          payload.referenced = true;
          payload.payload = v;
          payload.inflight = false;
-         return;
+         return true;
       });
       assert(found_in_cache);
    }
@@ -259,12 +259,12 @@ struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
       bool found_in_cache = cache.lookupForUpdate(k, [&](const Key & key, TaggedPayload & payload){
          if (payload.inflight) {
             inflight = true;
-            return;
+            return false;
          }
          payload.referenced = true;
          v = payload.payload;
          hit_count++;
-         return;
+         return true;
       });
 
       if (inflight) {

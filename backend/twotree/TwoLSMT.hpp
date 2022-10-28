@@ -73,7 +73,7 @@ struct TwoRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
       toptree_options.use_direct_io_for_flush_and_compaction = true;
       toptree_options.sst_file_manager.reset(rocksdb::NewSstFileManager(rocksdb::Env::Default()));
       {
-         toptree_table_options.block_cache = rocksdb::NewLRUCache(top_block_cache_size, 0, true, 0);
+         toptree_table_options.block_cache = rocksdb::NewLRUCache(top_block_cache_size, 0, true);
          toptree_table_options.cache_index_and_filter_blocks = true;
          toptree_table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
          toptree_options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(toptree_table_options));
@@ -136,7 +136,7 @@ struct TwoRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
 
    bool cache_under_pressure() {
       return //cache_size_bytes >= cache_capacity_bytes * eviction_threshold || 
-             toptree_options.sst_file_manager->GetTotalSize() >= 2 * cache_capacity_bytes * eviction_threshold;
+             toptree_options.sst_file_manager->GetTotalSize() >= 1 * cache_capacity_bytes * eviction_threshold;
    }
 
    void evict_all_items() {
@@ -444,6 +444,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
    std::size_t upward_migrations = 0;
    std::size_t downward_migrations = 0;
    std::size_t blocks_read = 0;
+   std::size_t lookup_top_miss = 0;
    static constexpr double eviction_threshold = 0.99;
 
    Key clock_hand = std::numeric_limits<Key>::max();
@@ -517,7 +518,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       std::cout << "RocksDB block cache size " << block_cache_size / 1024.0 /1024.0/1024 << " gib" << std::endl;
 
       table_options.block_size = 16 * 1024;
-      table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true, 0);
+      table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true);
       //table_options.pin_l0_filter_and_index_blocks_in_cache = true;
       table_options.cache_index_and_filter_blocks = true;
       table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
@@ -582,6 +583,8 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       rocksdb::get_perf_context()->Reset();
       downward_migrations = upward_migrations = 0;
       blocks_read = 0;
+      //lazy_migration_threshold = 0;
+      lookup_top_miss = 0;
    }
 
    bool sample() {
@@ -836,8 +839,10 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       std::string value;
       auto blocks_read_old = rocksdb::get_perf_context()->block_read_count;
       auto status = db->Get(options, top_handle, rocksdb::Slice((const char *)key_bytes, key_len), &value);
-      assert(rocksdb::get_perf_context()->block_read_count - blocks_read_old >= 0);
-      blocks_read += rocksdb::get_perf_context()->block_read_count - blocks_read_old;
+      auto block_read_count = rocksdb::get_perf_context()->block_read_count;
+      assert(block_read_count - blocks_read_old >= 0);
+      blocks_read +=  block_read_count - blocks_read_old;
+      lookup_top_miss += block_read_count - blocks_read_old > 0;
       if (status == rocksdb::Status::OK()) {
          lookup_hit_top++;
          assert(sizeof(TaggedPayload) == value.size());
@@ -848,8 +853,10 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
             //admit_element(k, v, tp->modified, false);
             blocks_read_old = rocksdb::get_perf_context()->block_read_count;
             set_referenced_bit(k);
-            assert(rocksdb::get_perf_context()->block_read_count - blocks_read_old >= 0);
-            blocks_read += rocksdb::get_perf_context()->block_read_count - blocks_read_old;
+            block_read_count = rocksdb::get_perf_context()->block_read_count;
+            assert(block_read_count - blocks_read_old >= 0);
+            blocks_read += block_read_count - blocks_read_old;
+            lookup_top_miss += block_read_count - blocks_read_old > 0;
          }
          // if (leanstore::utils::RandomGenerator::getRandU64(0, 100) < 1) {
          //    admit_element(k, tp->payload, tp->modified, false);
@@ -900,14 +907,18 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       std::string value;
       auto blocks_read_old = rocksdb::get_perf_context()->block_read_count;
       auto status = db->Get(options, top_handle, rocksdb::Slice((const char *)key_bytes, key_len), &value);
-      assert(rocksdb::get_perf_context()->block_read_count - blocks_read_old >= 0);
-      blocks_read += rocksdb::get_perf_context()->block_read_count - blocks_read_old;
+      auto block_read_count = rocksdb::get_perf_context()->block_read_count;
+      assert(block_read_count - blocks_read_old >= 0);
+      blocks_read +=  block_read_count - blocks_read_old;
+      lookup_top_miss += block_read_count - blocks_read_old > 0;
       if (status == rocksdb::Status::OK()) {
          assert(sizeof(TaggedPayload) == value.size());
          // update top tree
          blocks_read_old = rocksdb::get_perf_context()->block_read_count;
          admit_element(k, v, /* modifed */ true);
-         blocks_read += rocksdb::get_perf_context()->block_read_count - blocks_read_old;
+         assert(block_read_count - blocks_read_old >= 0);
+         blocks_read +=  block_read_count - blocks_read_old;
+         lookup_top_miss += block_read_count - blocks_read_old > 0;
          return;
       }
 
@@ -964,7 +975,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       report_db(db, "bottom", bottom_handle);
       std::cout << "perf stat " << rocksdb::get_perf_context()->ToString() << std::endl;
       std::cout << "io stat " << rocksdb::get_iostats_context()->ToString() << std::endl;
-      std::cout << total_lookups<< " lookups, "  << lookup_hit_top << " lookup hit top " << " topdb blocks read " << blocks_read << std::endl;
+      std::cout << total_lookups<< " lookups, "  << lookup_hit_top << " lookup hit top " << " topdb blocks read " << blocks_read << " lookup_top_miss " << lookup_top_miss << std::endl;
       std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations" << std::endl;
    }
 };

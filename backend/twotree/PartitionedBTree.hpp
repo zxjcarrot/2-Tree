@@ -244,6 +244,7 @@ struct BTreeVSHotColdPartitionedAdapter : BTreeInterface<Key, Payload> {
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          tp->referenced = true;
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
+         return true;
          }) ==
             OP_RESULT::OK;
       auto new_miss = WorkerCounters::myCounters().io_reads.load();
