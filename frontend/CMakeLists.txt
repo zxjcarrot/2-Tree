@@ -4,17 +4,17 @@ target_link_libraries(frontend leanstore)
 
 
 add_executable(ycsb_zipf ycsb/ycsb_zipf.cpp)
-target_link_libraries(ycsb_zipf leanstore Threads::Threads rocksdb)
-target_include_directories(ycsb_zipf PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+target_link_libraries(ycsb_zipf leanstore Threads::Threads rocksdb tcmalloc)
+target_include_directories(ycsb_zipf PRIVATE ${SHARED_INCLUDE_DIRECTORY} ${CMAKE_DL_LIBS})
 
 add_executable(ycsb_hotspot ycsb/ycsb_hotspot.cpp)
 target_link_libraries(ycsb_hotspot leanstore Threads::Threads)
-target_include_directories(ycsb_hotspot PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+target_include_directories(ycsb_hotspot PRIVATE ${SHARED_INCLUDE_DIRECTORY} ${CMAKE_DL_LIBS})
 
 
 # add_executable(btreeolc_test btreeolc_test/btreeolc_test.cpp)
 # target_link_libraries(btreeolc_test leanstore gtest Threads::Threads)
-# target_include_directories(btreeolc_test PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+# target_include_directories(btreeolc_test PRIVATE ${SHARED_INCLUDE_DIRECTORY} ${CMAKE_DL_LIBS})
 
 
 # add_executable(tpcc tpc-c/tpcc.cpp)

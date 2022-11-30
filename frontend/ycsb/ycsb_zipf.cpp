@@ -11,6 +11,7 @@
 #include "leanstore/utils/HotspotGenerator.hpp"
 #include "leanstore/utils/SelfSimilarGenerator.hpp"
 #include "lsmt/rocksdb_adapter.hpp"
+#include "lsmt/upmigration_rocksdb_adapter.hpp"
 #include "twotree/PartitionedBTree.hpp"
 #include "twotree/TrieBTree.hpp"
 #include "twotree/TwoBTree.hpp"
@@ -30,13 +31,19 @@
 #include <set>
 // -------------------------------------------------------------------------------------
 DEFINE_uint32(ycsb_read_ratio, 100, "");
+DEFINE_uint32(ycsb_update_ratio, 0, "");
+DEFINE_uint32(ycsb_blind_write_ratio, 0, "");
+DEFINE_uint32(ycsb_scan_ratio, 0, "");
+DEFINE_uint32(ycsb_scan_length, 100, "");
 DEFINE_uint64(ycsb_tuple_count, 0, "");
+DEFINE_uint64(ycsb_keyspace_count, 500000000, "");
 DEFINE_uint32(ycsb_payload_size, 100, "tuple size in bytes");
 DEFINE_uint32(ycsb_warmup_rounds, 0, "");
 DEFINE_uint32(ycsb_tx_rounds, 1, "");
 DEFINE_uint32(ycsb_tx_count, 0, "default = tuples");
 DEFINE_bool(verify, false, "");
 DEFINE_string(index_type, "BTree", "");
+DEFINE_bool(lsmt_use_record_cache, false, "use record cache?");
 DEFINE_uint32(cached_btree, 0, "");
 DEFINE_uint32(cached_btree_node_size_type, 0, "");
 DEFINE_bool(inclusive_cache, false, "");
@@ -65,9 +72,12 @@ const std::string kIndexType2BTree = "2BTree";
 const std::string kIndexTypeC2BTree = "C2BTree";
 const std::string kIndexType2LSMT = "2LSMT";
 const std::string kIndexType2LSMT_CF = "2LSMT-CF";
+const std::string kIndexTypeUpLSMT = "UpLSMT";
 const std::string kIndexTypeTrieLSMT = "Trie-LSMT";
 const std::string kIndexTypeTrieBTree = "Trie-BTree";
 const std::string kIndexTypeIM2BTree = "IM2BTree";
+const std::string kIndexTypeSTX2BTree = "STX2BTree";
+const std::string kIndexTypeSTXBTree = "STXBTree";
 
 
 // -------------------------------------------------------------------------------------
@@ -87,8 +97,9 @@ double calculateMTPS(chrono::high_resolution_clock::time_point begin, chrono::hi
 void zipf_keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
    std::vector<YCSBKey> generated_keys;
    std::unordered_map<YCSBKey, int> unique_keys;
-   for (size_t i = 0; i < FLAGS_ycsb_tuple_count * 2; ++i) {
-      YCSBKey key = zipf_gen->zipf_generator.rand() % FLAGS_ycsb_tuple_count;
+   size_t n = 10000000;
+   for (size_t i = 0; i < n * 2; ++i) {
+      YCSBKey key = zipf_gen->zipf_generator.rand() % n;
       generated_keys.push_back(key);
       unique_keys[key]++;
    }
@@ -100,7 +111,7 @@ void zipf_keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
    std::cout << "Most frequent key occurrence: " << unique_keys[generated_keys[0]] << std::endl;
    auto print_percentile_info = [&](int p) {
       double pd = p / 100.0;
-      std::cout << "p" << p  << ": " << generated_keys[pd*generated_keys.size()] << ", covering " << generated_keys[pd*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys, occurrence :" << unique_keys[generated_keys[pd*generated_keys.size()]] << std::endl;
+      std::cout << "p" << p  << ": " << generated_keys[pd*generated_keys.size()] << ", covering " << generated_keys[pd*generated_keys.size()] / (0.0 + n) * 100 << "% of the keys, occurrence :" << unique_keys[generated_keys[pd*generated_keys.size()]] << std::endl;
    };
    for (size_t i = 5; i <= 95; i += 5) {
       print_percentile_info(i);
@@ -133,6 +144,33 @@ void selfsimilar_keyspace_stats(utils::SelfSimilarGenerator * ss_gen) {
    print_percentile_info(99);
 }
 
+void show_5_min_rule_placement(const vector<u64> & access_count,
+   const vector<u64> & sum_reaccess_interval, size_t record_size) {
+   constexpr double price_per_GB_DRAM = 2.69;
+   constexpr double price_per_byte_dram = price_per_GB_DRAM / (1024.0 * 1024 * 1024);
+   constexpr double price_per_STORAGE_DEVICE = 30;
+   constexpr int IOPS = 170000;
+   constexpr double price_per_SSD_IO = price_per_STORAGE_DEVICE / IOPS;
+   double break_even_interval = 1 / (price_per_byte_dram * record_size) * price_per_SSD_IO;
+   int on_storage = 0;
+   int in_memory = 0;
+   for (size_t i = 0; i < access_count.size(); ++i) {
+      if (access_count[i] == 0) {
+         on_storage++;
+      } else {
+         double avg_reaccess_interval_seconds = sum_reaccess_interval[i] / access_count[i] / 1000000;
+         if (avg_reaccess_interval_seconds <= break_even_interval) {
+            in_memory++;
+         } else {
+            on_storage++;
+         }
+      }
+   }
+
+   cout << "5_min_rule_break_even_interval: " << break_even_interval << " seconds" << std::endl;
+   cout << "5_min_rule_placement: " << in_memory << " records in memory, " << on_storage << " on storage" << std::endl;
+}
+
 // -------------------------------------------------------------------------------------
 int main(int argc, char** argv)
 {
@@ -145,16 +183,18 @@ int main(int argc, char** argv)
    // -------------------------------------------------------------------------------------
    // LeanStore DB
    double top_tree_size_gib = 0;
-   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
+   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
-   } else if (FLAGS_index_type == kIndexTypeLSMT || 
+   } else if (FLAGS_index_type == kIndexTypeUpLSMT || 
+              FLAGS_index_type == kIndexTypeLSMT || 
               FLAGS_index_type == kIndexTypeAntiCache || 
               FLAGS_index_type == kIndexTypeAntiCacheB || 
               FLAGS_index_type == kIndexTypeTrieBTree || 
               FLAGS_index_type == kIndexTypeIM2BTree ||
               FLAGS_index_type == kIndexType2LSMT || 
               FLAGS_index_type == kIndexTypeTrieLSMT ||
-              FLAGS_index_type == kIndexTypeC2BTree) {
+              FLAGS_index_type == kIndexTypeC2BTree ||
+              FLAGS_index_type == kIndexTypeSTX2BTree) {
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
    } else {
@@ -170,6 +210,8 @@ int main(int argc, char** argv)
    cout << "wal=" << FLAGS_wal << std::endl;
    cout << "zipf_factor=" << FLAGS_zipf_factor << std::endl;
    cout << "ycsb_read_ratio=" << FLAGS_ycsb_read_ratio << std::endl;
+   cout << "ycsb_update_ratio=" << FLAGS_ycsb_update_ratio << std::endl;
+   cout << "ycsb_scan_ratio=" << FLAGS_ycsb_scan_ratio << std::endl;
    cout << "run_for_seconds=" << FLAGS_run_for_seconds << std::endl;
    const u64 ycsb_tuple_count = (FLAGS_ycsb_tuple_count)
                                     ? FLAGS_ycsb_tuple_count
@@ -211,7 +253,9 @@ int main(int argc, char** argv)
    } else if (FLAGS_index_type == kIndexTypeTrieBTree) {
       adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeLSMT) {
-      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
+      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_use_record_cache, "/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, false, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_index_type == kIndexTypeUpLSMT) {
+      adapter.reset(new UpMigrationRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", FLAGS_dram_gib + top_tree_size_gib, false, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2LSMT) {
       adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexType2LSMT_CF){
@@ -220,6 +264,10 @@ int main(int argc, char** argv)
       adapter.reset(new TrieRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeAntiCache) { 
       adapter.reset(new AntiCacheAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib));
+   } else if (FLAGS_index_type == kIndexTypeSTX2BTree) {
+      adapter.reset(new STX2BTreeAdapter<YCSBKey, YCSBPayload>(top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+   } else if (FLAGS_index_type == kIndexTypeSTXBTree) {
+      adapter.reset(new STXBTreeAdapter<YCSBKey, YCSBPayload>(top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else {
       assert(FLAGS_index_type == kIndexTypeAntiCacheB);
       adapter.reset(new AntiCacheBTreeAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, top_tree_size_gib));
@@ -233,6 +281,9 @@ int main(int argc, char** argv)
    // Insert values
    const u64 n = ycsb_tuple_count;
    vector<u64> keys(n);
+   vector<u64> last_access_timestamps(n, 0);
+   vector<u64> access_count(n, 0);
+   vector<u64> sum_reaccess_interval(n, 0);
    if (FLAGS_recover) {
       // Warmup
       const u64 n = ycsb_tuple_count;
@@ -255,7 +306,7 @@ int main(int argc, char** argv)
       std::random_shuffle(keys.begin(), keys.end());
       begin = chrono::high_resolution_clock::now();
       {
-         if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeLSMT) {
+         if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeUpLSMT) {
             tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
                for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
                   YCSBPayload payload;
@@ -267,6 +318,7 @@ int main(int argc, char** argv)
             });
          } else {
             tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+               //cout << "range size " << range.end() - range.begin() << std::endl;
                vector<u64> range_keys(range.end() - range.begin());
                std::iota(range_keys.begin(), range_keys.end(), range.begin());
                std::random_shuffle(range_keys.begin(), range_keys.end());
@@ -326,7 +378,7 @@ int main(int argc, char** argv)
       // warm up for 100 seconds
       // scramble the database
       while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 100000) {
-         YCSBKey key = keys[random_generator->rand() % ycsb_tuple_count];
+         YCSBKey key = keys[random_generator->rand() % ycsb_tuple_count] % FLAGS_ycsb_keyspace_count;
 
          assert(key < ycsb_tuple_count);
          YCSBPayload result;
@@ -356,6 +408,7 @@ int main(int argc, char** argv)
    atomic<u64> txs = 0;
    vector<thread> threads;
    begin = chrono::high_resolution_clock::now();
+   int scan_len;
    for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
       db.getCRManager().scheduleJobAsync(t_i, [&]() {
          adapter->clear_stats();
@@ -363,13 +416,37 @@ int main(int argc, char** argv)
          u64 tx = 0;
          
          while (keep_running) {
-            YCSBKey key = keys[random_generator->rand() % ycsb_tuple_count];
-            
+            auto idx = random_generator->rand() % ycsb_tuple_count;
+            YCSBKey key = keys[idx];
+            auto old_access_timestamp = last_access_timestamps[idx];
+            last_access_timestamps[idx] = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            if (old_access_timestamp != 0) {
+               sum_reaccess_interval[idx] += last_access_timestamps[idx] - old_access_timestamp;
+            }
+            access_count[idx]++;
             assert(key < ycsb_tuple_count);
             YCSBPayload result;
-            if (FLAGS_ycsb_read_ratio == 100 || utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
-               table.lookup(key, result);
-            } else {
+            int x = utils::RandomGenerator::getRandU64(0, 100);
+            if (x < FLAGS_ycsb_scan_ratio) {
+               key = utils::RandomGenerator::getRandU64() % ycsb_tuple_count;
+               scan_len = FLAGS_ycsb_scan_length;
+               YCSBKey tk;
+               YCSBPayload tv;
+               auto scan_processor = [&](const YCSBKey & key, const YCSBPayload & payload) {
+                  tk = key;
+                  tv = payload;
+                  if (--scan_len == 0) {
+                     return true;
+                  }
+                  return false;
+               };
+
+               table.scan(key, scan_processor, scan_len);
+            } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio) {
+               YCSBPayload payload;
+               utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+               table.insert(key, payload);
+            } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio) {
                YCSBPayload payload;
                utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
                if (FLAGS_update_or_put == 0) {
@@ -377,6 +454,8 @@ int main(int argc, char** argv)
                } else {
                   table.put(key, payload);
                }
+            } else { // x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_read_ratio
+               table.lookup(key, result);
             }
             WorkerCounters::myCounters().tx++;
             ++tx;
@@ -396,16 +475,20 @@ int main(int argc, char** argv)
       cout << "time elapsed = " << (chrono::duration_cast<chrono::microseconds>(end - begin).count() / 1000000.0) << endl;
       // -------------------------------------------------------------------------------------
       cout << "Total commit: " << calculateMTPS(begin, end, txs.load()) << " M tps" << endl;
+      adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
+      show_5_min_rule_placement(access_count, sum_reaccess_interval, sizeof(YCSBPayload) + sizeof(YCSBKey));
       if (FLAGS_ycsb_request_dist == kRequestDistributionZipfian) {
          zipf_keyspace_stats((utils::ScrambledZipfGenerator*)random_generator.get());
       } else if (FLAGS_ycsb_request_dist == kRequestDistributionSelfSimilar) {
          selfsimilar_keyspace_stats((utils::SelfSimilarGenerator*)random_generator.get());
       }
       
-      adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
       cout << "-------------------------------------------------------------------------------------" << endl;
+      
       db.getCRManager().joinAll();
    }
+
+
    cout << "-------------------------------------------------------------------------------------" << endl;
    // -------------------------------------------------------------------------------------
    return 0;

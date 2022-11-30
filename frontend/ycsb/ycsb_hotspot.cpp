@@ -32,6 +32,7 @@ DEFINE_uint32(ycsb_tx_rounds, 1, "");
 DEFINE_uint32(ycsb_tx_count, 0, "default = tuples");
 DEFINE_bool(verify, false, "");
 DEFINE_uint32(cached_btree, 0, "");
+DEFINE_bool(lsmt_use_record_cache, false, "use record cache?");
 DEFINE_uint32(cached_btree_node_size_type, 0, "");
 DEFINE_double(cached_btree_ram_ratio, 0.0, "");
 DEFINE_bool(cache_lazy_migration, false, "");
@@ -138,7 +139,7 @@ int main(int argc, char** argv)
       }
       adapter.reset(new BTreeVSHotColdPartitionedAdapter<YCSBKey, YCSBPayload>(*btree_ptr, btree_ptr->dt_id, cached_btree_size_gib));
    } else if (FLAGS_cached_btree == 4) {
-      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
+      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_use_record_cache, "/mnt/disks/nvme/rocksdb", cached_btree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration));
    } else if (FLAGS_cached_btree == 5) {
       adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
    } else if (FLAGS_cached_btree == 6) {

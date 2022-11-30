@@ -63,6 +63,8 @@ struct BTreeVSAdapter : BTreeInterface<Key, Payload> {
    std::size_t io_reads_now = 0;
    uint64_t btree_buffer_miss = 0;
    uint64_t btree_buffer_hit = 0;
+   std::size_t scan_ops = 0;
+   std::size_t io_reads_scan = 0;
    DTID dt_id;
    BTreeVSAdapter(leanstore::storage::btree::BTreeInterface& btree, DTID dt_id = -1) : btree(btree), dt_id(dt_id) {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
@@ -71,6 +73,7 @@ struct BTreeVSAdapter : BTreeInterface<Key, Payload> {
    void clear_stats() override {
       btree_buffer_miss = btree_buffer_hit = 0;
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
+      io_reads_scan = scan_ops = 0;
    }
 
    bool lookup(Key k, Payload& v) override
@@ -101,6 +104,25 @@ struct BTreeVSAdapter : BTreeInterface<Key, Payload> {
       } else {
          btree_buffer_miss += new_miss - old_miss;
       }
+   }
+
+
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+      scan_ops++;
+      u8 key_bytes[sizeof(Key)];
+      auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
+      btree.scanAsc(key_bytes, fold(key_bytes, start_key),
+      [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+         auto real_key = unfold(*(Key*)(key));
+         assert(key_length == sizeof(Key));
+         assert(value_length == sizeof(Payload));
+         const Payload * p = reinterpret_cast<const Payload*>(value);
+         if (processor(real_key, *p)) {
+            return false;
+         }
+         return true;
+      }, [](){});
+      io_reads_scan += WorkerCounters::myCounters().io_reads.load() - io_reads_old;
    }
 
    void update(Key k, Payload& v) override
@@ -135,6 +157,7 @@ struct BTreeVSAdapter : BTreeInterface<Key, Payload> {
       double btree_hit_rate = btree_buffer_hit / (btree_buffer_hit + btree_buffer_miss + 1.0);
       std::cout << "BTree buffer hits/misses " <<  btree_buffer_hit << "/" << btree_buffer_miss << std::endl;
       std::cout << "BTree buffer hit rate " <<  btree_hit_rate << " miss rate " << (1 - btree_hit_rate) << std::endl;
+      std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01);
    }
 };
 

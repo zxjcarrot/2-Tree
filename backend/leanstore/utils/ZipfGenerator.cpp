@@ -30,7 +30,7 @@ double ZipfGenerator::zeta(u64 n, double theta)
 uint64_t ZipfGenerator::rand()
 {
    double constant = 1000000000000000000.0;
-   u64 i = RandomGenerator::getRandU64(0, 1000000000000000001);
+   u64 i = RandomGenerator::getRandU64(0, 1000000000000000001ull);
    double u = static_cast<double>(i) / constant;
    // return (u64)u;
    double uz = u * zetan;

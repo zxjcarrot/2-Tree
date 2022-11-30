@@ -482,7 +482,7 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       }
       this->cache_size_bytes = 0;
       this->cache_capacity_bytes = toptree_cache_budget_gib * 1024 * 1024 * 1024;
-      db_options.write_buffer_size = 8 * 1024 * 1024;
+      db_options.write_buffer_size = 64 * 1024 * 1024;
       db_options.create_if_missing = true;
       std::cout << "lazy_migration_threshold " << lazy_migration_threshold << std::endl;
       std::cout << "lazy_migration " << lazy_migration << std::endl;
@@ -517,8 +517,9 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
       std::size_t block_cache_size = (dram_budget_gib) * 1024ULL * 1024ULL * 1024ULL - db_options.write_buffer_size * db_options.max_write_buffer_number;
       std::cout << "RocksDB block cache size " << block_cache_size / 1024.0 /1024.0/1024 << " gib" << std::endl;
 
-      table_options.block_size = 16 * 1024;
+      table_options.block_size = 32 * 1024;
       table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true);
+      table_options.prepopulate_block_cache = rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushOnly;
       //table_options.pin_l0_filter_and_index_blocks_in_cache = true;
       table_options.cache_index_and_filter_blocks = true;
       table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
@@ -795,6 +796,74 @@ struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
          }
          measure_size_countdown = kEvictionCheckInterval;
       }
+   }
+
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) override {
+      rocksdb::ReadOptions ropts;
+      u8 key_bytes[sizeof(Key)];
+      ropts.snapshot = db->GetSnapshot();
+      auto key_len = leanstore::fold(key_bytes, start_key);
+      rocksdb::Iterator * it_top = db->NewIterator(ropts, top_handle);
+      rocksdb::Iterator * it_bottom = db->NewIterator(ropts, bottom_handle);
+      it_top->Seek(rocksdb::Slice((const char *)key_bytes, key_len));
+      it_bottom->Seek(rocksdb::Slice((const char *)key_bytes, key_len));
+
+      Key k1;
+      Payload p1;
+      Key k2;
+      Payload p2;
+
+      while (it_top->Valid() && it_bottom->Valid()) {
+         assert(it_top->key().size() == sizeof(Key));
+         k1 = leanstore::unfold(*(Key*)it_top->key().data());
+         memcpy(&p1, it_top->value().data(), it_top->value().size());
+         k2 = leanstore::unfold(*(Key*)it_bottom->key().data());
+         memcpy(&p2, it_bottom->value().data(), it_bottom->value().size());
+         if (k1 < k2) {
+            bool should_exit = processor(k1, p1);
+            if (should_exit) {
+               goto end;
+            }
+            it_top->Next();
+         } else if (k1 == k2) {
+            bool should_exit = processor(k1, p1);
+            if (should_exit) {
+               goto end;
+            }
+            it_top->Next();
+            it_bottom->Next();
+         } else {
+            bool should_exit = processor(k2, p2);
+            if (should_exit) {
+               goto end;
+            }
+            it_bottom->Next();
+         }
+      }
+
+
+      if (it_top->Valid() || it_bottom->Valid()) {
+         assert(it_top->Valid() && !it_bottom->Valid() || !it_top->Valid() && it_bottom->Valid());
+         rocksdb::Iterator * it;
+         if (it_top->Valid()) {
+            it = it_top;
+         } else {
+            it = it_bottom;
+         }
+         while (it->Valid()) {
+            assert(it->key().size() == sizeof(Key));
+            k1 = leanstore::unfold(*(Key*)it->key().data());
+            memcpy(&p1, it->value().data(), it->value().size());
+            if (processor(k1, p1)) {
+               goto end;
+            }
+            it->Next();
+         }
+      }
+end:
+      delete it_top;
+      delete it_bottom;
+      db->ReleaseSnapshot(ropts.snapshot);
    }
 
    void admit_element(Key k, Payload & v, bool dirty = false) {

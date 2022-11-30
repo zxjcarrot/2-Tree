@@ -24,6 +24,8 @@ public:
    double maintain_lru_sampling_threshold = 100;
    std::size_t payload_num = 0;
    std::size_t tombstone_num = 0;
+   std::size_t scan_ops = 0;
+   std::size_t io_reads_scan = 0;
    struct TombstoneRecord {
       uint32_t block_id;
       uint32_t tuple_offset;
@@ -95,6 +97,7 @@ public:
 
    void clear_stats() override {
       hit_count = miss_count = 0;
+      scan_ops = io_reads_scan = 0;
    }
 
    inline size_t get_cache_size() {
@@ -187,6 +190,32 @@ public:
       admit_element_no_eviction(k, v, head);
    }
 
+   bool read_tuple_from_block_table(Payload & v, const TombstoneRecord & trec) {
+      //assert(evict_table.find(k) != evict_table.end());
+      auto block_id = trec.block_id;
+
+      //rocksdb::ReadOptions options;
+      u8 key_bytes[sizeof(block_id)];
+      auto key_len = leanstore::fold(key_bytes, block_id);
+      std::string block;
+      block.reserve(evict_block_size);
+      auto status = btree.lookup(key_bytes, key_len, [&](const u8* payload, u16 payload_length) { 
+         block.resize(payload_length); 
+         memcpy(&block[0], payload, payload_length); 
+
+      });
+
+      if (status != leanstore::storage::btree::OP_RESULT::OK) {
+         return false;
+      }
+      assert(status == leanstore::storage::btree::OP_RESULT::OK);
+      //assert(evict_block_size >= block.size());
+
+      auto tuple_size = sizeof(TaggedPayload) - sizeof(TaggedPayload::prev) - sizeof(TaggedPayload::next);
+      memcpy(&v, &block[trec.tuple_offset + sizeof(Key)], sizeof(Payload));
+      return true;
+   }
+
    void bring_tuple_from_block_table(Key k, const TombstoneRecord & trec) {
       assert(evict_table.find(k) != evict_table.end());
       auto block_id = trec.block_id;
@@ -256,6 +285,118 @@ public:
       return lookup(k, v);
    }
 
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+      scan_ops++;
+      auto io_reads_old = leanstore::WorkerCounters::myCounters().io_reads.load();
+      constexpr std::size_t scan_buffer_size = 32;
+      int hot_len = 0;
+      Key hot_keys[scan_buffer_size];
+      Payload hot_payloads[scan_buffer_size];
+      int cold_len = 0;
+      Key cold_keys[scan_buffer_size];
+      Payload cold_payloads[scan_buffer_size];
+      bool hot_tree_end = false;
+      bool cold_tree_end = false;
+      auto fill_hot_scan_buffer = [&](Key startk) -> void {
+         if (hot_len < scan_buffer_size && hot_tree_end == false) {
+            auto it = cache.lower_bound(startk);
+            while (it != cache.end()) {
+               hot_keys[hot_len] = it.key();
+               hot_payloads[hot_len] = it.data()->payload;
+               ++hot_len;
+               if (hot_len >= scan_buffer_size) {
+                  break;
+               }
+               ++it;
+            }
+            if (hot_len < scan_buffer_size) {
+               hot_tree_end = true;
+            }
+         }
+      };
+      auto fill_cold_scan_buffer = [&](Key startk) -> void {
+         if (cold_len < scan_buffer_size && cold_tree_end == false) {
+            auto it = evict_table.lower_bound(startk);
+            while (it != evict_table.end()) {
+               cold_keys[cold_len] = it.key();
+               bool res = read_tuple_from_block_table(cold_payloads[cold_len], it.data());
+               assert(res == true);
+               cold_len++;
+               if (cold_len >= scan_buffer_size) {
+                  break;
+               }
+               ++it;
+            }
+            if (cold_len < scan_buffer_size) {
+               cold_tree_end = true;
+            }
+         }
+      };
+
+      int hot_idx = 0;
+      int cold_idx = 0;
+      fill_hot_scan_buffer(start_key);
+      fill_cold_scan_buffer(start_key);
+      while (true) {
+         while (hot_idx < hot_len && cold_idx < cold_len) {
+            if (hot_keys[hot_idx] <= cold_keys[cold_idx]) {
+               if (processor(hot_keys[hot_idx], hot_payloads[hot_idx])) {
+                  goto end;
+               }
+               hot_idx++;
+            } else {
+               if (processor(cold_keys[cold_idx], cold_payloads[cold_idx])) {
+                  goto end;
+               }
+               cold_idx++;
+            }
+         }
+
+         if (hot_idx < hot_len && cold_idx == cold_len && cold_tree_end) { // 
+            while (hot_idx < hot_len) {
+               if (processor(hot_keys[hot_idx], hot_payloads[hot_idx])) {
+                  goto end;
+               }
+               hot_idx++;
+            }
+         }
+
+         if (cold_idx < cold_len && hot_idx == hot_len && hot_tree_end) {
+            // reached the end of 
+            while (cold_idx < cold_len) {
+               if (processor(cold_keys[cold_idx], cold_payloads[cold_idx])) {
+                  goto end;
+               }
+               cold_idx++;
+            }
+         }
+
+         if (hot_idx >= hot_len && hot_tree_end == false) { // try to refill hot scan buffer
+            assert(hot_idx > 0);
+            auto hot_start_key = hot_keys[hot_idx - 1] + 1;
+            hot_idx = 0;
+            hot_len = 0;
+            fill_hot_scan_buffer(hot_start_key);
+         }
+
+         if (cold_idx >= cold_len && cold_tree_end == false) { // try to refill cold scan buffer
+            assert(cold_idx > 0);
+            auto cold_start_key = cold_keys[cold_idx - 1] + 1;
+            cold_idx = 0;
+            cold_len = 0;
+            fill_cold_scan_buffer(cold_start_key);
+         }
+
+         if (cold_idx >= cold_len && cold_tree_end && hot_idx >= hot_len && hot_tree_end) {
+            goto end;
+         }
+      }
+
+   end:
+      io_reads_scan += leanstore::WorkerCounters::myCounters().io_reads.load() - io_reads_old;
+      return;
+   }
+
    void insert(Key k, Payload& v) override
    {
       admit_element(k, v);
@@ -303,6 +444,7 @@ public:
       double hit_rate = hit_count / (hit_count + miss_count + 1.0);
       std::cout << "Cache hit rate " << hit_rate * 100 << "%" << std::endl;
       std::cout << "Cache miss rate " << (1 - hit_rate) * 100  << "%"<< std::endl;
+      std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01);
    }
 
    void report(u64, u64) override {

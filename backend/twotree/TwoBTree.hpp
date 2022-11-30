@@ -334,6 +334,8 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
    std::size_t eviction_io_reads = 0;
    std::size_t io_reads_snapshot = 0;
    std::size_t io_reads_now = 0;
+   std::size_t scan_ops = 0;
+   std::size_t io_reads_scan = 0;
    typedef std::pair<Key, Payload> Element;
    struct TaggedPayload {
       Payload payload;
@@ -386,6 +388,7 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
       hit_count = miss_count = 0;
       eviction_items = eviction_io_reads = 0;
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
+      scan_ops = io_reads_scan = 0;
    }
 
    void evict_all() override {
@@ -592,6 +595,123 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
       return res;
    }
 
+
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+      ++scan_ops;
+      auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
+      constexpr std::size_t scan_buffer_size = 32;
+      u8 key_bytes[sizeof(Key)];
+      int hot_len = 0;
+      Key hot_keys[scan_buffer_size];
+      Payload hot_payloads[scan_buffer_size];
+      int cold_len = 0;
+      Key cold_keys[scan_buffer_size];
+      Payload cold_payloads[scan_buffer_size];
+      bool hot_tree_end = false;
+      bool cold_tree_end = false;
+      auto fill_hot_scan_buffer = [&](Key startk) {
+         if (hot_len < scan_buffer_size && hot_tree_end == false) {
+            auto it = cache.lower_bound(startk);
+            while (it != cache.end()) {
+               hot_keys[hot_len] = it.key();
+               hot_payloads[hot_len] = it.data().payload;
+               ++hot_len;
+               if (hot_len >= scan_buffer_size) {
+                  break;;
+               }
+               ++it;
+            }
+            if (hot_len < scan_buffer_size) {
+               hot_tree_end = true;
+            }
+         }
+      };
+      auto fill_cold_scan_buffer = [&](Key startk) {
+         if (cold_len < scan_buffer_size && cold_tree_end == false) {
+            btree.scanAsc(key_bytes, fold(key_bytes, startk),
+            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+               auto real_key = unfold(*(Key*)(key));
+               assert(key_length == sizeof(Key));
+               assert(value_length == sizeof(Payload));
+               const Payload * p = reinterpret_cast<const Payload*>(value);
+               cold_keys[cold_len] = real_key;
+               cold_payloads[cold_len] = *p;
+               cold_len++;
+               if (cold_len >= scan_buffer_size) {
+                  return false;
+               }
+               return true;
+            }, [](){});
+            if (cold_len < scan_buffer_size) {
+               cold_tree_end = true;
+            }
+         }
+      };
+
+      int hot_idx = 0;
+      int cold_idx = 0;
+      fill_hot_scan_buffer(start_key);
+      fill_cold_scan_buffer(start_key);
+      while (true) {
+         while (hot_idx < hot_len && cold_idx < cold_len) {
+            if (hot_keys[hot_idx] <= cold_keys[cold_idx]) {
+               if (processor(hot_keys[hot_idx], hot_payloads[hot_idx])) {
+                  goto end;
+               }
+               hot_idx++;
+            } else {
+               if (processor(cold_keys[cold_idx], cold_payloads[cold_idx])) {
+                  goto end;
+               }
+               cold_idx++;
+            }
+         }
+
+         if (hot_idx < hot_len && cold_idx == cold_len && cold_tree_end) { // 
+            while (hot_idx < hot_len) {
+               if (processor(hot_keys[hot_idx], hot_payloads[hot_idx])) {
+                  goto end;
+               }
+               hot_idx++;
+            }
+         }
+
+         if (cold_idx < cold_len && hot_idx == hot_len && hot_tree_end) {
+            // reached the end of 
+            while (cold_idx < cold_len) {
+               if (processor(cold_keys[cold_idx], cold_payloads[cold_idx])) {
+                  goto end;
+               }
+               cold_idx++;
+            }
+         }
+
+         if (hot_idx >= hot_len && hot_tree_end == false) { // try to refill hot scan buffer
+            assert(hot_idx > 0);
+            auto hot_start_key = hot_keys[hot_idx - 1] + 1;
+            hot_idx = 0;
+            hot_len = 0;
+            fill_hot_scan_buffer(hot_start_key);
+         }
+
+         if (cold_idx >= cold_len && cold_tree_end == false) { // try to refill cold scan buffer
+            assert(cold_idx > 0);
+            auto cold_start_key = cold_keys[cold_idx - 1] + 1;
+            cold_idx = 0;
+            cold_len = 0;
+            fill_cold_scan_buffer(cold_start_key);
+         }
+
+         if (cold_idx >= cold_len && cold_tree_end && hot_idx >= hot_len && hot_tree_end) {
+            goto end;
+         }
+      }
+
+   end:
+      io_reads_scan += WorkerCounters::myCounters().io_reads.load() - io_reads_old;
+      return;
+   }
+
    void upsert_btree(Key k, Payload& v)
    {
       u8 key_bytes[sizeof(Key)];
@@ -740,6 +860,7 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
       auto minimal_pages = num_btree_entries * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;
       std::cout << "BTree average fill factor " << minimal_pages / (pages + 0.0) << std::endl;
       std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
+      std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01);
    }
 };
 
@@ -1135,6 +1256,8 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
    DTID dt_id;
    std::size_t hot_partition_capacity_bytes;
    std::size_t hot_partition_size_bytes = 0;
+   std::size_t scan_ops = 0;
+   std::size_t io_reads_scan = 0;
    bool inclusive = false;
    static constexpr double eviction_threshold = 0.7;
    uint64_t eviction_items = 0;
@@ -1146,11 +1269,17 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
    std::size_t downward_migrations = 0;
    u64 lazy_migration_threshold = 10;
    bool lazy_migration = false;
-   struct TaggedPayload {
+   struct alignas(1) TaggedPayload {
       Payload payload;
-      bool modified = false;
-      bool referenced = false;
+      unsigned char bits = 0;
+      bool modified() const { return bits & 1; }
+      void set_modified() { bits |= 1; }
+      void clear_modified() { bits &= ~(1u); }
+      bool referenced() const { return bits & (2u); }
+      void set_referenced() { bits |= (2u); }
+      void clear_referenced() { bits &= ~(2u); }
    };
+   static_assert(sizeof(TaggedPayload) == sizeof(Payload) + 1, "!!!");
    uint64_t total_lookups = 0;
    uint64_t lookups_hit_top = 0;
    Key clock_hand = std::numeric_limits<Key>::max();
@@ -1190,31 +1319,59 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       lookups_hit_top = total_lookups = 0;
       hot_tree_ios = 0;
       upward_migrations = downward_migrations = 0;
+      io_reads_scan = 0;
+      scan_ops = 0;
    }
 
    std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btree, std::size_t & pages) {
-      Key start_key = std::numeric_limits<Key>::min();
-      u8 key_bytes[sizeof(Key)];
-      std::size_t entries = 0;
+      constexpr std::size_t scan_buffer_cap = 64;
+      int scan_buffer_len = 0;
+      Key keys[scan_buffer_cap];
+      Payload payloads[scan_buffer_cap];
+      bool tree_end = false;
       pages = 0;
       const char * last_leaf_frame = nullptr;
-      while (true) {
-         bool good = false;
-         btree.scanAsc(key_bytes, fold(key_bytes, start_key),
-         [&](const u8 * key, u16, const u8 *, u16, const char * leaf_frame) -> bool {
-            auto real_key = unfold(*(Key*)(key));
-            good = true;
-            start_key = real_key + 1;
-            if (last_leaf_frame != leaf_frame) {
-               last_leaf_frame = leaf_frame;
-               ++pages;
+      u8 key_bytes[sizeof(Key)];
+      auto fill_scan_buffer = [&](Key startk) {
+         if (scan_buffer_len < scan_buffer_cap && tree_end == false) {
+            btree.scanAsc(key_bytes, fold(key_bytes, startk),
+            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length, const char * leaf_frame) -> bool {
+               auto real_key = unfold(*(Key*)(key));
+               assert(key_length == sizeof(Key));
+               keys[scan_buffer_len] = real_key;
+               scan_buffer_len++;
+               if (last_leaf_frame != leaf_frame) {
+                  last_leaf_frame = leaf_frame;
+                  ++pages;
+               }
+               if (scan_buffer_len >= scan_buffer_cap) {
+                  return false;
+               }
+               return true;
+            }, [](){});
+            if (scan_buffer_len < scan_buffer_cap) {
+               tree_end = true;
             }
-            return false;
-         }, [](){});
-         if (good == false) {
+         }
+      };
+      Key start_key = std::numeric_limits<Key>::min();
+      
+      std::size_t entries = 0;
+      
+      while (true) {
+         fill_scan_buffer(start_key);
+         int idx = 0;
+         while (idx < scan_buffer_len) {
+            idx++;
+            entries++;
+         }
+
+         if (idx >= scan_buffer_len && tree_end) {
             break;
          }
-         entries++;
+         assert(idx > 0);
+         start_key = keys[idx - 1] + 1;
+         scan_buffer_len = 0;
       }
       return entries;
    }
@@ -1225,7 +1382,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       }
    }
 
-   static constexpr int kClockWalkSteps = 1024;
+   static constexpr int kClockWalkSteps = 2048;
    void evict_a_bunch() {
       int steps = kClockWalkSteps; // number of steps to walk
       Key start_key = clock_hand;
@@ -1250,8 +1407,8 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
          assert(key_length == sizeof(Key));
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(value));
          assert(value_length == sizeof(TaggedPayload));
-         if (tp->referenced == true) {
-            tp->referenced = false;
+         if (tp->referenced() == true) {
+            tp->clear_referenced();
             return true;
          }
          evict_key = real_key;
@@ -1260,7 +1417,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
          victim_found = true;
          evict_keys.push_back(real_key);
          evict_payloads.emplace_back(*tp);
-         if (evict_keys.size() >= 512) {
+         if (evict_keys.size() >= 1024) {
             return false;
          }
          return true;
@@ -1283,7 +1440,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
             assert(op_res == OP_RESULT::OK);
             hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
             if (inclusive) {
-               if (tagged_payload.modified) {
+               if (tagged_payload.modified()) {
                   upsert_cold_partition(strip_off_partition_bit(key), tagged_payload.payload); // Cold partition
                }
             } else { // exclusive, put it back in the on-disk B-Tree
@@ -1320,9 +1477,9 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       }
    }
 
-   void admit_element(Key k, Payload & v, bool dirty = false) {
+   void admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
       try_eviction();
-      insert_partition(strip_off_partition_bit(k), v, false, dirty); // Hot partition
+      insert_partition(strip_off_partition_bit(k), v, false, dirty, referenced); // Hot partition
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
    }
    
@@ -1331,6 +1488,126 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
          return utils::RandomGenerator::getRandU64(0, 100) < lazy_migration_threshold;
       }
       return true;
+   }
+
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+      scan_ops++;
+      auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
+      constexpr std::size_t scan_buffer_size = 8;
+      u8 key_bytes[sizeof(Key)];
+      int hot_len = 0;
+      Key hot_keys[scan_buffer_size];
+      Payload hot_payloads[scan_buffer_size];
+      int cold_len = 0;
+      Key cold_keys[scan_buffer_size];
+      Payload cold_payloads[scan_buffer_size];
+      bool hot_tree_end = false;
+      bool cold_tree_end = false;
+      auto fill_hot_scan_buffer = [&](Key startk) {
+         if (hot_len < scan_buffer_size && hot_tree_end == false) {
+            hot_btree.scanAsc(key_bytes, fold(key_bytes, startk),
+            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+               auto real_key = unfold(*(Key*)(key));
+               assert(key_length == sizeof(Key));
+               assert(value_length == sizeof(TaggedPayload));
+               const TaggedPayload * p = reinterpret_cast<const TaggedPayload*>(value);
+               hot_keys[hot_len] = real_key;
+               hot_payloads[hot_len] = p->payload;
+               hot_len++;
+               if (hot_len >= scan_buffer_size) {
+                  return false;
+               }
+               return true;
+            }, [](){});
+            if (hot_len < scan_buffer_size) {
+               hot_tree_end = true;
+            }
+         }
+      };
+      auto fill_cold_scan_buffer = [&](Key startk) {
+         if (cold_len < scan_buffer_size && cold_tree_end == false) {
+            cold_btree.scanAsc(key_bytes, fold(key_bytes, startk),
+            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+               auto real_key = unfold(*(Key*)(key));
+               assert(key_length == sizeof(Key));
+               assert(value_length == sizeof(Payload));
+               const Payload * p = reinterpret_cast<const Payload*>(value);
+               cold_keys[cold_len] = real_key;
+               cold_payloads[cold_len] = *p;
+               cold_len++;
+               if (cold_len >= scan_buffer_size) {
+                  return false;
+               }
+               return true;
+            }, [](){});
+            if (cold_len < scan_buffer_size) {
+               cold_tree_end = true;
+            }
+         }
+      };
+
+      int hot_idx = 0;
+      int cold_idx = 0;
+      fill_hot_scan_buffer(start_key);
+      fill_cold_scan_buffer(start_key);
+      while (true) {
+         while (hot_idx < hot_len && cold_idx < cold_len) {
+            if (hot_keys[hot_idx] <= cold_keys[cold_idx]) {
+               if (processor(hot_keys[hot_idx], hot_payloads[hot_idx])) {
+                  goto end;
+               }
+               hot_idx++;
+            } else {
+               if (processor(cold_keys[cold_idx], cold_payloads[cold_idx])) {
+                  goto end;
+               }
+               cold_idx++;
+            }
+         }
+
+         if (hot_idx < hot_len && cold_idx == cold_len && cold_tree_end) { // 
+            while (hot_idx < hot_len) {
+               if (processor(hot_keys[hot_idx], hot_payloads[hot_idx])) {
+                  goto end;
+               }
+               hot_idx++;
+            }
+         }
+
+         if (cold_idx < cold_len && hot_idx == hot_len && hot_tree_end) {
+            // reached the end of 
+            while (cold_idx < cold_len) {
+               if (processor(cold_keys[cold_idx], cold_payloads[cold_idx])) {
+                  goto end;
+               }
+               cold_idx++;
+            }
+         }
+
+         if (hot_idx >= hot_len && hot_tree_end == false) { // try to refill hot scan buffer
+            assert(hot_idx > 0);
+            auto hot_start_key = hot_keys[hot_idx - 1] + 1;
+            hot_idx = 0;
+            hot_len = 0;
+            fill_hot_scan_buffer(hot_start_key);
+         }
+
+         if (cold_idx >= cold_len && cold_tree_end == false) { // try to refill cold scan buffer
+            assert(cold_idx > 0);
+            auto cold_start_key = cold_keys[cold_idx - 1] + 1;
+            cold_idx = 0;
+            cold_len = 0;
+            fill_cold_scan_buffer(cold_start_key);
+         }
+
+         if (cold_idx >= cold_len && cold_tree_end && hot_idx >= hot_len && hot_tree_end) {
+            goto end;
+         }
+      }
+
+   end:
+      io_reads_scan += WorkerCounters::myCounters().io_reads.load() - io_reads_old;
+      return;
    }
 
    bool lookup(Key k, Payload& v) override
@@ -1345,7 +1622,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       OLD_HIT_STAT_START;
       auto res = hot_btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         tp->referenced = true;
+         tp->set_referenced();
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
          }) ==
             OP_RESULT::OK;
@@ -1387,12 +1664,12 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       u8 key_bytes[sizeof(Key)];
       Key key = tag_with_cold_bit(k);
       TaggedPayload tp;
-      tp.referenced = true;
+      tp.set_referenced();
       tp.payload = v;
       //HIT_STAT_START;
       auto op_res = cold_btree.updateSameSize(key_bytes, fold(key_bytes, key), [&](u8* payload, u16 payload_length) {
          TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-         tp->referenced = true;
+         tp->set_referenced();
          memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
       }, Payload::wal_update_generator);
       //HIT_STAT_END;
@@ -1403,15 +1680,24 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
    }
 
    // hot_or_cold: false => hot partition, true => cold partition
-   void insert_partition(Key k, Payload & v, bool hot_or_cold, bool modified = false) {
+   void insert_partition(Key k, Payload & v, bool hot_or_cold, bool modified = false, bool referenced = true) {
       u8 key_bytes[sizeof(Key)];
       Key key = hot_or_cold == false ? tag_with_hot_bit(k) : tag_with_cold_bit(k);
       if (hot_or_cold == false) {
          hot_partition_item_count++;
       }
       TaggedPayload tp;
-      tp.referenced = true;
-      tp.modified = modified;
+      if (referenced == false) {
+         tp.clear_referenced();
+      } else {
+         tp.set_referenced();
+      }
+
+      if (modified) {
+         tp.set_modified();
+      } else {
+         tp.clear_modified();
+      }
       tp.payload = v;
       
       if (hot_or_cold == false) {
@@ -1430,7 +1716,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       //admit_element(k, v);
       if (inclusive) {
-         admit_element(k, v, true);
+         admit_element(k, v, true, false);
       } else {
          admit_element(k, v);
       }
@@ -1444,8 +1730,8 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       HIT_STAT_START;
       auto op_res = hot_btree.updateSameSize(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
          TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-         tp->referenced = true;
-         tp->modified = true;
+         tp->set_referenced();
+         tp->set_modified();
          memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
       }, Payload::wal_update_generator);
       HIT_STAT_END;
@@ -1481,8 +1767,8 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       } else {
          cold_btree.updateSameSize(key_bytes, fold(key_bytes, cold_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
             TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-            tp->referenced = true;
-            tp->modified = true;
+            tp->set_referenced();
+            tp->set_modified();
             memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
          }, Payload::wal_update_generator);
       }
@@ -1496,8 +1782,8 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       HIT_STAT_START;
       auto op_res = hot_btree.updateSameSize(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
          TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-         tp->referenced = true;
-         tp->modified = true;
+         tp->set_referenced();
+         tp->set_modified();
          memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
       }, Payload::wal_update_generator);
       HIT_STAT_END;
@@ -1552,8 +1838,493 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
       std::cout << total_lookups<< " lookups, "  << lookups_hit_top << " lookup hit top" << " hot_tree_ios " << hot_tree_ios << " ios/tophit " << hot_tree_ios / (lookups_hit_top + 0.00)  << std::endl;
       std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations" << std::endl;
+      std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01);
    }
 };
 
 
+template <typename Key, typename Payload, int NodeSize = 512>
+struct STX2BTreeAdapter : BTreeInterface<Key, Payload> {
+   
+   static constexpr double eviction_threshold = 1;
+   std::size_t cache_capacity_bytes;
+   std::size_t hit_count = 0;
+   std::size_t miss_count = 0;
+   std::size_t eviction_items = 0;
+   std::size_t eviction_io_reads = 0;
+   std::size_t io_reads_snapshot = 0;
+   std::size_t io_reads_now = 0;
+   typedef std::pair<Key, Payload> Element;
+   struct alignas(1) TaggedPayload {
+      Payload payload;
+      unsigned char bits = 0;
+      bool modified() const { return bits & 1; }
+      void set_modified() { bits |= 1; }
+      void clear_modified() { bits &= ~1; }
+      bool referenced() const { return bits & 2; }
+      void set_referenced() { bits |= 2; }
+      void clear_referenced() { bits &= ~2; }
+   };
+   static_assert(sizeof(TaggedPayload) == sizeof(Payload) + 1, "!!!");
+
+   class my_stx_btree_map_traits {
+      public:
+      /// If true, the tree will self verify it's invariants after each insert()
+      /// or erase(). The header must have been compiled with BTREE_DEBUG defined.
+      static const bool selfverify = false;
+
+      /// If true, the tree will print out debug information and a tree dump
+      /// during insert() or erase() operation. The header must have been
+      /// compiled with BTREE_DEBUG defined and key_type must be std::ostream
+      /// printable.
+      static const bool debug = false;
+      
+      static const size_t node_size = NodeSize;
+      /// Number of slots in each leaf of the tree. Estimated so that each node
+      /// has a size of about 256 bytes.
+      static const int leafslots = BTREE_MAX(8, node_size / (sizeof(Key) + sizeof(TaggedPayload)));
+
+      /// Number of slots in each inner node of the tree. Estimated so that each node
+      /// has a size of about 256 bytes.
+      static const int innerslots = BTREE_MAX(8, node_size / (sizeof(Key) + sizeof(void*)));
+
+      /// As of stx-btree-0.9, the code does linear search in find_lower() and
+      /// find_upper() instead of binary_search, unless the node size is larger
+      /// than this threshold. See notes at
+      /// http://panthema.net/2013/0504-STX-B+Tree-Binary-vs-Linear-Search
+      static const size_t binsearch_threshold = 256;
+   };
+
+   typedef stx::btree_map<Key, TaggedPayload, std::less<Key>, my_stx_btree_map_traits> cache_type;
+   typedef stx::btree_map<Key, Payload, std::less<Key>, my_stx_btree_map_traits> base_type;
+   cache_type cache;
+   base_type btree;
+   Key clock_hand = std::numeric_limits<Key>::max();
+   bool lazy_migration;
+   bool inclusive;
+   u64 upward_migrations = 0;
+   u64 lazy_migration_threshold = 10;
+   STX2BTreeAdapter(double cache_size_gb, int lazy_migration_sampling_rate = 100, bool inclusive = false) : btree(btree), cache_capacity_bytes(cache_size_gb * 1024ULL * 1024ULL * 1024ULL), lazy_migration(lazy_migration_sampling_rate < 100), inclusive(inclusive) {
+      if (lazy_migration_sampling_rate < 100) {
+         lazy_migration_threshold = lazy_migration_sampling_rate;
+      }
+      io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
+   }
+
+   void clear_stats() override {
+      hit_count = miss_count = 0;
+      eviction_items = eviction_io_reads = 0;
+      io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
+      upward_migrations = 0;
+   }
+
+   void evict_all() override {
+      while (cache.size() > 0) {
+         evict_a_bunch();
+      }
+   }
+
+   inline size_t get_cache_btree_size() {
+      auto & stat = cache.get_stats();
+      auto leaves = stat.leaves;
+      auto innernodes = stat.innernodes;
+      return leaves * stat.leaf_node_size() + innernodes * stat.inner_node_size();
+   }
+
+  inline size_t get_btree_size() {
+      auto & stat = btree.get_stats();
+      auto leaves = stat.leaves;
+      auto innernodes = stat.innernodes;
+      return leaves * stat.leaf_node_size() + innernodes * stat.inner_node_size();
+   }
+
+   bool cache_under_pressure() {
+      return get_cache_btree_size() >= cache_capacity_bytes * eviction_threshold;
+   }
+
+   std::size_t btree_entries() {
+      return btree.size();
+   }
+
+   static constexpr int kClockWalkSteps = 128;
+   void evict_a_bunch() {
+      int steps = kClockWalkSteps;
+      Key key = clock_hand;
+      typename cache_type::iterator it;
+      if (key == std::numeric_limits<Key>::max()) {
+         it = cache.begin();
+      } else {
+         it = cache.lower_bound(key);
+      }
+
+      std::vector<Key> evict_keys;
+      std::vector<TaggedPayload> evict_payloads;
+      bool victim_found = false;
+      auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
+      while (it != cache.end()) {
+         if (--steps == 0) {
+            break;
+         }
+         if (it.data().referenced() == false) {
+            it.data().clear_referenced();
+            clock_hand = it.key();
+            ++it;
+         } else {
+            auto tmp = it;
+            ++tmp;
+            if (tmp == cache.end()) {
+               clock_hand = std::numeric_limits<Key>::max();
+            } else {
+               clock_hand = tmp.key();
+            }
+
+            evict_keys.push_back(it.key());
+            evict_payloads.emplace_back(it.data());
+            victim_found = true;
+            if (evict_keys.size() >= 64) {
+               break;
+            }
+            it = tmp;
+         }
+      }
+      auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
+      assert(io_reads_new >= io_reads_old);
+      eviction_io_reads += io_reads_new - io_reads_old;
+      if (victim_found) {
+         for (size_t i = 0; i< evict_keys.size(); ++i) {
+            auto key = evict_keys[i];
+            auto tagged_payload = evict_payloads[i];
+            cache.erase(key);
+            if (inclusive) {
+               if (tagged_payload.modified()) {
+                  upsert_btree(key, tagged_payload.payload);
+               }
+            } else { // exclusive, put it back in the on-disk B-Tree
+               insert_btree(key, tagged_payload.payload);
+            }
+         }
+         auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
+         assert(io_reads_new >= io_reads_old);
+         eviction_io_reads += io_reads_new - io_reads_old;
+         eviction_items += evict_keys.size();
+      } else {
+         if (steps == kClockWalkSteps) {
+            clock_hand = std::numeric_limits<Key>::max();
+         }
+      }
+   }
+
+   void evict_till_safe() {
+      while (cache_under_pressure()) {
+         evict_a_bunch();
+      }
+   }
+
+   static constexpr int kEvictionCheckInterval = 128;
+   int eviction_check_countdown = kEvictionCheckInterval;
+
+   void try_eviction() {
+      if (--eviction_check_countdown == 0) {
+         if (cache_under_pressure())
+            evict_a_bunch();
+         eviction_check_countdown = kEvictionCheckInterval;
+      }
+   }
+
+   void admit_element(Key k, Payload & v, bool dirty = false) {
+      if (cache_under_pressure())
+         evict_a_bunch();
+      assert(cache.find(k) == cache.end());
+      TaggedPayload tp;
+      tp.payload = v;
+      if (dirty) {
+         tp.set_modified();
+      }
+      tp.set_referenced();
+      cache[k] = tp;
+   }
+
+   bool lookup(Key k, Payload& v) override
+   {
+      //DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); });
+      try_eviction();
+      auto it = cache.find(k);
+      if (it != cache.end()) {
+         if (!it.data().referenced()) {
+            it.data().set_referenced();
+         }
+         v = it.data().payload;
+         hit_count++;
+         return true;
+      }
+      
+      miss_count++;
+      u8 key_bytes[sizeof(Key)];
+      bool res = false;
+      auto it_btree = btree.find(k);
+      if (it_btree != btree.end()) {
+         v = it_btree.data();
+         res = true;
+      }
+
+      if (res) {
+         if (should_migrate()) {
+            upward_migrations++;
+            admit_element(k, v);
+            if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
+               btree.erase(k);
+            }
+         }
+      }
+      return res;
+   }
+
+   void upsert_btree(Key k, Payload& v)
+   {
+      btree[k] = v;
+   }
+
+   void insert_btree(Key k, Payload& v)
+   {
+      u8 key_bytes[sizeof(Key)];
+      btree[k] = v;
+   }
+
+   void insert(Key k, Payload& v) override
+   {
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      if (inclusive) {
+         admit_element(k, v, true);
+      } else {
+         admit_element(k, v);
+      }
+   }
+
+   bool should_migrate() {
+      if (lazy_migration) {
+         return utils::RandomGenerator::getRandU64(0, 100) < lazy_migration_threshold;
+      }
+      return true;
+   }
+
+   void update(Key k, Payload& v) override
+   {
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
+      auto it = cache.find(k);
+      if (it != cache.end()) {
+         it.data().set_referenced();
+         it.data().set_modified();
+         it.data().payload = v;
+         hit_count++;
+         return;
+      }
+
+      if (should_migrate()) {
+         upward_migrations++;
+         u8 key_bytes[sizeof(Key)];
+         Payload old_v;
+         auto it_btree = btree.find(k);
+         bool res = false;
+         assert(it_btree != btree.end());
+         if (it_btree != btree.end()) {
+            old_v = it_btree.data();
+            res = true;
+         }
+
+         admit_element(k, old_v);
+         if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
+            btree.erase(k);
+         }
+         update(k, v);
+      } else {
+         btree[k] = v;
+      }
+   }
+
+   void put(Key k, Payload& v) override
+   {
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      auto it = cache.find(k);
+      if (it != cache.end()) {
+         it.data().set_referenced();
+         it.data().set_modified();
+         it.data().payload = v;
+         hit_count++;
+         return;
+      }
+      if (inclusive) {
+         admit_element(k, v, true);
+         return;
+      }
+      btree[k] = v;
+      if (should_migrate()) {
+         upward_migrations++;
+         admit_element(k, v);
+         if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
+            btree.erase(k);
+         }
+      }
+   }
+
+   void report_cache() {
+      std::cout << "Top capacity bytes " << cache_capacity_bytes << std::endl;
+      std::cout << "Top btree size bytes " << get_cache_btree_size() << std::endl;
+      std::cout << "Top btree size # entries " << cache.size() << std::endl;
+      std::cout << "Top btree hits/misses " << hit_count << "/" << miss_count << std::endl;
+      std::cout << "Top btree BTree average leaf fill factor " << cache.get_stats().avgfill_leaves() << std::endl;
+      double hit_rate = hit_count / (hit_count + miss_count + 1.0);
+      std::cout << "Top btree hit rate " << hit_rate * 100 << "%" << std::endl;
+      std::cout << "Top btree miss rate " << (1 - hit_rate) * 100  << "%"<< std::endl;
+   }
+
+   void report(u64 entries __attribute__((unused)) , u64 pages) override {
+      auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
+      std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
+      auto num_btree_entries = btree_entries();
+      report_cache();
+      std::cout << "Bottom btree size bytes " << get_btree_size() << std::endl;
+      std::cout << "Bottom btree size # entries " << btree.size() << std::endl;
+      std::cout << "Bottom btree BTree average leaf fill factor " << btree.get_stats().avgfill_leaves() << std::endl;
+      std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
+      std::cout << "Upward migrations " << upward_migrations++;
+   }
+};
+
+
+template <typename Key, typename Payload, int NodeSize = 512>
+struct STXBTreeAdapter : BTreeInterface<Key, Payload> {
+   
+   static constexpr double eviction_threshold = 0.99;
+   std::size_t cache_capacity_bytes;
+   std::size_t hit_count = 0;
+   std::size_t miss_count = 0;
+   std::size_t eviction_items = 0;
+   std::size_t eviction_io_reads = 0;
+   std::size_t io_reads_snapshot = 0;
+   std::size_t io_reads_now = 0;
+   typedef std::pair<Key, Payload> Element;
+   struct TaggedPayload {
+      Payload payload;
+      bool modified = false;
+      bool referenced = false;
+   };
+
+   class my_stx_btree_map_traits {
+      public:
+      /// If true, the tree will self verify it's invariants after each insert()
+      /// or erase(). The header must have been compiled with BTREE_DEBUG defined.
+      static const bool selfverify = false;
+
+      /// If true, the tree will print out debug information and a tree dump
+      /// during insert() or erase() operation. The header must have been
+      /// compiled with BTREE_DEBUG defined and key_type must be std::ostream
+      /// printable.
+      static const bool debug = false;
+      
+      static const size_t node_size = NodeSize;
+      /// Number of slots in each leaf of the tree. Estimated so that each node
+      /// has a size of about 256 bytes.
+      static const int leafslots = BTREE_MAX(8, node_size / (sizeof(Key) + sizeof(TaggedPayload)));
+
+      /// Number of slots in each inner node of the tree. Estimated so that each node
+      /// has a size of about 256 bytes.
+      static const int innerslots = BTREE_MAX(8, node_size / (sizeof(Key) + sizeof(void*)));
+
+      /// As of stx-btree-0.9, the code does linear search in find_lower() and
+      /// find_upper() instead of binary_search, unless the node size is larger
+      /// than this threshold. See notes at
+      /// http://panthema.net/2013/0504-STX-B+Tree-Binary-vs-Linear-Search
+      static const size_t binsearch_threshold = 256;
+   };
+
+   typedef stx::btree_map<Key, Payload, std::less<Key>, my_stx_btree_map_traits> base_type;
+   base_type btree;
+   Key clock_hand = std::numeric_limits<Key>::max();
+   bool lazy_migration;
+   bool inclusive;
+   u64 lazy_migration_threshold = 10;
+   STXBTreeAdapter(double cache_size_gb, int lazy_migration_sampling_rate = 100, bool inclusive = false) : btree(btree), cache_capacity_bytes(cache_size_gb * 1024ULL * 1024ULL * 1024ULL), lazy_migration(lazy_migration_sampling_rate < 100), inclusive(inclusive) {
+      if (lazy_migration_sampling_rate < 100) {
+         lazy_migration_threshold = lazy_migration_sampling_rate;
+      }
+      io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
+   }
+
+   void clear_stats() override {
+      hit_count = miss_count = 0;
+      eviction_items = eviction_io_reads = 0;
+      io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
+   }
+
+  inline size_t get_btree_size() {
+      auto & stat = btree.get_stats();
+      auto leaves = stat.leaves;
+      auto innernodes = stat.innernodes;
+      return leaves * stat.leaf_node_size() + innernodes * stat.inner_node_size();
+   }
+
+   std::size_t btree_entries() {
+      return btree.size();
+   }
+
+
+   bool lookup(Key k, Payload& v) override
+   {
+      //DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
+      auto it = btree.find(k);
+      if (it != btree.end()) {
+         v = it.data();
+         return true;
+      }
+      return false;
+   }
+
+   void upsert_btree(Key k, Payload& v)
+   {
+      btree[k] = v;
+   }
+
+   void insert_btree(Key k, Payload& v)
+   {
+      u8 key_bytes[sizeof(Key)];
+      btree[k] = v;
+   }
+
+   void insert(Key k, Payload& v) override
+   {
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      btree[k] = v;
+   }
+
+   bool should_migrate() {
+      if (lazy_migration) {
+         return utils::RandomGenerator::getRandU64(0, 100) < lazy_migration_threshold;
+      }
+      return true;
+   }
+
+   void update(Key k, Payload& v) override
+   {
+      btree[k] = v;
+   }
+
+   void put(Key k, Payload& v) override
+   {
+      btree[k] = v;
+   }
+
+   void report(u64 entries __attribute__((unused)) , u64 pages) override {
+      auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
+      std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
+      auto num_btree_entries = btree_entries();
+      std::cout << "capacity bytes " << cache_capacity_bytes << std::endl;
+      std::cout << "stx::btree size bytes " << get_btree_size() << std::endl;
+      std::cout << "stx::btree size # entries " << btree.size() << std::endl;
+      std::cout << "stx::btree hits/misses " << hit_count << "/" << miss_count << std::endl;
+      std::cout << "stx::btree average leaf fill factor " << btree.get_stats().avgfill_leaves() << std::endl;
+      double hit_rate = hit_count / (hit_count + miss_count + 1.0);
+      std::cout << "stx::btree hit rate " << hit_rate * 100 << "%" << std::endl;
+      std::cout << "stx::btree miss rate " << (1 - hit_rate) * 100  << "%"<< std::endl;
+   }
+};
 }
