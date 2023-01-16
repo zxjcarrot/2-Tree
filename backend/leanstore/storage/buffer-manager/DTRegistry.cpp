@@ -19,7 +19,9 @@ ParentSwipHandler DTRegistry::findParent(DTID dtid, BufferFrame& bf)
 {
    auto dt_meta = dt_instances_ht[dtid];
    auto name = std::get<2>(dt_meta);
-   return dt_types_ht[std::get<0>(dt_meta)].find_parent(std::get<1>(dt_meta), bf);
+   auto & types = dt_types_ht[std::get<0>(dt_meta)];
+   void * data = std::get<1>(dt_meta);
+   return types.find_parent(data, bf);
 }
 // -------------------------------------------------------------------------------------
 bool DTRegistry::checkSpaceUtilization(DTID dtid, BufferFrame& bf, OptimisticGuard& guard, ParentSwipHandler& parent_handler)
@@ -36,7 +38,8 @@ bool DTRegistry::isBTreeLeaf(DTID dtid, BufferFrame& bf)
 
 bool DTRegistry::keepInMemory(DTID dtid) {
    auto dt_meta = dt_instances_ht[dtid];
-   return dt_types_ht[std::get<0>(dt_meta)].keep_in_memory(std::get<1>(dt_meta));
+   auto meta = dt_types_ht[std::get<0>(dt_meta)];
+   return meta.keep_in_memory(std::get<1>(dt_meta));
 }
 // -------------------------------------------------------------------------------------
 void DTRegistry::checkpoint(DTID dtid, BufferFrame& bf, u8* dest)

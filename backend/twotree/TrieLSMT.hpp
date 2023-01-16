@@ -11,7 +11,7 @@
 namespace leanstore
 {
 template <typename Key, typename Payload>
-struct TrieRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
+struct TrieRocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
    rocksdb::DB* bottom_db = nullptr;
    rocksdb::Options bottom_options;
 

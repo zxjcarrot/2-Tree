@@ -147,6 +147,11 @@ class HybridPageGuard
       BMC::global_bf->reclaimPage(*(bf));
       guard.state = GUARD_STATE::MOVED;
    }
+   template <typename... Args>
+   void init(Args&&... args)
+   {
+      new (bf->page.dt) T(std::forward<Args>(args)...);
+   }
    // -------------------------------------------------------------------------------------
    jumpmu_defineCustomDestructor(HybridPageGuard)
        // -------------------------------------------------------------------------------------

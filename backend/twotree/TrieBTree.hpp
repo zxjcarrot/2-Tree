@@ -12,7 +12,7 @@
 namespace leanstore
 {
 template <typename Key, typename Payload>
-struct BTreeTrieCachedVSAdapter : BTreeInterface<Key, Payload> {
+struct BTreeTrieCachedVSAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& btree;
    
    static constexpr double eviction_threshold = 0.99;

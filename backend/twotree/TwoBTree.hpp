@@ -13,7 +13,7 @@ namespace leanstore
 {
 
 template <typename Key, typename Payload>
-struct BTreeCachedNoninlineVSAdapter : BTreeInterface<Key, Payload> {
+struct BTreeCachedNoninlineVSAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& btree;
    
    static constexpr double eviction_threshold = 0.99;
@@ -323,7 +323,7 @@ struct BTreeCachedNoninlineVSAdapter : BTreeInterface<Key, Payload> {
 
 
 template <typename Key, typename Payload, int NodeSize = 1024>
-struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
+struct BTreeCachedVSAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& btree;
    
    static constexpr double eviction_threshold = 0.99;
@@ -866,7 +866,7 @@ struct BTreeCachedVSAdapter : BTreeInterface<Key, Payload> {
 
 
 template <typename Key, typename Payload, int NodeSize = 1024>
-struct BTreeCachedCompressedVSAdapter : BTreeInterface<Key, Payload> {
+struct BTreeCachedCompressedVSAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& btree;
    
    static constexpr double eviction_threshold = 0.99;
@@ -1247,7 +1247,7 @@ auto old_miss = WorkerCounters::myCounters().io_reads.load();
       }
 
 template <typename Key, typename Payload>
-struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
+struct TwoBTreeAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& hot_btree;
    leanstore::storage::btree::BTreeInterface& cold_btree;
    uint64_t hot_tree_ios = 0;
@@ -1382,7 +1382,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       }
    }
 
-   static constexpr int kClockWalkSteps = 2048;
+   static constexpr int kClockWalkSteps = 4096;
    void evict_a_bunch() {
       int steps = kClockWalkSteps; // number of steps to walk
       Key start_key = clock_hand;
@@ -1417,7 +1417,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
          victim_found = true;
          evict_keys.push_back(real_key);
          evict_payloads.emplace_back(*tp);
-         if (evict_keys.size() >= 1024) {
+         if (evict_keys.size() >= 2048) {
             return false;
          }
          return true;
@@ -1435,10 +1435,10 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
             auto key = evict_keys[i];
             auto tagged_payload = evict_payloads[i];
             assert(is_in_hot_partition(key));
-            auto op_res = hot_btree.remove(key_bytes, fold(key_bytes, key));
-            hot_partition_item_count--;
-            assert(op_res == OP_RESULT::OK);
-            hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
+            // auto op_res = hot_btree.remove(key_bytes, fold(key_bytes, key));
+            // hot_partition_item_count--;
+            // assert(op_res == OP_RESULT::OK);
+            // hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
             if (inclusive) {
                if (tagged_payload.modified()) {
                   upsert_cold_partition(strip_off_partition_bit(key), tagged_payload.payload); // Cold partition
@@ -1448,6 +1448,16 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
             }
             ++downward_migrations;
          }
+         for (size_t i = 0; i< evict_keys.size(); ++i) {
+            auto key = evict_keys[i];
+            auto tagged_payload = evict_payloads[i];
+            assert(is_in_hot_partition(key));
+            auto op_res = hot_btree.remove(key_bytes, fold(key_bytes, key));
+            hot_partition_item_count--;
+            assert(op_res == OP_RESULT::OK);
+            hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
+         }
+         
          auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
          assert(io_reads_new >= io_reads_old);
          eviction_io_reads += io_reads_new - io_reads_old;
@@ -1664,19 +1674,22 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
       u8 key_bytes[sizeof(Key)];
       Key key = tag_with_cold_bit(k);
       TaggedPayload tp;
+      tp.set_modified();
       tp.set_referenced();
       tp.payload = v;
       //HIT_STAT_START;
-      auto op_res = cold_btree.updateSameSize(key_bytes, fold(key_bytes, key), [&](u8* payload, u16 payload_length) {
-         TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-         tp->set_referenced();
-         memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
-      }, Payload::wal_update_generator);
+      // auto op_res = cold_btree.updateSameSize(key_bytes, fold(key_bytes, key), [&](u8* payload, u16 payload_length) {
+      //    TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
+      //    tp->set_referenced();
+      //    memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+      // }, Payload::wal_update_generator);
       //HIT_STAT_END;
 
-      if (op_res == OP_RESULT::NOT_FOUND) {
-         insert_partition(k, v, true);
-      }
+      auto op_res = cold_btree.upsert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+      assert(op_res == OP_RESULT::OK);
+      // if (op_res == OP_RESULT::NOT_FOUND) {
+      //    insert_partition(k, v, true);
+      // }
    }
 
    // hot_or_cold: false => hot partition, true => cold partition
@@ -1844,7 +1857,7 @@ struct TwoBTreeAdapter : BTreeInterface<Key, Payload> {
 
 
 template <typename Key, typename Payload, int NodeSize = 512>
-struct STX2BTreeAdapter : BTreeInterface<Key, Payload> {
+struct STX2BTreeAdapter : StorageInterface<Key, Payload> {
    
    static constexpr double eviction_threshold = 1;
    std::size_t cache_capacity_bytes;
@@ -2192,7 +2205,7 @@ struct STX2BTreeAdapter : BTreeInterface<Key, Payload> {
 
 
 template <typename Key, typename Payload, int NodeSize = 512>
-struct STXBTreeAdapter : BTreeInterface<Key, Payload> {
+struct STXBTreeAdapter : StorageInterface<Key, Payload> {
    
    static constexpr double eviction_threshold = 0.99;
    std::size_t cache_capacity_bytes;

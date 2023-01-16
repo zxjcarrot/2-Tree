@@ -58,7 +58,7 @@ auto old_miss = WorkerCounters::myCounters().io_reads.load();
       }
 
 template <typename Key, typename Payload>
-struct ConcurrentPartitionedLeanstore: BTreeInterface<Key, Payload> {
+struct ConcurrentPartitionedLeanstore: StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& hot_btree;
    leanstore::storage::btree::BTreeInterface& cold_btree;
 

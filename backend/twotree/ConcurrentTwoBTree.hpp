@@ -53,7 +53,7 @@ read cache:
 
 */
 template <typename Key, typename Payload, int NodeSize = 1024>
-struct ConcurrentBTreeBTree : BTreeInterface<Key, Payload> {
+struct ConcurrentBTreeBTree : StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& btree;
    
    static constexpr double eviction_threshold = 0.99;

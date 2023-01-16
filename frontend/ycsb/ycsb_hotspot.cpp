@@ -102,7 +102,7 @@ int main(int argc, char** argv)
    cout << "run_for_seconds=" << FLAGS_run_for_seconds << std::endl;
    cout << "cache_btree_node_size_type=" << FLAGS_cached_btree_node_size_type << std::endl;
    LeanStore db;
-   unique_ptr<BTreeInterface<YCSBKey, YCSBPayload>> adapter;
+   unique_ptr<StorageInterface<YCSBKey, YCSBPayload>> adapter;
    leanstore::storage::btree::BTreeLL* btree_ptr = nullptr;
    leanstore::storage::btree::BTreeLL* btree2_ptr = nullptr;
    if (FLAGS_recover) {
@@ -254,6 +254,8 @@ int main(int argc, char** argv)
             YCSBPayload result;
             if (FLAGS_ycsb_read_ratio == 100 || utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
                table.lookup(key, result);
+               YCSBPayload correct_payload((u8)key);
+               assert(result == correct_payload);
             } else {
                YCSBPayload payload;
                utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));

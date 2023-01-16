@@ -1,6 +1,7 @@
 #include "Units.hpp"
 #include "interface/StorageInterface.hpp"
 #include "leanstore/BTreeAdapter.hpp"
+#include "leanstore/storage/hashing/LinearHashing.hpp"
 #include "leanstore/Config.hpp"
 #include "leanstore/LeanStore.hpp"
 #include "leanstore/profiling/counters/WorkerCounters.hpp"
@@ -9,6 +10,7 @@
 #include "leanstore/utils/RandomGenerator.hpp"
 #include "leanstore/utils/ScrambledZipfGenerator.hpp"
 #include "leanstore/utils/HotspotGenerator.hpp"
+#include "leanstore/utils/HotspotZipfGenerator.hpp"
 #include "leanstore/utils/SelfSimilarGenerator.hpp"
 #include "lsmt/rocksdb_adapter.hpp"
 #include "lsmt/upmigration_rocksdb_adapter.hpp"
@@ -21,7 +23,7 @@
 #include "twotree/ConcurrentPartitionedBTree.hpp"
 #include "anti-caching/AntiCache.hpp"
 #include "anti-caching/AntiCacheBTree.hpp"
-
+#include "hash/HashAdapter.hpp"
 //#include "rocksdb_adapter.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
@@ -34,6 +36,7 @@ DEFINE_uint32(ycsb_read_ratio, 100, "");
 DEFINE_uint32(ycsb_update_ratio, 0, "");
 DEFINE_uint32(ycsb_blind_write_ratio, 0, "");
 DEFINE_uint32(ycsb_scan_ratio, 0, "");
+DEFINE_uint32(ycsb_delete_ratio, 0, "");
 DEFINE_uint32(ycsb_scan_length, 100, "");
 DEFINE_uint64(ycsb_tuple_count, 0, "");
 DEFINE_uint64(ycsb_keyspace_count, 500000000, "");
@@ -62,8 +65,10 @@ DEFINE_double(ycsb_request_selfsimilar_skew, 0.2, "");
 const std::string kRequestDistributionZipfian = "zipfian";
 const std::string kRequestDistributionSelfSimilar = "selfsimilar";
 const std::string kRequestDistributionHotspot = "hotspot";
+const std::string kRequestDistributionHotspotZipfian = "hotspot_zipfian";
 
 const std::string kIndexTypeBTree = "BTree";
+const std::string kIndexTypeHash = "Hash";
 const std::string kIndexTypeLSMT = "LSMT";
 
 const std::string kIndexTypeAntiCache = "AntiCache";
@@ -183,7 +188,7 @@ int main(int argc, char** argv)
    // -------------------------------------------------------------------------------------
    // LeanStore DB
    double top_tree_size_gib = 0;
-   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
+   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
    } else if (FLAGS_index_type == kIndexTypeUpLSMT || 
               FLAGS_index_type == kIndexTypeLSMT || 
@@ -223,26 +228,38 @@ int main(int argc, char** argv)
       cout << "hotspot_keyspace_fraction=" << FLAGS_ycsb_request_hotspot_keyspace_fraction << std::endl;
       cout << "hotspot_op_fraction=" << FLAGS_ycsb_request_hotspot_op_fraction << std::endl;
       random_generator.reset(new utils::HotspotGenerator(0, ycsb_tuple_count, FLAGS_ycsb_request_hotspot_keyspace_fraction, FLAGS_ycsb_request_hotspot_op_fraction));
+   } else if (FLAGS_ycsb_request_dist == kRequestDistributionHotspotZipfian){
+      cout << "hotspot_keyspace_fraction=" << FLAGS_ycsb_request_hotspot_keyspace_fraction << std::endl;
+      cout << "hotspot_op_fraction=" << FLAGS_ycsb_request_hotspot_op_fraction << std::endl;
+      random_generator.reset(new utils::HotspotZipfGenerator(0, ycsb_tuple_count, FLAGS_ycsb_request_hotspot_keyspace_fraction, FLAGS_ycsb_request_hotspot_op_fraction, FLAGS_zipf_factor));
    } else {
       //kRequestDistributionSelfSimilar
       cout << "selfsimilar_skew=" << FLAGS_ycsb_request_selfsimilar_skew << std::endl;
       random_generator.reset(new utils::SelfSimilarGenerator(0, ycsb_tuple_count, FLAGS_ycsb_request_selfsimilar_skew));
    }
    LeanStore db;
-   unique_ptr<BTreeInterface<YCSBKey, YCSBPayload>> adapter;
+   unique_ptr<StorageInterface<YCSBKey, YCSBPayload>> adapter;
    leanstore::storage::btree::BTreeLL* btree_ptr = nullptr;
    leanstore::storage::btree::BTreeLL* btree2_ptr = nullptr;
+   leanstore::storage::hashing::LinearHashTable* ht_ptr = nullptr;
+   leanstore::storage::hashing::LinearHashTable* ht2_ptr = nullptr;
    db.getCRManager().scheduleJobSync(0, [&](){
       if (FLAGS_recover) {
-         btree_ptr = &db.retrieveBTreeLL("ycsb", true);
-         btree2_ptr = &db.retrieveBTreeLL("ycsb_cold");
+         btree_ptr = &db.retrieveBTreeLL("btree", true);
+         btree2_ptr = &db.retrieveBTreeLL("btree_cold");
+         ht_ptr = &db.retrieveHashTable("ht", true);
+         ht2_ptr = &db.retrieveHashTable("ht_cold");
       } else {
-         btree_ptr = &db.registerBTreeLL("ycsb", true);
-         btree2_ptr = &db.registerBTreeLL("ycsb_cold");
+         btree_ptr = &db.registerBTreeLL("btree", true);
+         btree2_ptr = &db.registerBTreeLL("btree_cold");
+         ht_ptr = &db.registerHashTable("ht", true);
+         ht2_ptr = &db.registerHashTable("ht_cold");
       }
    });
    
-   if (FLAGS_index_type == kIndexTypeBTree) {
+   if (FLAGS_index_type == kIndexTypeHash) {
+      adapter.reset(new HashVSAdapter<YCSBKey, YCSBPayload>(*ht_ptr, ht_ptr->dt_id));
+   } else if (FLAGS_index_type == kIndexTypeBTree) {
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, btree2_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexType2BTree) {
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
@@ -281,6 +298,8 @@ int main(int argc, char** argv)
    // Insert values
    const u64 n = ycsb_tuple_count;
    vector<u64> keys(n);
+   vector<u8> correct_payloads(n);
+   vector<bool> key_deleted(n, false);
    vector<u64> last_access_timestamps(n, 0);
    vector<u64> access_count(n, 0);
    vector<u64> sum_reaccess_interval(n, 0);
@@ -309,9 +328,10 @@ int main(int argc, char** argv)
          if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeUpLSMT) {
             tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
                for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
-                  YCSBPayload payload;
-                  utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
                   YCSBKey key = keys[t_i];
+                  correct_payloads[t_i] = (u8)key;
+                  YCSBPayload payload((u8)key);
+                  //utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
                   table.insert(key, payload);
                   WorkerCounters::myCounters().tx++;
                }
@@ -323,13 +343,30 @@ int main(int argc, char** argv)
                std::iota(range_keys.begin(), range_keys.end(), range.begin());
                std::random_shuffle(range_keys.begin(), range_keys.end());
                for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
-                  YCSBPayload payload;
-                  utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-                  YCSBKey key = range_keys[t_i - range.begin()];
+                  YCSBKey key = keys[t_i];
+                  YCSBPayload payload((u8)key);
+                  correct_payloads[t_i] = (u8)key;
+                  //utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+                  //YCSBKey key = keys[t_i];
                   table.insert(key, payload);
                   WorkerCounters::myCounters().tx++;
                }
+               std::iota(range_keys.begin(), range_keys.end(), range.begin());
             });
+            //tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+               //cout << "range size " << range.end() - range.begin() << std::endl;
+               
+               // for (u64 t_i = 0; t_i < keys.size(); t_i++) {
+               //    YCSBKey key = keys[t_i];
+               //    YCSBPayload payload((u8)key);
+               //    correct_payloads[t_i] = (u8)key;
+               //    //utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+                  
+               //    //YCSBKey key = keys[t_i];
+               //    table.insert(key, payload);
+               //    WorkerCounters::myCounters().tx++;
+               // }
+            //});
          }
       }
       end = chrono::high_resolution_clock::now();
@@ -382,17 +419,7 @@ int main(int argc, char** argv)
 
          assert(key < ycsb_tuple_count);
          YCSBPayload result;
-         if (FLAGS_ycsb_read_ratio == 100 || utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
-            table.lookup(key, result);
-         } else {
-            YCSBPayload payload;
-            utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-            if (FLAGS_update_or_put == 0) {
-               table.update(key, payload);
-            } else {
-               table.put(key, payload);
-            }
-         }
+         table.lookup(key, result);
          WorkerCounters::myCounters().tx++;
       }
       cout << "Warmed up" << endl;
@@ -418,6 +445,8 @@ int main(int argc, char** argv)
          while (keep_running) {
             auto idx = random_generator->rand() % ycsb_tuple_count;
             YCSBKey key = keys[idx];
+            bool deleted = key_deleted[idx];
+            u8 correct_payload_byte = correct_payloads[idx];
             auto old_access_timestamp = last_access_timestamps[idx];
             last_access_timestamps[idx] = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
             if (old_access_timestamp != 0) {
@@ -447,15 +476,24 @@ int main(int argc, char** argv)
                utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
                table.insert(key, payload);
             } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio) {
-               YCSBPayload payload;
-               utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+               correct_payloads[idx] = utils::RandomGenerator::getRandU64();
+               YCSBPayload payload(correct_payloads[idx]);
                if (FLAGS_update_or_put == 0) {
                   table.update(key, payload);
                } else {
                   table.put(key, payload);
                }
-            } else { // x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_read_ratio
-               table.lookup(key, result);
+            } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_delete_ratio) {
+               key_deleted[idx] = true;
+               table.remove(key);
+            } else { // x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_read_ratio + FLAGS_ycsb_delete_ratio
+               bool res = table.lookup(key, result);
+               if (deleted) {
+                  assert(res == false);
+               } else {
+                  YCSBPayload correct_result(correct_payload_byte);
+                  assert(result == correct_result);
+               }
             }
             WorkerCounters::myCounters().tx++;
             ++tx;

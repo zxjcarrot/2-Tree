@@ -273,6 +273,27 @@ OP_RESULT BTreeLL::insert(u8* o_key, u16 o_key_length, u8* o_value, u16 o_value_
    }
    jumpmuCatch() { ensure(false); }
 }
+
+
+// -------------------------------------------------------------------------------------
+OP_RESULT BTreeLL::upsert(u8* o_key, u16 o_key_length, u8* o_value, u16 o_value_length)
+{
+   cr::Worker::my().walEnsureEnoughSpace(PAGE_SIZE * 1);
+   Slice key(o_key, o_key_length);
+   Slice value(o_value, o_value_length);
+   jumpmuTry()
+   {
+      BTreeExclusiveIterator iterator(*static_cast<BTreeGeneric*>(this));
+      auto ret = iterator.seekExact(key);
+      if (ret == OP_RESULT::NOT_FOUND) {
+         ret = iterator.insertKV(key, value);
+      } else {
+         ret = iterator.replaceKV(key, value);
+      }
+      jumpmu_return ret;
+   }
+   jumpmuCatch() { ensure(false); }
+}
 // -------------------------------------------------------------------------------------
 OP_RESULT BTreeLL::updateSameSize(u8* o_key,
                                   u16 o_key_length,

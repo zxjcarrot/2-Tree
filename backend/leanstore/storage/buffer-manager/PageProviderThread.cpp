@@ -107,6 +107,7 @@ void BufferManager::pageProviderThread(u64 p_begin, u64 p_end)  // [p_begin, p_e
                   all_children_evicted &= swip.isEVICTED();  // ignore when it has a child in the cooling stage
                   if (swip.isHOT()) {
                      r_buffer = &swip.bfRef();
+                     assert(r_buffer);
                      r_guard.recheck();
                      picked_a_child_instead = true;
                      return false;
@@ -166,6 +167,7 @@ void BufferManager::pageProviderThread(u64 p_begin, u64 p_end)  // [p_begin, p_e
                      r_buffer->header.state = BufferFrame::STATE::COOL;
                      parent_handler.swip.cool();
                      partition.cooling_bfs_counter++;
+                     //cout << "Cooling " << pid << endl;
                   }
                   // -------------------------------------------------------------------------------------
                   COUNTERS_BLOCK() { PPCounters::myCounters().unswizzled_pages_counter++; }
@@ -233,10 +235,12 @@ void BufferManager::pageProviderThread(u64 p_begin, u64 p_end)  // [p_begin, p_e
             assert(parent_handler.parent_guard.state == GUARD_STATE::OPTIMISTIC);
             ExclusiveUpgradeIfNeeded p_x_guard(parent_handler.parent_guard);
             guard.guard.toExclusive();
+            //std::cout << "Evicted 1 one buffer frame" << std::endl;
             // -------------------------------------------------------------------------------------
             partition.cooling_queue.erase(bf_itr);
             partition.cooling_bfs_counter--;
             // -------------------------------------------------------------------------------------
+            //std::cout << "Evicted 2 one buffer frame" << std::endl;
             assert(!bf.header.isWB);
             // Reclaim buffer frame
             assert(bf.header.state == BufferFrame::STATE::COOL);
@@ -251,10 +255,12 @@ void BufferManager::pageProviderThread(u64 p_begin, u64 p_end)  // [p_begin, p_e
             if (freed_bfs_batch.size() <= std::min<u64>(FLAGS_worker_threads, 128)) {
                freed_bfs_batch.push(partition);
             }
+            //std::cout << "Evicted 3 one buffer frame" << std::endl;
             // -------------------------------------------------------------------------------------
             COUNTERS_BLOCK() { PPCounters::myCounters().evicted_pages++; }
          };
          if (phase_2_3_condition(partition)) {
+            //cout << "phase_2_3 " << endl;
             const s64 pages_to_iterate_partition = partition.free_bfs_limit - partition.dram_free_list.counter;
             // -------------------------------------------------------------------------------------
             /*

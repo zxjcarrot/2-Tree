@@ -72,6 +72,7 @@ LeanStore::LeanStore()
    BMC::global_bf = buffer_manager.get();
    // -------------------------------------------------------------------------------------
    DTRegistry::global_dt_registry.registerDatastructureType(0, storage::btree::BTreeLL::getMeta());
+   DTRegistry::global_dt_registry.registerDatastructureType(1, storage::hashing::LinearHashTable::getMeta());
    // -------------------------------------------------------------------------------------
    if (FLAGS_recover) {
       deserializeState();
@@ -256,6 +257,16 @@ storage::btree::BTreeLL& LeanStore::registerBTreeLL(string name, bool keep_in_me
    guard.unlock();
    btree.create(dtid, &bf);
    return btree;
+}
+// -------------------------------------------------------------------------------------
+storage::hashing::LinearHashTable& LeanStore::registerHashTable(string name, bool keep_in_memory)
+{
+   assert(hts.find(name) == hts.end());
+   auto& ht = hts[name];
+   DTID dtid = DTRegistry::global_dt_registry.registerDatastructureInstance(1, reinterpret_cast<void*>(&ht), name);
+   ht.keep_in_memory = keep_in_memory;
+   ht.create(dtid);
+   return ht;
 }
 // -------------------------------------------------------------------------------------
 u64 LeanStore::getConfigHash()

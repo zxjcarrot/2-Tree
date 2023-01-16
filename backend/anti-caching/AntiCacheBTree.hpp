@@ -10,7 +10,7 @@
 #include <rocksdb/utilities/options_util.h>
 
 template<typename Key, typename Payload>
-class AntiCacheBTreeAdapter: public leanstore::BTreeInterface<Key, Payload> {
+class AntiCacheBTreeAdapter: public leanstore::StorageInterface<Key, Payload> {
 public:
    leanstore::storage::btree::BTreeInterface& btree;
    rocksdb::DB* block_table;

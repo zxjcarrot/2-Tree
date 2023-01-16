@@ -10,7 +10,7 @@ namespace leanstore
 namespace utils
 {
 // -------------------------------------------------------------------------------------
-class HotspotGenerator: public Generator
+class HotspotZipfGenerator: public Generator
 {
   public:
     u64 min, max;
@@ -18,6 +18,7 @@ class HotspotGenerator: public Generator
     double hot_op_fraction;
     u64 hot_interval;
     u64 cold_interval;
+    ZipfGenerator * zipf_generator = nullptr;
    /* Create a generator for Hotspot distributions.
    *
    * @param min lower bound of the distribution.
@@ -25,7 +26,7 @@ class HotspotGenerator: public Generator
    * @param hotset_fraction percentage of data item
    * @param hot_op_fraction percentage of operations accessing the hot set.
    */
-   HotspotGenerator(u64 min, u64 max, double hotset_fraction, double hot_op_fraction = 1.0) : min(min), max(max), hotset_fraction(hotset_fraction), hot_op_fraction(hot_op_fraction) {
+   HotspotZipfGenerator(u64 min, u64 max, double hotset_fraction, double hot_op_fraction = 1.0, double zipf_factor = 0.7) : min(min), max(max), hotset_fraction(hotset_fraction), hot_op_fraction(hot_op_fraction) {
     if (this->hotset_fraction < 0.0 || this->hotset_fraction > 1.0) {
       std::cerr << "Hotset fraction out of range. Setting to 1.0";
       this->hotset_fraction = 1.0;
@@ -42,6 +43,7 @@ class HotspotGenerator: public Generator
     u64 interval = max - min + 1;
     this->hot_interval = (int) (interval * this->hotset_fraction);
     this->cold_interval = interval - hot_interval;
+    zipf_generator = new ZipfGenerator(hot_interval, zipf_factor);
    }
 
    u64 rand() override {
@@ -51,7 +53,7 @@ class HotspotGenerator: public Generator
       double u = static_cast<double>(i) / constant;
       if (u < hot_op_fraction) {
         // Choose a value from the hot set.
-        value = min + RandomGenerator::getRandU64(0, 1000000000000000000) % hot_interval;
+        value = zipf_generator->rand() % hot_interval;
       } else {
         // Choose a value from the cold set.
         value = min + hot_interval + RandomGenerator::getRandU64(0, 1000000000000000000) % cold_interval;

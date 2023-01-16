@@ -19,7 +19,7 @@ namespace leanstore
 {
 
 template <typename Key, typename Payload>
-struct TwoRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
+struct TwoRocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
    rocksdb::DB* top_db = nullptr;
    rocksdb::DB* bottom_db = nullptr;
    rocksdb::Options toptree_options;
@@ -423,7 +423,7 @@ struct TwoRocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
 
 
 template <typename Key, typename Payload>
-struct RocksDBTwoCFAdapter : public leanstore::BTreeInterface<Key, Payload> {
+struct RocksDBTwoCFAdapter : public leanstore::StorageInterface<Key, Payload> {
    rocksdb::DB* db = nullptr;
    //rocksdb::DB* bottom_db = nullptr;
    rocksdb::Options db_options;

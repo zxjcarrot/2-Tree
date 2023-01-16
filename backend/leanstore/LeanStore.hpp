@@ -2,6 +2,7 @@
 #include "Config.hpp"
 #include "leanstore/profiling/tables/ConfigsTable.hpp"
 #include "storage/btree/BTreeLL.hpp"
+#include "storage/hashing/LinearHashing.hpp"
 #include "storage/buffer-manager/BufferManager.hpp"
 #include "rapidjson/document.h"
 // -------------------------------------------------------------------------------------
@@ -21,6 +22,7 @@ class LeanStore
   public:
    // Poor man catalog
    std::unordered_map<string, storage::btree::BTreeLL> btrees_ll;
+   std::unordered_map<string, storage::hashing::LinearHashTable> hts;
    // -------------------------------------------------------------------------------------
    s32 ssd_fd;
    // -------------------------------------------------------------------------------------
@@ -46,6 +48,9 @@ class LeanStore
    // -------------------------------------------------------------------------------------
    storage::btree::BTreeLL& registerBTreeLL(string name, bool keep_in_memory = false);
    storage::btree::BTreeLL& retrieveBTreeLL(string name, bool keep_in_memory = false) { return btrees_ll[name]; }
+   // -------------------------------------------------------------------------------------
+   storage::hashing::LinearHashTable& registerHashTable(string name, bool keep_in_memory = false);
+   storage::hashing::LinearHashTable& retrieveHashTable(string name, bool keep_in_memory = false) { return hts[name]; }
    // -------------------------------------------------------------------------------------
    storage::BufferManager& getBufferManager() { return *buffer_manager; }
    cr::CRManager& getCRManager() { return *cr_manager; }

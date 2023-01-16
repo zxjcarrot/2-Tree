@@ -56,7 +56,7 @@ public:
 
 
 template <typename Key, typename Payload>
-struct BTreeVSAdapter : BTreeInterface<Key, Payload> {
+struct BTreeVSAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& btree;
 
    std::size_t io_reads_snapshot = 0;
@@ -166,6 +166,9 @@ struct BTreeVSAdapter : BTreeInterface<Key, Payload> {
 template <u64 size>
 struct BytesPayload {
    u8 value[size];
+   BytesPayload(u8 byte) {
+      memset(value, byte, sizeof(value));
+   }
    BytesPayload() {}
    bool operator==(BytesPayload& other) { return (std::memcmp(value, other.value, sizeof(value)) == 0); }
    bool operator!=(BytesPayload& other) { return !(operator==(other)); }

@@ -37,7 +37,7 @@ auto old_miss = WorkerCounters::myCounters().io_reads.load();
       }
 
 template <typename Key, typename Payload>
-struct BTreeVSHotColdPartitionedAdapter : BTreeInterface<Key, Payload> {
+struct BTreeVSHotColdPartitionedAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& btree;
 
    uint64_t btree_buffer_miss = 0;

@@ -18,7 +18,7 @@
 #include "rocksdb/iostats_context.h"
 #include "rocksdb/perf_context.h"
 template <typename Key, typename Payload>
-struct RocksDBAdapter : public leanstore::BTreeInterface<Key, Payload> {
+struct RocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
    rocksdb::DB* db;
    rocksdb::Options options;
    bool lazy_migration;

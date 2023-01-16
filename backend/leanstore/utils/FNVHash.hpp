@@ -16,6 +16,7 @@ class FNV
 
   public:
    static u64 hash(u64 val);
+   static u64 hash(const u8* d, u16 len);
 };
 // -------------------------------------------------------------------------------------
 }  // namespace utils

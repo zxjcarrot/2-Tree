@@ -162,29 +162,39 @@ BufferFrame& BufferManager::randomBufferFrame()
 BufferFrame& BufferManager::allocatePage()
 {
    // Pick a pratition randomly
-   Partition& partition = randomPartition();
-   BufferFrame& free_bf = partition.dram_free_list.pop();
-   PID free_pid = partition.nextPID();
-   assert(free_bf.header.state == BufferFrame::STATE::FREE);
+   PID free_pid;
+   BufferFrame* free_bf;
+   while (true) {
+      Partition& partition = randomPartition();
+      free_bf = partition.dram_free_list.tryPop();
+      if (free_bf == nullptr) {
+         continue;
+      }
+      free_pid = partition.nextPID();
+      break;
+   }
+   
+   
+   assert(free_bf->header.state == BufferFrame::STATE::FREE);
    // -------------------------------------------------------------------------------------
    // Initialize Buffer Frame
-   free_bf.header.latch.assertNotExclusivelyLatched();
-   free_bf.header.latch.mutex.lock();  // Exclusive lock before changing to HOT
-   free_bf.header.latch->fetch_add(LATCH_EXCLUSIVE_BIT);
-   free_bf.header.pid = free_pid;
-   free_bf.header.state = BufferFrame::STATE::HOT;
-   free_bf.header.lastWrittenGSN = free_bf.page.GSN = 0;
+   free_bf->header.latch.assertNotExclusivelyLatched();
+   free_bf->header.latch.mutex.lock();  // Exclusive lock before changing to HOT
+   free_bf->header.latch->fetch_add(LATCH_EXCLUSIVE_BIT);
+   free_bf->header.pid = free_pid;
+   free_bf->header.state = BufferFrame::STATE::HOT;
+   free_bf->header.lastWrittenGSN = free_bf->page.GSN = 0;
    // -------------------------------------------------------------------------------------
    if (free_pid == dram_pool_size) {
       cout << "-------------------------------------------------------------------------------------" << endl;
       cout << "Going out of memory !" << endl;
       cout << "-------------------------------------------------------------------------------------" << endl;
    }
-   free_bf.header.latch.assertExclusivelyLatched();
+   free_bf->header.latch.assertExclusivelyLatched();
    // -------------------------------------------------------------------------------------
    COUNTERS_BLOCK() { WorkerCounters::myCounters().allocate_operations_counter++; }
    // -------------------------------------------------------------------------------------
-   return free_bf;
+   return *free_bf;
 }
 // -------------------------------------------------------------------------------------
 // Pre: bf is exclusively locked
