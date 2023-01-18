@@ -62,7 +62,7 @@ public:
    }
 private:
    std::mutex lock;
-   static constexpr int kArraySize = 4096;
+   static constexpr int kArraySize = 8192;
    std::atomic<u64> idx {0};
    BufferFrame* dirNodes[kArraySize]; // keep_in_memory = true
    DTID dt_id;
@@ -76,13 +76,18 @@ class LinearHashTable
    OP_RESULT lookup(u8* key, u16 key_length, std::function<void(const u8*, u16)> payload_callback);
    OP_RESULT lookupForUpdate(u8* key, u16 key_length, std::function<bool(u8*, u16)> payload_callback);
    OP_RESULT insert(u8* key, u16 key_length, u8* value, u16 value_length);
+   OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length);
    // virtual OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length) override;
    //OP_RESULT updateSameSize(u8* key, u16 key_length, function<void(u8* value, u16 value_size)>, WALUpdateGenerator = {{}, {}, 0}) override;
    OP_RESULT remove(u8* key, u16 key_length);
+   // iterate over all data records in bucket
+   OP_RESULT iterate(u64 bucket, 
+                     std::function<bool(const u8*, u16, const u8*, u16)> callback,
+                     std::function<void()> restart_iterate_setup_context);
    // -------------------------------------------------------------------------------------
    u64 countPages();
    u64 countEntries();
-   u64 countBuckets() { return table->numSlots(); }
+   u64 countBuckets() { return s_buddy.load(); }
    u64 powerMultiplier()  { return i_.load(); }
    // -------------------------------------------------------------------------------------
    static void iterateChildrenSwips(void*, BufferFrame& bf, std::function<bool(Swip<BufferFrame>&)> callback);
@@ -100,10 +105,13 @@ class LinearHashTable
    void split();
    void merge_chain(u64 bucket, BufferFrame* dirNode);
    void create(DTID dtid);
+   double current_load_factor();
 private:
-   constexpr static u32 N = 32;
+   constexpr static double kSplitLoadFactor = 0.8;
+   constexpr static u32 N = 128;
    std::atomic<u64> i_{0};
    std::atomic<u64> s_{0};
+   std::atomic<u64> data_stored{0};
    std::atomic<u64> s_buddy{N}; // invariant: s + N * 2^i = s_buddy.
    std::mutex split_mtx;
    MappingTable * table = nullptr;
@@ -204,7 +212,7 @@ struct LinearHashingNode : public LinearHashingNodeHeader {
    bool canInsert(u16 key_length, u16 payload_len);
    bool prepareInsert(u16 keyLength, u16 payload_len);
    // -------------------------------------------------------------------------------------
-   bool update(u8* key, u16 keyLength, u16 payload_length, u8* payload);
+   bool update(u16 slot_id, u8* key, u16 keyLength, u8* payload, u16 payload_length);
    // -------------------------------------------------------------------------------------
    void compactify();
    // -------------------------------------------------------------------------------------

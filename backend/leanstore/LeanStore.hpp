@@ -47,7 +47,7 @@ class LeanStore
    GlobalStats getGlobalStats();
    // -------------------------------------------------------------------------------------
    storage::btree::BTreeLL& registerBTreeLL(string name, bool keep_in_memory = false);
-   storage::btree::BTreeLL& retrieveBTreeLL(string name, bool keep_in_memory = false) { return btrees_ll[name]; }
+   storage::btree::BTreeLL& retrieveBTreeLL(string name, [[maybe_unused]] bool keep_in_memory = false) { return btrees_ll[name]; }
    // -------------------------------------------------------------------------------------
    storage::hashing::LinearHashTable& registerHashTable(string name, bool keep_in_memory = false);
    storage::hashing::LinearHashTable& retrieveHashTable(string name, bool keep_in_memory = false) { return hts[name]; }

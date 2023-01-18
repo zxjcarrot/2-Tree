@@ -336,7 +336,7 @@ private:
                 // TODO decompress
                 leaf_node_data* decompressed_node = new leaf_node_data();
                 char * compressed_buf = strip_off_data_ptr();
-                auto ret = LZ4_decompress_safe(compressed_buf, (char*)decompressed_node, compressed_size, sizeof(leaf_node_data));
+                [[maybe_unused]] auto ret = LZ4_decompress_safe(compressed_buf, (char*)decompressed_node, compressed_size, sizeof(leaf_node_data));
                 assert(ret == sizeof(leaf_node_data));
                 free(compressed_buf);
                 data_ptr = (uint64_t)decompressed_node;

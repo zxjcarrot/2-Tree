@@ -14,17 +14,6 @@ namespace leanstore
 // -------------------------------------------------------------------------------------
 using HT_OP_RESULT = leanstore::storage::hashing::OP_RESULT;
 
-// class DeferCode {
-// public:
-//    DeferCode() = delete;
-//    DeferCode(std::function<void()> f): f(f) {}
-//    ~DeferCode() { 
-//       f(); 
-//    }
-//    std::function<void()> f;
-// };
-
-
 template <typename Key, typename Payload>
 struct HashVSAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::hashing::LinearHashTable & hash_table;
@@ -151,7 +140,7 @@ struct HashVSAdapter : StorageInterface<Key, Payload> {
       double ht_hit_rate = ht_buffer_hit / (ht_buffer_hit + ht_buffer_miss + 1.0);
       std::cout << "Hash Table buffer hits/misses " <<  ht_buffer_hit << "/" << ht_buffer_miss << std::endl;
       std::cout << "Hash Table buffer hit rate " <<  ht_hit_rate << " miss rate " << (1 - ht_hit_rate) << std::endl;
-      std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01);
+      std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01) << std::endl;
    }
 };
 

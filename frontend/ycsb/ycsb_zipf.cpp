@@ -21,6 +21,7 @@
 #include "twotree/TrieLSMT.hpp"
 #include "twotree/ConcurrentTwoBTree.hpp"
 #include "twotree/ConcurrentPartitionedBTree.hpp"
+#include "twohash/TwoHash.hpp"
 #include "anti-caching/AntiCache.hpp"
 #include "anti-caching/AntiCacheBTree.hpp"
 #include "hash/HashAdapter.hpp"
@@ -74,6 +75,7 @@ const std::string kIndexTypeLSMT = "LSMT";
 const std::string kIndexTypeAntiCache = "AntiCache";
 const std::string kIndexTypeAntiCacheB = "AntiCacheB";
 const std::string kIndexType2BTree = "2BTree";
+const std::string kIndexType2Hash = "2Hash";
 const std::string kIndexTypeC2BTree = "C2BTree";
 const std::string kIndexType2LSMT = "2LSMT";
 const std::string kIndexType2LSMT_CF = "2LSMT-CF";
@@ -188,7 +190,7 @@ int main(int argc, char** argv)
    // -------------------------------------------------------------------------------------
    // LeanStore DB
    double top_tree_size_gib = 0;
-   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
+   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
    } else if (FLAGS_index_type == kIndexTypeUpLSMT || 
               FLAGS_index_type == kIndexTypeLSMT || 
@@ -263,6 +265,8 @@ int main(int argc, char** argv)
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, btree2_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexType2BTree) {
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+   } else if (FLAGS_index_type == kIndexType2Hash) {
+      adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload>(*ht_ptr, *ht2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeC2BTree) {
       adapter.reset(new ConcurrentPartitionedLeanstore<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeIM2BTree) {
@@ -407,6 +411,8 @@ int main(int argc, char** argv)
    cout << "-------------------------------------------------------------------------------------" << endl;
    cout << "~Transactions" << endl;
 
+   adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
+   
    //adapter->evict_all();
    // if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeLSMT)
    {
@@ -425,11 +431,6 @@ int main(int argc, char** argv)
       cout << "Warmed up" << endl;
    }
 
-   
-
-   cout << "All evicted" << endl;
-
-   adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
    atomic<bool> keep_running = true;
    atomic<u64> running_threads_counter = 0;
    atomic<u64> txs = 0;
