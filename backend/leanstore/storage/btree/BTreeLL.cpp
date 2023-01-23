@@ -290,10 +290,42 @@ OP_RESULT BTreeLL::upsert(u8* o_key, u16 o_key_length, u8* o_value, u16 o_value_
       } else {
          ret = iterator.replaceKV(key, value);
       }
+      iterator.leaf.incrementGSN();
       jumpmu_return ret;
    }
    jumpmuCatch() { ensure(false); }
 }
+
+// This helper finds the boundary key for the leaf `num_to_the_right` nodes away from the leaf containing the search key
+// num_to_the_right: number of leaves to the right the leaf contaning search key
+// This assumes 
+OP_RESULT BTreeLL::findLeafNeighbouringNodeBoundary(u8* start_key, u16 key_length, u16 num_to_the_right, std::function<void(const u8 *, const u16, bool)> processor)
+{
+   Slice key(start_key, key_length);
+   u8 max_key_sofar[key_length];
+   memcpy(max_key_sofar, start_key, key_length);
+   jumpmuTry()
+   {
+      BTreeSharedIterator iterator(*static_cast<BTreeGeneric*>(this));
+      OP_RESULT res = iterator.seek(key);
+      bool end = false;
+      if (res == OP_RESULT::NOT_FOUND) {
+         end = true;
+      } else {
+         for (std::size_t i = 0; i < num_to_the_right; ++i) {
+            iterator.toMaxKeyInNode();
+            memcpy(max_key_sofar, iterator.key().data(), iterator.key().length());
+            if (iterator.next() != OP_RESULT::OK) {
+               end = true;
+            }
+         }
+      }
+      processor(max_key_sofar, key_length, end);
+      jumpmu_return OP_RESULT::OK;
+   }
+   jumpmuCatch() { ensure(false); }
+}
+
 // -------------------------------------------------------------------------------------
 OP_RESULT BTreeLL::updateSameSize(u8* o_key,
                                   u16 o_key_length,

@@ -31,6 +31,7 @@
 #include <tbb/tbb.h>
 // -------------------------------------------------------------------------------------
 #include <iostream>
+#include <shared_mutex>
 #include <set>
 // -------------------------------------------------------------------------------------
 DEFINE_uint32(ycsb_read_ratio, 100, "");
@@ -62,6 +63,7 @@ DEFINE_string(ycsb_request_dist, "hotspot", "");
 DEFINE_double(ycsb_request_hotspot_keyspace_fraction, 0.2, "");
 DEFINE_double(ycsb_request_hotspot_op_fraction, 1.0, "");
 DEFINE_double(ycsb_request_selfsimilar_skew, 0.2, "");
+DEFINE_bool(ycsb_correctness_check, false, "correctness check");
 
 const std::string kRequestDistributionZipfian = "zipfian";
 const std::string kRequestDistributionSelfSimilar = "selfsimilar";
@@ -184,7 +186,7 @@ int main(int argc, char** argv)
    gflags::SetUsageMessage("Leanstore Frontend");
    gflags::ParseCommandLineFlags(&argc, &argv, true);
    // -------------------------------------------------------------------------------------
-   tbb::task_scheduler_init taskScheduler(1);
+   tbb::task_scheduler_init taskScheduler(FLAGS_worker_threads);
    // -------------------------------------------------------------------------------------
    chrono::high_resolution_clock::time_point begin, end;
    // -------------------------------------------------------------------------------------
@@ -268,7 +270,7 @@ int main(int argc, char** argv)
    } else if (FLAGS_index_type == kIndexType2Hash) {
       adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload>(*ht_ptr, *ht2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeC2BTree) {
-      adapter.reset(new ConcurrentPartitionedLeanstore<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+      adapter.reset(new ConcurrentTwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeIM2BTree) {
       adapter.reset(new BTreeCachedVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeTrieBTree) {
@@ -307,6 +309,26 @@ int main(int argc, char** argv)
    vector<u64> last_access_timestamps(n, 0);
    vector<u64> access_count(n, 0);
    vector<u64> sum_reaccess_interval(n, 0);
+   vector<std::shared_mutex> * key_mutexes = nullptr;
+   if (FLAGS_ycsb_correctness_check) {
+      key_mutexes = new std::vector<std::shared_mutex>(n);
+   }
+   #define C_RLOCK(i) \
+   if (FLAGS_ycsb_correctness_check) {\
+      (*key_mutexes)[(i)].lock_shared();     \
+   }
+   #define C_WLOCK(i) \
+   if (FLAGS_ycsb_correctness_check) {\
+      (*key_mutexes)[(i)].lock();     \
+   }
+   #define C_RUNLOCK(i)\
+   if (FLAGS_ycsb_correctness_check) {\
+      (*key_mutexes)[(i)].unlock_shared();     \
+   }
+   #define C_WUNLOCK(i)\
+   if (FLAGS_ycsb_correctness_check) {\
+      (*key_mutexes)[(i)].unlock();     \
+   }
    if (FLAGS_recover) {
       // Warmup
       const u64 n = ycsb_tuple_count;
@@ -333,10 +355,12 @@ int main(int argc, char** argv)
             tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
                for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
                   YCSBKey key = keys[t_i];
+                  C_WLOCK(t_i);
                   correct_payloads[t_i] = (u8)key;
                   YCSBPayload payload((u8)key);
                   //utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
                   table.insert(key, payload);
+                  C_WUNLOCK(t_i);
                   WorkerCounters::myCounters().tx++;
                }
             });
@@ -346,31 +370,18 @@ int main(int argc, char** argv)
                vector<u64> range_keys(range.end() - range.begin());
                std::iota(range_keys.begin(), range_keys.end(), range.begin());
                std::random_shuffle(range_keys.begin(), range_keys.end());
-               for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
-                  YCSBKey key = keys[t_i];
+               for (u64 t_i = 0; t_i < range_keys.size(); t_i++) {
+                  u64 idx = range_keys[t_i];
+                  YCSBKey key = keys[idx];
+                  C_WLOCK(idx);
                   YCSBPayload payload((u8)key);
-                  correct_payloads[t_i] = (u8)key;
-                  //utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-                  //YCSBKey key = keys[t_i];
+                  correct_payloads[idx] = (u8)key;
                   table.insert(key, payload);
+                  C_WUNLOCK(idx);
+
                   WorkerCounters::myCounters().tx++;
                }
-               std::iota(range_keys.begin(), range_keys.end(), range.begin());
             });
-            //tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
-               //cout << "range size " << range.end() - range.begin() << std::endl;
-               
-               // for (u64 t_i = 0; t_i < keys.size(); t_i++) {
-               //    YCSBKey key = keys[t_i];
-               //    YCSBPayload payload((u8)key);
-               //    correct_payloads[t_i] = (u8)key;
-               //    //utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-                  
-               //    //YCSBKey key = keys[t_i];
-               //    table.insert(key, payload);
-               //    WorkerCounters::myCounters().tx++;
-               // }
-            //});
          }
       }
       end = chrono::high_resolution_clock::now();
@@ -418,15 +429,19 @@ int main(int argc, char** argv)
    {
       cout << "Warming up" << endl;
       auto t_start = std::chrono::high_resolution_clock::now();
-      // warm up for 100 seconds
-      // scramble the database
-      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 100000) {
-         YCSBKey key = keys[random_generator->rand() % ycsb_tuple_count] % FLAGS_ycsb_keyspace_count;
-
+      int i = 0;
+      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 20000) {
+         auto key_idx = random_generator->rand() % ycsb_tuple_count;
+         YCSBKey key = keys[key_idx] % FLAGS_ycsb_keyspace_count;
+         C_RLOCK(key_idx);
+         YCSBPayload correct_result(correct_payloads[key_idx]);
          assert(key < ycsb_tuple_count);
          YCSBPayload result;
          table.lookup(key, result);
+         C_RUNLOCK(key_idx);
+         assert(result == correct_result);
          WorkerCounters::myCounters().tx++;
+         ++i;
       }
       cout << "Warmed up" << endl;
    }
@@ -446,8 +461,6 @@ int main(int argc, char** argv)
          while (keep_running) {
             auto idx = random_generator->rand() % ycsb_tuple_count;
             YCSBKey key = keys[idx];
-            bool deleted = key_deleted[idx];
-            u8 correct_payload_byte = correct_payloads[idx];
             auto old_access_timestamp = last_access_timestamps[idx];
             last_access_timestamps[idx] = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
             if (old_access_timestamp != 0) {
@@ -477,24 +490,34 @@ int main(int argc, char** argv)
                utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
                table.insert(key, payload);
             } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio) {
-               correct_payloads[idx] = utils::RandomGenerator::getRandU64();
+               C_WLOCK(idx);
+               correct_payloads[idx]++;
                YCSBPayload payload(correct_payloads[idx]);
                if (FLAGS_update_or_put == 0) {
                   table.update(key, payload);
                } else {
                   table.put(key, payload);
                }
+               C_WUNLOCK(idx);
             } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_delete_ratio) {
+               C_WLOCK(idx);
                key_deleted[idx] = true;
                table.remove(key);
+               C_WUNLOCK(idx);
             } else { // x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_read_ratio + FLAGS_ycsb_delete_ratio
+               C_RLOCK(idx);
                bool res = table.lookup(key, result);
-               if (deleted) {
-                  assert(res == false);
-               } else {
-                  YCSBPayload correct_result(correct_payload_byte);
-                  assert(result == correct_result);
+               
+               if (FLAGS_ycsb_correctness_check) {
+                  if (key_deleted[idx]) {
+                     assert(res == false);
+                  } else {
+                        auto correct_payload_byte = correct_payloads[idx];
+                        YCSBPayload correct_result(correct_payload_byte);
+                        assert(result == correct_result);
+                  }
                }
+               C_RUNLOCK(idx);
             }
             WorkerCounters::myCounters().tx++;
             ++tx;

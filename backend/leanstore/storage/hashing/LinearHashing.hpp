@@ -46,13 +46,23 @@ public:
          return dirNodes[bucket_id / kDirNodeBucketPtrCount];
       }
       while (bucket_id >= numSlots()) {
-         auto write_guard_h = leanstore::storage::HybridPageGuard<DirectoryNode>(dt_id);
-         auto write_guard = ExclusivePageGuard<DirectoryNode>(std::move(write_guard_h));
-         write_guard.init();
-         auto bf = write_guard.bf();
-         bf->header.keep_in_memory = true;
-         int j = idx.fetch_add(1);
-         dirNodes[j] = (bf);
+         while (true) {
+            jumpmuTry() 
+            {
+               auto write_guard_h = leanstore::storage::HybridPageGuard<DirectoryNode>(dt_id);
+               auto write_guard = ExclusivePageGuard<DirectoryNode>(std::move(write_guard_h));
+               write_guard.init();
+               auto bf = write_guard.bf();
+               bf->header.keep_in_memory = true;
+               int j = idx.fetch_add(1);
+               dirNodes[j] = (bf);
+               jumpmu_break;
+            } 
+            jumpmuCatch() 
+            {
+               WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
+            }
+         }
       }
       return dirNodes[bucket_id / kDirNodeBucketPtrCount];
    }
@@ -161,7 +171,7 @@ struct LinearHashingNode : public LinearHashingNodeHeader {
 
    u16 freeSpace() { 
       u64 metadata_used = reinterpret_cast<u8*>(slot + count) - ptr();
-      assert(data_offset > metadata_used);
+      assert(data_offset >= metadata_used);
       return data_offset - metadata_used; 
    }
    u16 freeSpaceAfterCompaction() { return EFFECTIVE_PAGE_SIZE - (reinterpret_cast<u8*>(slot + count) - ptr()) - space_used; }

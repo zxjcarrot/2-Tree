@@ -700,7 +700,19 @@ OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_
       }
 
       if (need_allocate_node && overflow_node == nullptr) {
-         overflow_node = new HybridPageGuard<LinearHashingNode>(dt_id);
+         while (true)
+         {
+            jumpmuTry()
+            {
+               overflow_node = new HybridPageGuard<LinearHashingNode>(dt_id);
+               jumpmu_break;
+            }
+            jumpmuCatch()
+            {
+               BACKOFF_STRATEGIES()
+               WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
+            }
+         }
       }
    }
 
@@ -814,7 +826,19 @@ OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_
       }
 
       if (need_allocate_node && overflow_node == nullptr) {
-         overflow_node = new HybridPageGuard<LinearHashingNode>(dt_id);
+         while (true)
+         {
+            jumpmuTry()
+            {
+               overflow_node = new HybridPageGuard<LinearHashingNode>(dt_id);
+               jumpmu_break;
+            }
+            jumpmuCatch()
+            {
+               BACKOFF_STRATEGIES()
+               WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
+            }
+         }
       }
    }
 
@@ -839,11 +863,35 @@ void LinearHashTable::split() {
       // allocate enough nodes so we do not have to allocate while holding write locks.
       constexpr size_t kNTempNodes = 4;
       std::vector<HybridPageGuard<LinearHashingNode>> temp_nodes(kNTempNodes);
-      
-      for (size_t i = 0; i < 4; ++i) {
-         temp_nodes[i] = HybridPageGuard<LinearHashingNode>(dt_id);
-         temp_nodes[i].toExclusive();
+      bool allocated = false;
+      {
+         jumpmuTry()
+         {
+            for (size_t i = 0; i < 4; ++i) {
+               temp_nodes[i] = HybridPageGuard<LinearHashingNode>(dt_id);
+               temp_nodes[i].toExclusive();
+            }
+            allocated = true;
+         }
+         
+         jumpmuCatch()
+         {
+            assert(allocated == false);
+         }
+         if (allocated == false) {
+            for (size_t i = 0; i < 4; ++i) {
+               if (temp_nodes[i].bf) {
+                  temp_nodes[i].toExclusive();
+                  temp_nodes[i].reclaim();
+               }
+            }
+            continue;
+         }
       }
+      // partition the data from the split bucket into two chains of buckets
+      // handle overflow chains properly
+      std::vector<LinearHashingNode> split_bucket_tmp;
+      std::vector<LinearHashingNode> buddy_bucket_tmp;
 
       HybridPageGuard<LinearHashingNode> original_split_bucket_chain_head_guard;
       jumpmuTry()
@@ -855,10 +903,11 @@ void LinearHashTable::split() {
          HybridPageGuard<LinearHashingNode> target_x_guard(p_guard, first_hash_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
          target_x_guard.toExclusive();
 
-         // partition the data from the split bucket into two chains of buckets
-         // handle overflow chains properly
-         std::vector<LinearHashingNode> split_bucket_tmp(1, LinearHashingNode(false, split_bucket));
-         std::vector<LinearHashingNode> buddy_bucket_tmp(1, LinearHashingNode(false, buddy_bucket));
+
+         split_bucket_tmp.clear();
+         split_bucket_tmp.resize(1, LinearHashingNode(false, split_bucket));
+         buddy_bucket_tmp.clear();
+         buddy_bucket_tmp.resize(1, LinearHashingNode(false, buddy_bucket));
          int idx = 0;
          while (true) {
             for (int i = 0; i < target_x_guard->count; ++i) {
@@ -908,7 +957,7 @@ void LinearHashTable::split() {
          // fill temp nodes for split bucket
          HybridPageGuard<LinearHashingNode> * split_bucket_first_node_guard = &temp_nodes[temp_nodes_used_idx];
          HybridPageGuard<LinearHashingNode> * prev_guard = nullptr;
-         for (int i = 0; i < split_bucket_tmp.size(); ++i) {
+         for (std::size_t i = 0; i < split_bucket_tmp.size(); ++i) {
             assert(temp_nodes_used_idx < kNTempNodes);
             HybridPageGuard<LinearHashingNode> * this_node_guard = &temp_nodes[temp_nodes_used_idx++];
             (*this_node_guard)->overflow = nullptr;
@@ -925,7 +974,7 @@ void LinearHashTable::split() {
          // Fill the buddy chain with contents from original chain
          prev_guard = nullptr;
          HybridPageGuard<LinearHashingNode> * buddy_bucket_first_node_guard = &temp_nodes[temp_nodes_used_idx];
-         for (int i = 0; i < buddy_bucket_tmp.size(); ++i) {
+         for (std::size_t i = 0; i < buddy_bucket_tmp.size(); ++i) {
             assert(temp_nodes_used_idx < kNTempNodes);
             HybridPageGuard<LinearHashingNode> * this_node_guard = &temp_nodes[temp_nodes_used_idx++];
             (*this_node_guard)->overflow = nullptr;
@@ -1038,7 +1087,6 @@ struct ParentSwipHandler LinearHashTable::findParent(void* ht_obj, BufferFrame& 
    
    // -------------------------------------------------------------------------------------
    HybridPageGuard<DirectoryNode> p_guard(dirNode);
-   u16 level = 0;
    Swip<LinearHashingNode>& c_swip = p_guard->bucketPtrs[bucket % kDirNodeBucketPtrCount];
    if (c_swip.bfPtrAsHot() == &to_find) {
       p_guard.recheck();
@@ -1105,7 +1153,7 @@ std::unordered_map<std::string, std::string> LinearHashTable::serialize(void * h
    return {};
 }
 // -------------------------------------------------------------------------------------
-void LinearHashTable::deserialize(void * ht_object, std::unordered_map<std::string, std::string> map)
+void LinearHashTable::deserialize(void *, std::unordered_map<std::string, std::string>)
 {
    
    // assert(reinterpret_cast<BTreeNode*>(btree.meta_node_bf->page.dt)->count > 0);

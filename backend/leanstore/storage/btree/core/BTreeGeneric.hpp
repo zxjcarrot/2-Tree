@@ -104,7 +104,10 @@ class BTreeGeneric
             }
             jumpmu_return;
          }
-         jumpmuCatch() { BACKOFF_STRATEGIES() }
+         jumpmuCatch() { 
+            BACKOFF_STRATEGIES();
+            WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
+         }
       }
    }
    // -------------------------------------------------------------------------------------

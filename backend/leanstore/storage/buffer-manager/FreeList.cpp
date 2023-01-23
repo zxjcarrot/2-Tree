@@ -80,7 +80,6 @@ struct BufferFrame* FreeList::tryPop()
 // -------------------------------------------------------------------------------------
 struct BufferFrame& FreeList::pop()
 {
-   restart:
    BufferFrame* c_header = head;
    BufferFrame* free_bf = nullptr;
    while (c_header != nullptr) {
@@ -96,14 +95,12 @@ struct BufferFrame& FreeList::pop()
          // WorkerCounters::myCounters().dt_researchy_1[0]++;
          if (c_header == nullptr) {
             // WorkerCounters::myCounters().dt_researchy_2[0]++;
-            goto restart;
-            //jumpmu::jump();
+            jumpmu::jump();
          } else {
             c_header = head.load();
          }
       }
    }
-   goto restart;
    // WorkerCounters::myCounters().dt_researchy_2[0]++;
    jumpmu::jump();
    return *free_bf;  // unreachable

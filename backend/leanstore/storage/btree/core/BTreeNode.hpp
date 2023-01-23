@@ -285,6 +285,7 @@ struct BTreeNode : public BTreeNodeHeader {
    SeparatorInfo findSep();
    void getSep(u8* sepKeyOut, SeparatorInfo info);
    Swip<BTreeNode>& lookupInner(const u8* key, u16 keyLength);
+   Swip<BTreeNode>& lookupInner(const u8* key, u16 keyLength, s16 & pos_out);
    // -------------------------------------------------------------------------------------
    // Not synchronized or todo section
    bool removeSlot(u16 slotId);

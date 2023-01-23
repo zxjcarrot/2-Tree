@@ -58,6 +58,10 @@ class BTreeInterface
                               u16 key_length,
                               function<bool(const u8* key, u16 key_length, const u8* value, u16 value_length)>,
                               function<void()>) = 0;
+   virtual OP_RESULT findLeafNeighbouringNodeBoundary(u8* start_key, 
+                                                u16 key_length, 
+                                                u16 num_to_the_right, 
+                                                std::function<void(const u8 *, const u16, bool)> processor) = 0;
    // -------------------------------------------------------------------------------------
    virtual u64 countPages() = 0;
    virtual u64 countEntries() = 0;

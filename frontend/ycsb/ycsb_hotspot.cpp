@@ -147,7 +147,7 @@ int main(int argc, char** argv)
    } else if (FLAGS_cached_btree == 7) {
       adapter.reset(new BTreeCachedCompressedVSAdapter<YCSBKey, YCSBPayload, 4096>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration));
    } else if (FLAGS_cached_btree == 8) {
-      adapter.reset(new ConcurrentBTreeBTree<YCSBKey, YCSBPayload, 2048>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+      adapter.reset(new ConcurrentMemBTreeDiskBTree<YCSBKey, YCSBPayload, 2048>(*btree_ptr, cached_btree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_cached_btree == 9) {
       if (FLAGS_cached_btree) {
          cached_btree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;

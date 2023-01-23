@@ -105,6 +105,11 @@ class BTreePessimisticIterator : public BTreePessimisticIteratorInterface
          return OP_RESULT::OK;
       }
    }
+
+   void toMaxKeyInNode() {
+      cur = leaf->count - 1;   
+   }
+
    // -------------------------------------------------------------------------------------
    virtual OP_RESULT next() override
    {

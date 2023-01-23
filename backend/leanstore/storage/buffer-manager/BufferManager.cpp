@@ -164,15 +164,10 @@ BufferFrame& BufferManager::allocatePage()
    // Pick a pratition randomly
    PID free_pid;
    BufferFrame* free_bf;
-   while (true) {
-      Partition& partition = randomPartition();
-      free_bf = partition.dram_free_list.tryPop();
-      if (free_bf == nullptr) {
-         continue;
-      }
-      free_pid = partition.nextPID();
-      break;
-   }
+   
+   Partition& partition = randomPartition();
+   free_bf = &partition.dram_free_list.pop();
+   free_pid = partition.nextPID();
    
    
    assert(free_bf->header.state == BufferFrame::STATE::FREE);

@@ -4,6 +4,7 @@ namespace leanstore {
 
 template <typename Key, typename Payload>
 struct StorageInterface {
+   virtual ~StorageInterface(){}
    virtual bool lookup(Key k, Payload& v) = 0;
    virtual void insert(Key k, Payload& v) = 0;
    virtual void update(Key k, Payload& v) = 0;

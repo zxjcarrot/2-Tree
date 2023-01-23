@@ -6,7 +6,8 @@
 #include "leanstore/storage/btree/core/WALMacros.hpp"
 #include "leanstore/BTreeAdapter.hpp"
 #include "btreeolc/btreeolc.hpp"
-
+#include "LockManager/LockManager.hpp"
+#include "leanstore/utils/ScopedTimer.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore
@@ -53,7 +54,7 @@ read cache:
 
 */
 template <typename Key, typename Payload, int NodeSize = 1024>
-struct ConcurrentBTreeBTree : StorageInterface<Key, Payload> {
+struct ConcurrentMemBTreeDiskBTree : StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& btree;
    
    static constexpr double eviction_threshold = 0.99;
@@ -93,7 +94,7 @@ struct ConcurrentBTreeBTree : StorageInterface<Key, Payload> {
    bool inclusive;
    u64 lazy_migration_threshold = 10;
    std::atomic<bool> in_eviction{false};
-   ConcurrentBTreeBTree(leanstore::storage::btree::BTreeInterface& btree, double cache_size_gb, bool lazy_migration = false, bool inclusive = false) : btree(btree), cache_capacity_bytes(cache_size_gb * 1024ULL * 1024ULL * 1024ULL), lazy_migration(lazy_migration), inclusive(inclusive) {
+   ConcurrentMemBTreeDiskBTree(leanstore::storage::btree::BTreeInterface& btree, double cache_size_gb, bool lazy_migration = false, bool inclusive = false) : btree(btree), cache_capacity_bytes(cache_size_gb * 1024ULL * 1024ULL * 1024ULL), lazy_migration(lazy_migration), inclusive(inclusive) {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
    }
 
@@ -507,5 +508,699 @@ struct ConcurrentBTreeBTree : StorageInterface<Key, Payload> {
    }
 };
 
+
+
+template <typename Key, typename Payload>
+struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
+   OptimisticLockTable lock_table;
+   leanstore::storage::btree::BTreeInterface& hot_btree;
+   leanstore::storage::btree::BTreeInterface& cold_btree;
+   alignas(64) uint64_t hot_tree_ios = 0;
+   alignas(64) uint64_t btree_buffer_miss = 0;
+   alignas(64) uint64_t btree_buffer_hit = 0;
+   DTID dt_id;
+   alignas(64) std::atomic<uint64_t> hot_partition_capacity_bytes;
+   alignas(64) std::size_t hot_partition_size_bytes = 0;
+   alignas(64) std::size_t scan_ops = 0;
+   alignas(64) std::size_t io_reads_scan = 0;
+   bool inclusive = false;
+   static constexpr double eviction_threshold = 0.7;
+   alignas(64) uint64_t eviction_items = 0;
+   alignas(64) uint64_t eviction_io_reads= 0;
+   alignas(64) uint64_t io_reads_snapshot = 0;
+   alignas(64) uint64_t io_reads_now = 0;
+   alignas(64) std::atomic<uint64_t> hot_partition_item_count = 0;
+   alignas(64) std::atomic<uint64_t> upward_migrations = 0;
+   alignas(64) std::atomic<uint64_t> downward_migrations = 0;
+   alignas(64) std::atomic<uint64_t> eviction_bounding_time = 0;
+   alignas(64) std::atomic<uint64_t> eviction_bounding_n = 0;
+   u64 lazy_migration_threshold = 10;
+   bool lazy_migration = false;
+   struct alignas(1) TaggedPayload {
+      Payload payload;
+      unsigned char bits = 0;
+      bool modified() const { return bits & 1; }
+      void set_modified() { bits |= 1; }
+      void clear_modified() { bits &= ~(1u); }
+      bool referenced() const { return bits & (2u); }
+      void set_referenced() { bits |= (2u); }
+      void clear_referenced() { bits &= ~(2u); }
+   };
+   static_assert(sizeof(TaggedPayload) == sizeof(Payload) + 1, "!!!");
+   uint64_t total_lookups = 0;
+   uint64_t lookups_hit_top = 0;
+   Key clock_hand = 0;
+   constexpr static u64 PartitionBitPosition = 63;
+   constexpr static u64 PartitionBitMask = 0x8000000000000000;
+   Key tag_with_hot_bit(Key key) {
+      return key;
+   }
+   
+   bool is_in_hot_partition(Key key) {
+      return (key & PartitionBitMask) == 0;
+   }
+
+   Key tag_with_cold_bit(Key key) {
+      return key;
+   }
+
+   Key strip_off_partition_bit(Key key) {
+      return key;
+   }
+
+   ConcurrentTwoBTreeAdapter(leanstore::storage::btree::BTreeInterface& hot_btree, leanstore::storage::btree::BTreeInterface& cold_btree, double hot_partition_size_gb, bool inclusive = false, int lazy_migration_sampling_rate = 100) : hot_btree(hot_btree), cold_btree(cold_btree), hot_partition_capacity_bytes(hot_partition_size_gb * 1024ULL * 1024ULL * 1024ULL), inclusive(inclusive), lazy_migration(lazy_migration_sampling_rate < 100) {
+      if (lazy_migration_sampling_rate < 100) {
+         lazy_migration_threshold = lazy_migration_sampling_rate;
+      }
+      io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
+      eviction_round_ref_counter[0] = eviction_round_ref_counter[1] = 0;
+   }
+
+   bool cache_under_pressure() {
+      return hot_partition_size_bytes >= hot_partition_capacity_bytes * eviction_threshold;
+   }
+
+   void clear_stats() override {
+      btree_buffer_miss = btree_buffer_hit = 0;
+      eviction_items = eviction_io_reads = 0;
+      io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
+      lookups_hit_top = total_lookups = 0;
+      hot_tree_ios = 0;
+      upward_migrations = downward_migrations = 0;
+      io_reads_scan = 0;
+      scan_ops = 0;
+      eviction_bounding_time = eviction_bounding_n = 0;
+   }
+
+   std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btree, std::size_t & pages) {
+      constexpr std::size_t scan_buffer_cap = 64;
+      int scan_buffer_len = 0;
+      Key keys[scan_buffer_cap];
+      Payload payloads[scan_buffer_cap];
+      bool tree_end = false;
+      pages = 0;
+      const char * last_leaf_frame = nullptr;
+      u8 key_bytes[sizeof(Key)];
+      auto fill_scan_buffer = [&](Key startk) {
+         if (scan_buffer_len < scan_buffer_cap && tree_end == false) {
+            btree.scanAsc(key_bytes, fold(key_bytes, startk),
+            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length, const char * leaf_frame) -> bool {
+               auto real_key = unfold(*(Key*)(key));
+               assert(key_length == sizeof(Key));
+               keys[scan_buffer_len] = real_key;
+               scan_buffer_len++;
+               if (last_leaf_frame != leaf_frame) {
+                  last_leaf_frame = leaf_frame;
+                  ++pages;
+               }
+               if (scan_buffer_len >= scan_buffer_cap) {
+                  return false;
+               }
+               return true;
+            }, [](){});
+            if (scan_buffer_len < scan_buffer_cap) {
+               tree_end = true;
+            }
+         }
+      };
+      Key start_key = std::numeric_limits<Key>::min();
+      
+      std::size_t entries = 0;
+      
+      while (true) {
+         fill_scan_buffer(start_key);
+         int idx = 0;
+         while (idx < scan_buffer_len) {
+            idx++;
+            entries++;
+         }
+
+         if (idx >= scan_buffer_len && tree_end) {
+            break;
+         }
+         assert(idx > 0);
+         start_key = keys[idx - 1] + 1;
+         scan_buffer_len = 0;
+      }
+      return entries;
+   }
+
+   void evict_all() override {
+      while (hot_partition_item_count > 0) {
+         evict_a_bunch();
+      }
+   }
+
+   static constexpr u16 kClockWalkSteps = 10;
+   alignas(64) std::atomic<u64> eviction_round_ref_counter[2];
+   alignas(64) std::atomic<u64> eviction_round{0};
+   alignas(64) std::mutex eviction_mutex;
+   void evict_a_bunch() {
+      u16 steps = kClockWalkSteps; // number of nodes to scan
+      Key start_key;
+      Key end_key;
+      u64 this_eviction_round;
+      u8 key_bytes[sizeof(Key)];
+      auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
+      {
+         std::lock_guard<std::mutex> g(eviction_mutex);
+         start_key = clock_hand;
+         end_key = start_key;
+         this_eviction_round = eviction_round.load();
+         bool rewind = false;
+         bool triggered = false;
+         
+         if (eviction_round_ref_counter[1 - (this_eviction_round % 2)] != 0) {
+            return; // There are evictors working in the previous round, retry later
+         }
+         ScopedTimer t([&](uint64_t ts){
+            eviction_bounding_time += ts;
+            eviction_bounding_n++;
+         });
+
+         hot_btree.findLeafNeighbouringNodeBoundary(key_bytes, fold(key_bytes, start_key), kClockWalkSteps,
+            [&](const u8 * k, const u16 key_length, bool end) {
+               assert(key_length == sizeof(Key));
+               auto real_key = unfold(*(Key*)(k));
+               end_key = real_key;
+               rewind = end == true;
+               triggered = true;
+            });
+
+         if (triggered == false) {
+            return;
+         }
+         // Bump the ref count so that evictors in the next round won't start 
+         // until all of the evictors in this round finish
+         eviction_round_ref_counter[this_eviction_round % 2]++;
+         if (rewind == true) {
+            clock_hand = 0;
+            eviction_round++; // end of the range scan, switch to the next round
+         } else {
+            clock_hand = end_key + 1;
+         }
+      }
+      
+      std::vector<Key> evict_keys;
+      evict_keys.reserve(512);
+      std::vector<u64> evict_keys_lock_versions;
+      evict_keys_lock_versions.reserve(512);
+      std::vector<TaggedPayload> evict_payloads;
+      evict_payloads.reserve(512);
+      Key evict_key;
+      bool victim_found = false;
+      
+      hot_btree.scanAsc(key_bytes, fold(key_bytes, start_key),
+      [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+
+         auto real_key = unfold(*(Key*)(key));
+         if (real_key > end_key) {
+            return false;
+         }
+         assert(key_length == sizeof(Key));
+         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(value));
+         assert(value_length == sizeof(TaggedPayload));
+         if (tp->referenced() == true) {
+            tp->clear_referenced();
+         } else {
+            OptimisticLockGuard g(&lock_table, real_key);
+            if (g.read_lock()) { // Skip evicting records that are write-locked
+               evict_key = real_key;
+               victim_found = true;
+               evict_keys.emplace_back(real_key);
+               evict_payloads.emplace_back(*tp);
+               evict_keys_lock_versions.emplace_back(g.get_version());
+            }
+         }
+
+         if (real_key >= end_key) {
+            return false;
+         } else {
+            return true;
+         }
+      }, [](){});
+
+      if (victim_found) {
+         for (size_t i = 0; i< evict_keys.size(); ++i) {
+            auto key = evict_keys[i];
+            OptimisticLockGuard write_guard(&lock_table, key);
+            if (write_guard.write_lock() == false) { // Skip eviction if it is undergoing migration or modification
+               continue;
+            }
+            auto key_lock_version_from_scan = evict_keys_lock_versions[i];
+            if (write_guard.more_than_one_writer_since(key_lock_version_from_scan)) {
+               // There has been other writes to this key in the hot tree between the scan and the write locking above
+               // Need to update the payload content by re-reading it from the hot tree
+               auto res = hot_btree.lookup(key_bytes, fold(key_bytes, key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+                  TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
+                  evict_payloads[i] = *tp;
+                  }) == OP_RESULT::OK;
+               assert(res);
+            }
+            auto tagged_payload = &evict_payloads[i];
+            assert(is_in_hot_partition(key));
+            // auto op_res = hot_btree.remove(key_bytes, fold(key_bytes, key));
+            // hot_partition_item_count--;
+            // assert(op_res == OP_RESULT::OK);
+            // hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
+            if (inclusive) {
+               if (tagged_payload->modified()) {
+                  upsert_cold_partition(strip_off_partition_bit(key), tagged_payload->payload); // Cold partition
+               }
+            } else { // exclusive, put it back in the on-disk B-Tree
+               insert_partition(strip_off_partition_bit(key), tagged_payload->payload, true); // Cold partition
+            }
+            ++downward_migrations;
+
+            assert(is_in_hot_partition(key));
+            auto op_res = hot_btree.remove(key_bytes, fold(key_bytes, key));
+            hot_partition_item_count--;
+            assert(op_res == OP_RESULT::OK);
+            hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
+         }
+         // for (size_t i = 0; i< evict_keys.size(); ++i) {
+         //    auto key = evict_keys[i];
+         //    auto tagged_payload = evict_payloads[i];
+            
+         // }
+         
+         auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
+         assert(io_reads_new >= io_reads_old);
+         eviction_io_reads += io_reads_new - io_reads_old;
+         eviction_items += evict_keys.size();
+      }
+
+      eviction_round_ref_counter[this_eviction_round % 2]--;
+   }
+
+
+   void evict_till_safe() {
+      while (cache_under_pressure()) {
+         evict_a_bunch();
+      }
+   }
+   
+   static constexpr s64 kEvictionCheckInterval = 50;
+   std::atomic<s64> eviction_count_down {kEvictionCheckInterval};
+   void try_eviction() {
+      if (--eviction_count_down <= 0) {
+         if (cache_under_pressure()) {
+            evict_a_bunch();
+         }
+         eviction_count_down += kEvictionCheckInterval;
+      }
+   }
+
+   void admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
+      insert_partition(strip_off_partition_bit(k), v, false, dirty, referenced); // Hot partition
+      hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
+   }
+   
+   bool should_migrate() {
+      if (lazy_migration) {
+         return utils::RandomGenerator::getRandU64(0, 100) < lazy_migration_threshold;
+      }
+      return true;
+   }
+
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+      scan_ops++;
+      auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
+      constexpr std::size_t scan_buffer_size = 8;
+      u8 key_bytes[sizeof(Key)];
+      int hot_len = 0;
+      Key hot_keys[scan_buffer_size];
+      Payload hot_payloads[scan_buffer_size];
+      int cold_len = 0;
+      Key cold_keys[scan_buffer_size];
+      Payload cold_payloads[scan_buffer_size];
+      bool hot_tree_end = false;
+      bool cold_tree_end = false;
+      auto fill_hot_scan_buffer = [&](Key startk) {
+         if (hot_len < scan_buffer_size && hot_tree_end == false) {
+            hot_btree.scanAsc(key_bytes, fold(key_bytes, startk),
+            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+               auto real_key = unfold(*(Key*)(key));
+               assert(key_length == sizeof(Key));
+               assert(value_length == sizeof(TaggedPayload));
+               const TaggedPayload * p = reinterpret_cast<const TaggedPayload*>(value);
+               hot_keys[hot_len] = real_key;
+               hot_payloads[hot_len] = p->payload;
+               hot_len++;
+               if (hot_len >= scan_buffer_size) {
+                  return false;
+               }
+               return true;
+            }, [](){});
+            if (hot_len < scan_buffer_size) {
+               hot_tree_end = true;
+            }
+         }
+      };
+      auto fill_cold_scan_buffer = [&](Key startk) {
+         if (cold_len < scan_buffer_size && cold_tree_end == false) {
+            cold_btree.scanAsc(key_bytes, fold(key_bytes, startk),
+            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+               auto real_key = unfold(*(Key*)(key));
+               assert(key_length == sizeof(Key));
+               assert(value_length == sizeof(Payload));
+               const Payload * p = reinterpret_cast<const Payload*>(value);
+               cold_keys[cold_len] = real_key;
+               cold_payloads[cold_len] = *p;
+               cold_len++;
+               if (cold_len >= scan_buffer_size) {
+                  return false;
+               }
+               return true;
+            }, [](){});
+            if (cold_len < scan_buffer_size) {
+               cold_tree_end = true;
+            }
+         }
+      };
+
+      int hot_idx = 0;
+      int cold_idx = 0;
+      fill_hot_scan_buffer(start_key);
+      fill_cold_scan_buffer(start_key);
+      while (true) {
+         while (hot_idx < hot_len && cold_idx < cold_len) {
+            if (hot_keys[hot_idx] <= cold_keys[cold_idx]) {
+               if (processor(hot_keys[hot_idx], hot_payloads[hot_idx])) {
+                  goto end;
+               }
+               hot_idx++;
+            } else {
+               if (processor(cold_keys[cold_idx], cold_payloads[cold_idx])) {
+                  goto end;
+               }
+               cold_idx++;
+            }
+         }
+
+         if (hot_idx < hot_len && cold_idx == cold_len && cold_tree_end) { // 
+            while (hot_idx < hot_len) {
+               if (processor(hot_keys[hot_idx], hot_payloads[hot_idx])) {
+                  goto end;
+               }
+               hot_idx++;
+            }
+         }
+
+         if (cold_idx < cold_len && hot_idx == hot_len && hot_tree_end) {
+            // reached the end of 
+            while (cold_idx < cold_len) {
+               if (processor(cold_keys[cold_idx], cold_payloads[cold_idx])) {
+                  goto end;
+               }
+               cold_idx++;
+            }
+         }
+
+         if (hot_idx >= hot_len && hot_tree_end == false) { // try to refill hot scan buffer
+            assert(hot_idx > 0);
+            auto hot_start_key = hot_keys[hot_idx - 1] + 1;
+            hot_idx = 0;
+            hot_len = 0;
+            fill_hot_scan_buffer(hot_start_key);
+         }
+
+         if (cold_idx >= cold_len && cold_tree_end == false) { // try to refill cold scan buffer
+            assert(cold_idx > 0);
+            auto cold_start_key = cold_keys[cold_idx - 1] + 1;
+            cold_idx = 0;
+            cold_len = 0;
+            fill_cold_scan_buffer(cold_start_key);
+         }
+
+         if (cold_idx >= cold_len && cold_tree_end && hot_idx >= hot_len && hot_tree_end) {
+            goto end;
+         }
+      }
+
+   end:
+      io_reads_scan += WorkerCounters::myCounters().io_reads.load() - io_reads_old;
+      return;
+   }
+
+   bool lookup(Key k, Payload & v) {
+      try_eviction();
+      while (true) {
+         OptimisticLockGuard g(&lock_table, k);
+         if (!g.read_lock()) {
+            continue;
+         }
+         bool res = lookup_internal(k, v, g);
+         if (g.validate()) {
+            return res;
+         }
+      }
+   }
+
+   bool lookup_internal(Key k, Payload& v, OptimisticLockGuard & g)
+   {
+      ++total_lookups;
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      u8 key_bytes[sizeof(Key)];
+      TaggedPayload tp;
+      // try hot partition first
+      auto hot_key = tag_with_hot_bit(k);
+      uint64_t old_miss, new_miss;
+      OLD_HIT_STAT_START;
+      auto res = hot_btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
+         tp->set_referenced();
+         memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
+         }) ==
+            OP_RESULT::OK;
+      OLD_HIT_STAT_END;
+      hot_tree_ios += new_miss - old_miss;
+      if (res) {
+         ++lookups_hit_top;
+         return res;
+      }
+
+      auto cold_key = tag_with_cold_bit(k);
+      res = cold_btree.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused))) { 
+         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
+         memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
+         }) ==
+            OP_RESULT::OK;
+
+      if (res) {
+         if (should_migrate()) {
+            if (g.upgrade_to_write_lock() == false) { // obtain a write lock for migration
+               return false;
+            }
+            ++upward_migrations;
+            if (inclusive == false) {
+               //OLD_HIT_STAT_START;
+               // remove from the cold partition
+               auto op_res __attribute__((unused))= cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
+               assert(op_res == OP_RESULT::OK);
+               //OLD_HIT_STAT_END
+            }
+            // move to hot partition
+            OLD_HIT_STAT_START;
+            admit_element(k, v);
+            OLD_HIT_STAT_END;
+            hot_tree_ios += new_miss - old_miss;
+         }
+      }
+      return res;
+   }
+
+   void upsert_cold_partition(Key k, Payload & v) {
+      u8 key_bytes[sizeof(Key)];
+      Key key = tag_with_cold_bit(k);
+      TaggedPayload tp;
+      tp.set_modified();
+      tp.set_referenced();
+      tp.payload = v;
+      //HIT_STAT_START;
+      // auto op_res = cold_btree.updateSameSize(key_bytes, fold(key_bytes, key), [&](u8* payload, u16 payload_length) {
+      //    TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
+      //    tp->set_referenced();
+      //    memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+      // }, Payload::wal_update_generator);
+      //HIT_STAT_END;
+
+      auto op_res = cold_btree.upsert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+      assert(op_res == OP_RESULT::OK);
+      // if (op_res == OP_RESULT::NOT_FOUND) {
+      //    insert_partition(k, v, true);
+      // }
+   }
+
+   // hot_or_cold: false => hot partition, true => cold partition
+   void insert_partition(Key k, Payload & v, bool hot_or_cold, bool modified = false, bool referenced = true) {
+      u8 key_bytes[sizeof(Key)];
+      Key key = hot_or_cold == false ? tag_with_hot_bit(k) : tag_with_cold_bit(k);
+      if (hot_or_cold == false) {
+         hot_partition_item_count++;
+      }
+      TaggedPayload tp;
+      if (referenced == false) {
+         tp.clear_referenced();
+      } else {
+         tp.set_referenced();
+      }
+
+      if (modified) {
+         tp.set_modified();
+      } else {
+         tp.clear_modified();
+      }
+      tp.payload = v;
+      
+      if (hot_or_cold == false) {
+         HIT_STAT_START;
+         auto op_res = hot_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+         assert(op_res == OP_RESULT::OK);
+         HIT_STAT_END;
+      } else {
+         auto op_res = cold_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+         assert(op_res == OP_RESULT::OK);
+      }
+   }
+
+   void insert(Key k, Payload& v) override
+   {
+      try_eviction();
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      OptimisticLockGuard g(&lock_table, k);
+      
+      while (g.write_lock() == false);
+
+      if (inclusive) {
+         admit_element(k, v, true, false);
+      } else {
+         admit_element(k, v);
+      }
+   }
+
+   void update(Key k, Payload& v) override {
+      try_eviction();
+      OptimisticLockGuard g(&lock_table, k);
+      while (g.write_lock() == false);
+      ++total_lookups;
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
+      u8 key_bytes[sizeof(Key)];
+      auto hot_key = tag_with_hot_bit(k);
+      HIT_STAT_START;
+      auto op_res = hot_btree.updateSameSize(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
+         TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
+         tp->set_referenced();
+         tp->set_modified();
+         memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+      }, Payload::wal_update_generator);
+      HIT_STAT_END;
+      hot_tree_ios += new_miss - old_miss;
+      if (op_res == OP_RESULT::OK) {
+         ++lookups_hit_top;
+         return;
+      }
+
+      Payload old_v;
+      auto cold_key = tag_with_cold_bit(k);
+      //OLD_HIT_STAT_START;
+      auto res __attribute__((unused)) = cold_btree.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
+         memcpy(&old_v, tp->payload.value, sizeof(tp->payload)); 
+         }) ==
+            OP_RESULT::OK;
+      assert(res);
+      //OLD_HIT_STAT_END;
+
+      if (should_migrate()) {
+         ++upward_migrations;
+         OLD_HIT_STAT_START;
+         admit_element(k, v, true);
+         OLD_HIT_STAT_END;
+         hot_tree_ios += new_miss - old_miss;
+         if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
+            //OLD_HIT_STAT_START;
+            // remove from the cold partition
+            auto op_res __attribute__((unused)) = cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
+            //OLD_HIT_STAT_END;
+         }
+      } else {
+         cold_btree.updateSameSize(key_bytes, fold(key_bytes, cold_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
+            TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
+            tp->set_referenced();
+            tp->set_modified();
+            memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+         }, Payload::wal_update_generator);
+      }
+   }
+
+
+   void put(Key k, Payload& v) override {
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
+      u8 key_bytes[sizeof(Key)];
+      auto hot_key = tag_with_hot_bit(k);
+      HIT_STAT_START;
+      auto op_res = hot_btree.updateSameSize(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
+         TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
+         tp->set_referenced();
+         tp->set_modified();
+         memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+      }, Payload::wal_update_generator);
+      HIT_STAT_END;
+
+      if (op_res == OP_RESULT::OK) {
+         return;
+      }
+
+      if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
+         auto cold_key = tag_with_cold_bit(k);
+         //OLD_HIT_STAT_START;
+         // remove from the cold partition
+         auto op_res __attribute__((unused)) = cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
+         assert(op_res == OP_RESULT::OK);
+         //OLD_HIT_STAT_END;
+      }
+      // move to hot partition
+      admit_element(k, v, true);
+   }
+
+   double hot_btree_utilization(u64 entries, u64 pages) {
+      u64 minimal_pages = (entries) * (sizeof(Key) + sizeof(TaggedPayload)) / leanstore::storage::PAGE_SIZE;
+      return minimal_pages / (pages + 0.0);
+   }
+
+   double cold_btree_utilization(u64 entries, u64 pages) {
+      u64 minimal_pages = (entries) * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;
+      return minimal_pages / (pages + 0.0);
+   }
+
+   void report(u64 entries, u64 pages) override {
+      auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
+      std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
+      std::size_t hot_btree_pages = 0;
+      auto num_btree_hot_entries = btree_entries(hot_btree, hot_btree_pages);
+      std::size_t cold_btree_pages = 0;
+      auto num_btree_cold_entries = btree_entries(cold_btree, cold_btree_pages);
+      pages = hot_btree_pages + cold_btree_pages;
+      auto num_btree_entries = num_btree_cold_entries + num_btree_hot_entries;
+      std::cout << "Hot partition capacity in bytes " << hot_partition_capacity_bytes << std::endl;
+      std::cout << "Hot partition size in bytes " << hot_partition_size_bytes << std::endl;
+      std::cout << "BTree # entries " << num_btree_entries << std::endl;
+      std::cout << "BTree # hot entries " << num_btree_hot_entries << std::endl;
+      std::cout << "BTree # pages " << pages << std::endl;
+      std::cout << "Hot BTree height " << hot_btree.getHeight() << " # pages " << hot_btree_pages << " util " << hot_btree_utilization(num_btree_hot_entries, hot_btree_pages) << std::endl;
+      std::cout << "Cold BTree height " << cold_btree.getHeight() << " # pages " << cold_btree_pages << " util " << hot_btree_utilization(num_btree_cold_entries, cold_btree_pages) << std::endl;
+      auto minimal_pages = (num_btree_entries) * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;
+      std::cout << "BTree average fill factor " <<  (minimal_pages + 0.0) / pages << std::endl;
+      double btree_hit_rate = btree_buffer_hit / (btree_buffer_hit + btree_buffer_miss + 1.0);
+      std::cout << "BTree buffer hits/misses " <<  btree_buffer_hit << "/" << btree_buffer_miss << std::endl;
+      std::cout << "BTree buffer hit rate " <<  btree_hit_rate << " miss rate " << (1 - btree_hit_rate) << std::endl;
+      std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
+      std::cout << total_lookups<< " lookups, "  << lookups_hit_top << " lookup hit top" << " hot_tree_ios " << hot_tree_ios << " ios/tophit " << hot_tree_ios / (lookups_hit_top + 0.00)  << std::endl;
+      std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations" << std::endl;
+      std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01) << std::endl;
+      std::cout << "Average eviction bounding time " << eviction_bounding_time / (eviction_bounding_n) << std::endl;
+   }
+};
 
 }

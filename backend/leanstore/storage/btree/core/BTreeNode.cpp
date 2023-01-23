@@ -348,6 +348,13 @@ s32 BTreeNode::compareKeyWithBoundaries(const u8* key, u16 keyLength)
 // -------------------------------------------------------------------------------------
 Swip<BTreeNode>& BTreeNode::lookupInner(const u8* key, u16 keyLength)
 {
+   s16 dummy = -1;
+   return lookupInner(key, keyLength, dummy);
+}
+
+// -------------------------------------------------------------------------------------
+Swip<BTreeNode>& BTreeNode::lookupInner(const u8* key, u16 keyLength, s16 & pos_out)
+{
    s32 pos = lowerBound<false>(key, keyLength);
    if (pos == count)
       return upper;
