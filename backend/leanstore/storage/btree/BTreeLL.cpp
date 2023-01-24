@@ -17,13 +17,12 @@ namespace storage
 namespace btree
 {
 // -------------------------------------------------------------------------------------
-OP_RESULT BTreeLL::lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback, uint64_t & retries)
+OP_RESULT BTreeLL::lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback, bool mark_dirty)
 {
    volatile u32 mask = 1;
    while (true) {
       jumpmuTry()
       {
-         ++retries;
          HybridPageGuard<BTreeNode> leaf;
          findLeafCanJump(leaf, key, key_length);
          // -------------------------------------------------------------------------------------
@@ -41,6 +40,8 @@ OP_RESULT BTreeLL::lookup(u8* key, u16 key_length, function<void(const u8*, u16)
          if (pos != -1) {
             payload_callback(leaf->getPayload(pos), leaf->getPayloadLength(pos));
             leaf.recheck();
+            if (mark_dirty)
+               leaf.incrementGSN();
             jumpmu_return OP_RESULT::OK;
          } else {
             leaf.recheck();

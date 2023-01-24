@@ -36,7 +36,7 @@ class BTreeInterface
 {
   public:
    virtual OP_RESULT lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback) = 0;
-   virtual OP_RESULT lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback, uint64_t & retries) = 0;
+   virtual OP_RESULT lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback, bool mark_dirty) = 0;
    virtual OP_RESULT lookupForUpdate(u8* key, u16 key_length, function<bool(const u8*, u16)> payload_callback) = 0;
    virtual OP_RESULT insert(u8* key, u16 key_length, u8* value, u16 value_length) = 0;
    virtual OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length) = 0;

@@ -8,6 +8,7 @@
 #include "btreeolc/btreeolc.hpp"
 #include "LockManager/LockManager.hpp"
 #include "leanstore/utils/ScopedTimer.hpp"
+#include "leanstore/utils/DistributedCounter.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore
@@ -515,25 +516,47 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    OptimisticLockTable lock_table;
    leanstore::storage::btree::BTreeInterface& hot_btree;
    leanstore::storage::btree::BTreeInterface& cold_btree;
-   alignas(64) uint64_t hot_tree_ios = 0;
-   alignas(64) uint64_t btree_buffer_miss = 0;
-   alignas(64) uint64_t btree_buffer_hit = 0;
+
+   DistributedCounter<> hot_tree_ios;
+   DistributedCounter<> btree_buffer_miss;
+   DistributedCounter<> btree_buffer_hit;
+   //alignas(64) uint64_t hot_tree_ios = 0;
+   //alignas(64) uint64_t btree_buffer_miss = 0;
+   //alignas(64) uint64_t btree_buffer_hit = 0;
    DTID dt_id;
+
+   
+   DistributedCounter<> hot_partition_size_bytes;
+   DistributedCounter<> scan_ops;
+   DistributedCounter<> io_reads_scan;
    alignas(64) std::atomic<uint64_t> hot_partition_capacity_bytes;
-   alignas(64) std::size_t hot_partition_size_bytes = 0;
-   alignas(64) std::size_t scan_ops = 0;
-   alignas(64) std::size_t io_reads_scan = 0;
+   // alignas(64) std::size_t hot_partition_size_bytes = 0;
+   // alignas(64) std::size_t scan_ops = 0;
+   // alignas(64) std::size_t io_reads_scan = 0;
    bool inclusive = false;
    static constexpr double eviction_threshold = 0.7;
-   alignas(64) uint64_t eviction_items = 0;
-   alignas(64) uint64_t eviction_io_reads= 0;
-   alignas(64) uint64_t io_reads_snapshot = 0;
-   alignas(64) uint64_t io_reads_now = 0;
-   alignas(64) std::atomic<uint64_t> hot_partition_item_count = 0;
-   alignas(64) std::atomic<uint64_t> upward_migrations = 0;
-   alignas(64) std::atomic<uint64_t> downward_migrations = 0;
-   alignas(64) std::atomic<uint64_t> eviction_bounding_time = 0;
-   alignas(64) std::atomic<uint64_t> eviction_bounding_n = 0;
+
+   DistributedCounter<> eviction_items;
+   DistributedCounter<> eviction_io_reads;
+   DistributedCounter<> io_reads_snapshot;
+   DistributedCounter<> io_reads_now;
+   // alignas(64) uint64_t eviction_items = 0;
+   // alignas(64) uint64_t eviction_io_reads= 0;
+   // alignas(64) uint64_t io_reads_snapshot = 0;
+   // alignas(64) uint64_t io_reads_now = 0;
+
+   DistributedCounter<> hot_partition_item_count = 0;
+   DistributedCounter<> upward_migrations = 0;
+   DistributedCounter<> downward_migrations = 0;
+   DistributedCounter<> eviction_bounding_time = 0;
+   DistributedCounter<> eviction_bounding_n = 0;
+
+   // alignas(64) std::atomic<uint64_t> hot_partition_item_count = 0;
+   // alignas(64) std::atomic<uint64_t> upward_migrations = 0;
+   // alignas(64) std::atomic<uint64_t> downward_migrations = 0;
+   // alignas(64) std::atomic<uint64_t> eviction_bounding_time = 0;
+   // alignas(64) std::atomic<uint64_t> eviction_bounding_n = 0;
+
    u64 lazy_migration_threshold = 10;
    bool lazy_migration = false;
    struct alignas(1) TaggedPayload {
@@ -547,8 +570,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       void clear_referenced() { bits &= ~(2u); }
    };
    static_assert(sizeof(TaggedPayload) == sizeof(Payload) + 1, "!!!");
-   uint64_t total_lookups = 0;
-   uint64_t lookups_hit_top = 0;
+   DistributedCounter<> total_lookups = 0;
+   DistributedCounter<> lookups_hit_top = 0;
    Key clock_hand = 0;
    constexpr static u64 PartitionBitPosition = 63;
    constexpr static u64 PartitionBitMask = 0x8000000000000000;
@@ -967,11 +990,12 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       auto hot_key = tag_with_hot_bit(k);
       uint64_t old_miss, new_miss;
       OLD_HIT_STAT_START;
+      bool mark_dirty = utils::RandomGenerator::getRandU64(0, 1000) < 30;
       auto res = hot_btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          tp->set_referenced();
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
-         }) ==
+         }, mark_dirty) ==
             OP_RESULT::OK;
       OLD_HIT_STAT_END;
       hot_tree_ios += new_miss - old_miss;
@@ -1084,7 +1108,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       OptimisticLockGuard g(&lock_table, k);
       while (g.write_lock() == false);
       ++total_lookups;
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
       HIT_STAT_START;
@@ -1136,7 +1160,10 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
 
    void put(Key k, Payload& v) override {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
+      try_eviction();
+      OptimisticLockGuard g(&lock_table, k);
+      while (g.write_lock() == false);
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
       HIT_STAT_START;

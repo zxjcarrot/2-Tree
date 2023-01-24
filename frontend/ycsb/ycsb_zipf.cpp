@@ -106,7 +106,7 @@ double calculateMTPS(chrono::high_resolution_clock::time_point begin, chrono::hi
 void zipf_keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
    std::vector<YCSBKey> generated_keys;
    std::unordered_map<YCSBKey, int> unique_keys;
-   size_t n = 10000000;
+   size_t n = FLAGS_ycsb_tuple_count;
    for (size_t i = 0; i < n * 2; ++i) {
       YCSBKey key = zipf_gen->zipf_generator.rand() % n;
       generated_keys.push_back(key);
