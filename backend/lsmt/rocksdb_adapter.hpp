@@ -29,21 +29,23 @@ struct RocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
       }
-      options.write_buffer_size = 64 * 1024 * 1024;
+      options.write_buffer_size = 32 * 1024 * 1024;
       std::size_t block_cache_size = 0;
       std::size_t row_cache_size = 0;
+      //std::size_t write_buffer_count = options.max_write_buffer_number;
+      std::size_t write_buffer_count = 1;
       if (use_row_cache) {
          std::cout << "RocksDB record cache budget " << (row_cache_memory_budget_gib) << "gib" << std::endl;   
          std::cout << "RocksDB block cache budget " << (block_cache_memory_budget_gib) << "gib" << std::endl;
          block_cache_size = block_cache_memory_budget_gib * 1024ULL * 1024ULL * 1024ULL;
-         row_cache_size = row_cache_memory_budget_gib * 1024ULL * 1024ULL * 1024ULL - options.write_buffer_size * options.max_write_buffer_number;
+         row_cache_size = row_cache_memory_budget_gib * 1024ULL * 1024ULL * 1024ULL - options.write_buffer_size * write_buffer_count;
       } else {
          std::cout << "RocksDB block cache budget " << (block_cache_memory_budget_gib + row_cache_memory_budget_gib) << "gib" << std::endl;
-         block_cache_size = (row_cache_memory_budget_gib + block_cache_memory_budget_gib) * 1024ULL * 1024ULL * 1024ULL - options.write_buffer_size * options.max_write_buffer_number;
+         block_cache_size = (row_cache_memory_budget_gib + block_cache_memory_budget_gib) * 1024ULL * 1024ULL * 1024ULL - options.write_buffer_size * write_buffer_count;
       }
 
       std::cout << "RocksDB write_buffer_size " << options.write_buffer_size << std::endl;
-      std::cout << "RocksDB max_write_buffer_number " << options.max_write_buffer_number << std::endl;
+      std::cout << "RocksDB max_write_buffer_number " << write_buffer_count << std::endl;
 
       std::cout << "RocksDB row cache size " << row_cache_size / 1024.0 /1024.0/1024 << " gib" << std::endl;
       std::cout << "RocksDB block cache size " << block_cache_size / 1024.0 /1024.0/1024 << " gib" << std::endl;

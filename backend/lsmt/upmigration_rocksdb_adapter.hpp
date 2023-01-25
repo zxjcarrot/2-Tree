@@ -6,6 +6,7 @@
 // -------------------------------------------------------------------------------------
 #include "interface/StorageInterface.hpp"
 #include "leanstore/utils/RandomGenerator.hpp"
+#include "LockManager/LockManager.hpp"
 // -------------------------------------------------------------------------------------
 #include <atomic>
 #include <cassert>
@@ -19,6 +20,7 @@
 #include "rocksdb/perf_context.h"
 template <typename Key, typename Payload>
 struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
+   leanstore::OptimisticLockTable lock_table;
    rocksdb::DB* db;
    rocksdb::Options options;
    bool lazy_migration;
@@ -32,14 +34,16 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
       }
-      options.write_buffer_size = 64 * 1024 * 1024;
+      options.write_buffer_size = 32 * 1024 * 1024;
+      //std::size_t write_buffer_count = options.max_write_buffer_number;
+      std::size_t write_buffer_count = 1;
       std::size_t block_cache_size = 0;
       std::cout << "RocksDB with upward migration " << lazy_migration_threshold << std::endl;
       std::cout << "RocksDB block cache budget " << (block_cache_memory_budget_gib) << "gib" << std::endl;
-      block_cache_size = block_cache_memory_budget_gib * 1024ULL * 1024ULL * 1024ULL - options.write_buffer_size * options.max_write_buffer_number;
+      block_cache_size = block_cache_memory_budget_gib * 1024ULL * 1024ULL * 1024ULL - options.write_buffer_size * write_buffer_count;
 
       std::cout << "RocksDB write_buffer_size " << options.write_buffer_size << std::endl;
-      std::cout << "RocksDB max_write_buffer_number " << options.max_write_buffer_number << std::endl;
+      std::cout << "RocksDB max_write_buffer_number " << write_buffer_count << std::endl;
       
       std::cout << "RocksDB block cache size " << block_cache_size / 1024.0 /1024.0/1024 << " gib" << std::endl;
       rocksdb::DestroyDB(db_dir,options);
@@ -107,7 +111,7 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
       delete it;
    }
 
-   bool lookup_internal(Key k, Payload& v, bool from_update = false) {
+   bool lookup_internal(Key k, Payload& v, leanstore::OptimisticLockGuard & g, bool from_update = false) {
       ++total_lookups;
       rocksdb::ReadOptions options;
       u8 key_bytes[sizeof(Key)];
@@ -124,12 +128,18 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
          if (from_update == false) {
             if (io) {
                if (should_migrate()) {
+                  if (g.upgrade_to_write_lock() == false) { // obtain a write lock for migration
+                     return false;
+                  }
                   up_migrations++;
                   put(k, v);
                }
             } else {
                // no io, make sure we place the hottest data near the top of the LSM hiearchy
                if (leanstore::utils::RandomGenerator::getRandU64(0, hot_up_migrations) < 1) {
+                  if (g.upgrade_to_write_lock() == false) { // obtain a write lock for migration
+                     return false;
+                  }
                   hot_record_up_migrations++;
                   put(k, v);
                }
@@ -141,7 +151,16 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
    }
 
    bool lookup(Key k, Payload& v) {
-      return lookup_internal(k, v);
+      while (true) {
+         leanstore::OptimisticLockGuard g(&lock_table, k);
+         if (!g.read_lock()) {
+            continue;
+         }
+         bool res = lookup_internal(k, v, g);
+         if (g.validate()) {
+            return res;
+         }
+      }
    }
 
    void insert(Key k, Payload& v) {
@@ -150,8 +169,21 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
 
    void update(Key k, Payload& v) {
       Payload t;
-      //read
-      auto status __attribute__((unused)) = lookup_internal(k, t, true);
+
+      while (true) {
+         leanstore::OptimisticLockGuard g(&lock_table, k);
+         if (!g.read_lock()) {
+            continue;
+         }
+         bool res = lookup_internal(k, t, g, true);
+         if (g.validate()) {
+            break;
+         }
+      }
+      leanstore::OptimisticLockGuard g(&lock_table, k);
+      
+      while (g.write_lock() == false);
+
       //modify
       memcpy(&t, &v, sizeof(v));
       //write
