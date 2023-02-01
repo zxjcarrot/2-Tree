@@ -1327,7 +1327,6 @@ struct TwoBTreeAdapter : StorageInterface<Key, Payload> {
       constexpr std::size_t scan_buffer_cap = 64;
       int scan_buffer_len = 0;
       Key keys[scan_buffer_cap];
-      Payload payloads[scan_buffer_cap];
       bool tree_end = false;
       pages = 0;
       const char * last_leaf_frame = nullptr;
@@ -1450,7 +1449,6 @@ struct TwoBTreeAdapter : StorageInterface<Key, Payload> {
          }
          for (size_t i = 0; i< evict_keys.size(); ++i) {
             auto key = evict_keys[i];
-            auto tagged_payload = evict_payloads[i];
             assert(is_in_hot_partition(key));
             auto op_res = hot_btree.remove(key_bytes, fold(key_bytes, key));
             hot_partition_item_count--;
@@ -2099,7 +2097,6 @@ struct STX2BTreeAdapter : StorageInterface<Key, Payload> {
 
    void insert_btree(Key k, Payload& v)
    {
-      u8 key_bytes[sizeof(Key)];
       btree[k] = v;
    }
 

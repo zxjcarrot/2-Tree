@@ -79,9 +79,10 @@ class BufferManager
    inline BufferFrame& tryFastResolveSwip(Guard& swip_guard, Swip<BufferFrame>& swip_value)
    {
       if (swip_value.isHOT()) {
-         BufferFrame& bf = swip_value.bfRef();
+         BufferFrame* bf = swip_value.bfPtr();
          swip_guard.recheck();
-         return bf;
+         assert(bf != nullptr);
+         return *bf;
       } else {
          return resolveSwip(swip_guard, swip_value);
       }

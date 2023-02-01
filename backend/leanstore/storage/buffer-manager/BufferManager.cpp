@@ -197,8 +197,10 @@ BufferFrame& BufferManager::allocatePage()
 // -------------------------------------------------------------------------------------
 void BufferManager::reclaimPage(BufferFrame& bf)
 {
+   bf.header.latch.assertExclusivelyLatched();
    Partition& partition = getPartition(bf.header.pid);
    partition.freePage(bf.header.pid);
+   assert(bf.header.state != BufferFrame::STATE::FREE);
    // -------------------------------------------------------------------------------------
    if (bf.header.isWB) {
       // DO NOTHING ! we have a garbage collector ;-)
@@ -218,12 +220,15 @@ void BufferManager::reclaimPage(BufferFrame& bf)
 BufferFrame& BufferManager::resolveSwip(Guard& swip_guard, Swip<BufferFrame>& swip_value)
 {
    if (swip_value.isHOT()) {
-      BufferFrame& bf = swip_value.bfRef();
+      BufferFrame * bf = swip_value.bfPtr();
       swip_guard.recheck();
-      return bf;
+      assert(bf != nullptr);
+      return *bf;
    } else if (swip_value.isCOOL()) {
       BufferFrame* bf = swip_value.bfPtrAsHot();
+      assert(bf != nullptr);
       swip_guard.recheck();
+      assert(bf->header.state != BufferFrame::STATE::FREE);
       OptimisticGuard bf_guard(bf->header.latch, true);
       ExclusiveUpgradeIfNeeded swip_x_guard(swip_guard);  // parent
       ExclusiveGuard bf_x_guard(bf_guard);                // child
@@ -235,7 +240,10 @@ BufferFrame& BufferManager::resolveSwip(Guard& swip_guard, Swip<BufferFrame>& sw
    swip_guard.unlock();  // otherwise we would get a deadlock, P->G, G->P
    const PID pid = swip_value.asPageID();
    Partition& partition = getPartition(pid);
-   JMUW<std::unique_lock<std::mutex>> g_guard(partition.io_mutex);
+   JMUW<std::unique_lock<std::mutex>> g_guard(partition.io_mutex, std::try_to_lock);
+   if (g_guard->owns_lock() == false) {
+      jumpmu::jump();
+   }
    swip_guard.recheck();
    assert(!swip_value.isHOT());
    // -------------------------------------------------------------------------------------
@@ -324,7 +332,7 @@ BufferFrame& BufferManager::resolveSwip(Guard& swip_guard, Swip<BufferFrame>& sw
          // try to evict them when its IO is done
          bf->header.latch.assertNotExclusivelyLatched();
          assert(bf->header.state == BufferFrame::STATE::LOADED);
-         OptimisticGuard bf_guard(bf->header.latch);
+         OptimisticGuard bf_guard(bf->header.latch, true);
          ExclusiveUpgradeIfNeeded swip_x_guard(swip_guard);
          ExclusiveGuard bf_x_guard(bf_guard);
          // -------------------------------------------------------------------------------------

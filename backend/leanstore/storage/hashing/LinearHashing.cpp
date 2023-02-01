@@ -169,6 +169,7 @@ s32 LinearHashingNode::insert(const u8* key, u16 key_len, const u8* payload, u16
 void LinearHashTable::create(DTID dtid) {
    this->dt_id = dtid;
    this->table = new MappingTable(dtid);
+   this->sp.set(0, N);
    // pre-allocate N buckets
    for(int b = 0; b < N; ++b) {
       BufferFrame * dirNode = table->getDirNode(b);
@@ -201,17 +202,28 @@ OP_RESULT LinearHashTable::lookup(u8* key, u16 key_length, function<void(const u
     while (true) {
       jumpmuTry()
       {
-         u64 bucket = hash(key, key_length, i_);
+         //split_mtx.lock_shared();
+         auto pair1 = this->sp.load_power_and_buddy_bucket();
+         auto local_i = pair1.first;
+         auto buddy_bucket = pair1.second;
+         auto first_hash_bucket = hash(key, key_length, local_i);
+         u64 bucket = first_hash_bucket;
+         assert(buddy_bucket >= power2(local_i) * N);
+         auto s_ = buddy_bucket - power2(local_i) * N;
          if (bucket < s_) {
-            bucket = hash(key, key_length, i_ + 1);
+            bucket = hash(key, key_length, local_i + 1);
          }
+         //split_mtx.unlock_shared();
 
          BufferFrame* dirNode = table->getDirNode(bucket);
          
          HybridPageGuard<DirectoryNode> p_guard(dirNode);
          Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[bucket % kDirNodeBucketPtrCount];
+         if (hash_node.bf == nullptr) {
+            jumpmu::jump(); // Split is still ongoing, retry
+         }
          HybridPageGuard<LinearHashingNode> target_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::SPIN);
-         p_guard.recheck();
+         p_guard.unlock();
          s32 slot_in_node = target_guard->find(key, key_length);
          if (slot_in_node != -1) {
             payload_callback(target_guard->getPayload(slot_in_node), target_guard->getPayloadLength(slot_in_node));
@@ -240,6 +252,13 @@ OP_RESULT LinearHashTable::lookup(u8* key, u16 key_length, function<void(const u
             }
          }
 
+         {
+            auto pair2 = this->sp.load_power_and_buddy_bucket();
+            if (pair2 != pair1) {
+               jumpmu::jump();
+            }
+         }
+
          jumpmu_return OP_RESULT::NOT_FOUND;
       }
       jumpmuCatch()
@@ -257,17 +276,33 @@ OP_RESULT LinearHashTable::lookupForUpdate(u8* key, u16 key_length, std::functio
     while (true) {
       jumpmuTry()
       {
-         u64 bucket = hash(key, key_length, i_);
+         auto pair1 = this->sp.load_power_and_buddy_bucket();
+         auto local_i = pair1.first;
+         auto buddy_bucket = pair1.second;
+         auto first_hash_bucket = hash(key, key_length, local_i);
+         u64 bucket = first_hash_bucket;
+         assert(buddy_bucket >= power2(local_i) * N);
+         auto s_ = buddy_bucket - power2(local_i) * N;
          if (bucket < s_) {
-            bucket = hash(key, key_length, i_ + 1);
+            bucket = hash(key, key_length, local_i + 1);
          }
 
          BufferFrame* dirNode = table->getDirNode(bucket);
 
          HybridPageGuard<DirectoryNode> p_guard(dirNode);
          Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[bucket % kDirNodeBucketPtrCount];
+         if (hash_node.bf == nullptr) {
+            jumpmu_continue;
+         }
          HybridPageGuard<LinearHashingNode> target_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
+         target_guard.toExclusive();
          p_guard.recheck();
+         {
+            auto pair2 = this->sp.load_power_and_buddy_bucket();
+            if (pair2 != pair1) {
+               jumpmu_continue;
+            }
+         }
          s32 slot_in_node = target_guard->find(key, key_length);
          if (slot_in_node != -1) {
             bool updated = payload_callback(target_guard->getPayload(slot_in_node), target_guard->getPayloadLength(slot_in_node));
@@ -314,7 +349,8 @@ OP_RESULT LinearHashTable::lookupForUpdate(u8* key, u16 key_length, std::functio
 
 u64 LinearHashTable::countPages() {
    u64 count = 0;
-   for (u64 b = 0; b < s_buddy.load(); ++b) {
+   auto buddy_bucket = sp.load_buddy_bucket();
+   for (u64 b = 0; b < buddy_bucket; ++b) {
       BufferFrame* dirNode = table->getDirNode(b);
 
       while (true) {
@@ -323,6 +359,9 @@ u64 LinearHashTable::countPages() {
          {
             HybridPageGuard<DirectoryNode> p_guard(dirNode);
             Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[b % kDirNodeBucketPtrCount];
+            if (hash_node.bf == nullptr) {
+               jumpmu_break;
+            }
             HybridPageGuard<LinearHashingNode> target_s_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::SPIN);
             p_guard.recheck();
             sum += 1;
@@ -363,6 +402,9 @@ OP_RESULT LinearHashTable::iterate(u64 bucket,
       {
          HybridPageGuard<DirectoryNode> p_guard(dirNode);
          Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[bucket % kDirNodeBucketPtrCount];
+         if (hash_node.bf == nullptr) {
+            jumpmu_break;
+         }
          HybridPageGuard<LinearHashingNode> target_s_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::SHARED);
          p_guard.recheck();
          u64 count = target_s_guard->count;
@@ -380,7 +422,9 @@ OP_RESULT LinearHashTable::iterate(u64 bucket,
             while (true) {
                Swip<LinearHashingNode>& c_swip = target_s_guard->overflow;
                pp_guard = std::move(target_s_guard);
+               pp_guard.unlock();
                target_s_guard = std::move(HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::SHARED));
+               pp_guard.recheck();
                count = target_s_guard->count;
                for (std::size_t i = 0; i < count; ++i) {
                   bool should_continue = callback(target_s_guard->getKey(i), target_s_guard->getKeyLen(i),
@@ -410,7 +454,8 @@ OP_RESULT LinearHashTable::iterate(u64 bucket,
 
 u64 LinearHashTable::countEntries() {
    u64 count = 0;
-   for (u64 b = 0; b < s_buddy.load(); ++b) {
+   auto buddy_bucket = sp.load_buddy_bucket();
+   for (u64 b = 0; b < buddy_bucket; ++b) {
       BufferFrame* dirNode = table->getDirNode(b);
 
       while (true) {
@@ -419,6 +464,9 @@ u64 LinearHashTable::countEntries() {
          {
             HybridPageGuard<DirectoryNode> p_guard(dirNode);
             Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[b % kDirNodeBucketPtrCount];
+            if (hash_node.bf == nullptr) {
+               jumpmu_break;
+            }
             HybridPageGuard<LinearHashingNode> target_s_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::SPIN);
             p_guard.recheck();
             sum += target_s_guard->count;
@@ -457,20 +505,46 @@ OP_RESULT LinearHashTable::remove(u8* key, u16 key_length) {
    while (true) {
       jumpmuTry()
       {
-         auto local_i = i_.load();
-         u64 bucket = hash(key, key_length, local_i);
+         //split_mtx.lock_shared();
+         auto pair1 = this->sp.load_power_and_buddy_bucket();
+         auto local_i = pair1.first;
+         auto buddy_bucket = pair1.second;
+         auto first_hash_bucket = hash(key, key_length, local_i);
+         u64 bucket = first_hash_bucket;
+         assert(buddy_bucket >= power2(local_i) * N);
+         auto s_ = buddy_bucket - power2(local_i) * N;
          if (bucket < s_) {
             bucket = hash(key, key_length, local_i + 1);
          }
+         //split_mtx.unlock_shared();
 
          BufferFrame* dirNode = table->getDirNode(bucket);
 
          try_merge = false;
          HybridPageGuard<DirectoryNode> p_guard(dirNode);
          Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[bucket % kDirNodeBucketPtrCount];
+         if (hash_node.bf == nullptr) {
+            jumpmu_continue;
+         }
          HybridPageGuard<LinearHashingNode> target_x_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
          target_x_guard.toExclusive();
          p_guard.recheck();
+         {
+            auto pair2 = this->sp.load_power_and_buddy_bucket();
+            // if (pair2 != pair1) {
+            //    jumpmu::jump();
+            // }
+            auto power = pair2.first;
+            auto bucket2 = hash(key, key_length, power);
+            auto s_2 = pair2.second - N * power2(power);
+            if (bucket2 < s_2) {
+               power = power + 1;
+               bucket2 = hash(key, key_length, power);
+            }
+            if (bucket2 != bucket) {
+               jumpmu::jump();
+            }
+         }
          if (target_x_guard->freeSpaceAfterCompaction() > LinearHashingNode::underFullSize) {
             try_merge = true;
          }
@@ -522,13 +596,20 @@ OP_RESULT LinearHashTable::remove(u8* key, u16 key_length) {
          WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
       }
    }
-
+   //try_merge = false;
    if (try_merge) {
-      auto local_i = i_.load();
-      u64 bucket = hash(key, key_length, local_i);
+      //split_mtx.lock_shared();
+      auto pair1 = this->sp.load_power_and_buddy_bucket();
+      auto local_i = pair1.first;
+      auto buddy_bucket = pair1.second;
+      auto first_hash_bucket = hash(key, key_length, local_i);
+      u64 bucket = first_hash_bucket;
+      assert(buddy_bucket >= power2(local_i) * N);
+      auto s_ = buddy_bucket - power2(local_i) * N;
       if (bucket < s_) {
          bucket = hash(key, key_length, local_i + 1);
       }
+      //split_mtx.unlock_shared();
 
       BufferFrame* dirNode = table->getDirNode(bucket);
       merge_chain(bucket, dirNode);
@@ -537,7 +618,7 @@ OP_RESULT LinearHashTable::remove(u8* key, u16 key_length) {
 }
 
 double LinearHashTable::current_load_factor() {
-   return data_stored.load() / (s_buddy.load() * sizeof(LinearHashingNode) + 0.0001);
+   return data_stored.load() / (sp.load_buddy_bucket() * sizeof(LinearHashingNode) + 0.0001);
 }
 
 void LinearHashTable::merge_chain(u64 bucket, BufferFrame* dirNode) {
@@ -548,7 +629,7 @@ void LinearHashTable::merge_chain(u64 bucket, BufferFrame* dirNode) {
       Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[bucket % kDirNodeBucketPtrCount];
       HybridPageGuard<LinearHashingNode> target_x_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
       target_x_guard.toExclusive();
-      p_guard.recheck();
+      p_guard.unlock();
       if (target_x_guard->overflow.raw()) {
          HybridPageGuard<LinearHashingNode> pp_guard;
          while (true) {
@@ -595,38 +676,54 @@ public:
 OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_length) {
    volatile u32 mask = 1;
    OP_RESULT ret = OP_RESULT::OK;
-   bool need_allocate_node = false;
-   HybridPageGuard<LinearHashingNode> * overflow_node = nullptr;
-
-   DeferCode c([&](){
-      if (overflow_node && overflow_node->bf) {
-         (*overflow_node).reclaim();
-      }
-      if (overflow_node) {
-         delete overflow_node;
-      }
-   });
 
    while (true) {
       jumpmuTry()
       {
-         auto local_i = i_.load();
-         u64 bucket = hash(key, key_length, local_i);
+         //split_mtx.lock_shared();
+         auto pair1 = this->sp.load_power_and_buddy_bucket();
+         auto local_i = pair1.first;
+         auto buddy_bucket = pair1.second;
+         auto first_hash_bucket = hash(key, key_length, local_i);
+         u64 bucket = first_hash_bucket;
+         assert(buddy_bucket >= power2(local_i) * N);
+         auto s_ = buddy_bucket - power2(local_i) * N;
          if (bucket < s_) {
             bucket = hash(key, key_length, local_i + 1);
          }
+         //split_mtx.unlock_shared();
 
          BufferFrame* dirNode = table->getDirNode(bucket);
 
          HybridPageGuard<DirectoryNode> p_guard(dirNode);
          Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[bucket % kDirNodeBucketPtrCount];
+         if (hash_node.bf == nullptr) {
+            jumpmu_continue;
+         }
          HybridPageGuard<LinearHashingNode> target_x_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
          target_x_guard.toExclusive();
          p_guard.recheck();
+         {
+            auto pair2 = this->sp.load_power_and_buddy_bucket();
+            // if (pair2 != pair1) {
+            //    jumpmu::jump();
+            // }
+            auto power = pair2.first;
+            auto bucket2 = hash(key, key_length, power);
+            auto s_2 = pair2.second - N * power2(power);
+            if (bucket2 < s_2) {
+               power = power + 1;
+               bucket2 = hash(key, key_length, power);
+            }
+            if (bucket2 != bucket) {
+               jumpmu::jump();
+            }
+         }
          s32 slot_in_node = target_x_guard->find(key, key_length);
          if (slot_in_node != -1) {
             data_stored.fetch_sub(target_x_guard->getKeyLen(slot_in_node) + target_x_guard->getPayloadLength(slot_in_node));
             target_x_guard->update(slot_in_node, key, key_length, value, value_length);
+            target_x_guard.incrementGSN();
             data_stored.fetch_add(key_length + value_length);
             ret = OP_RESULT::OK;
             jumpmu_break;
@@ -653,6 +750,7 @@ OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_
                if (slot_in_node != -1) {
                   data_stored.fetch_sub(target_x_guard->getKeyLen(slot_in_node) + target_x_guard->getPayloadLength(slot_in_node));
                   target_x_guard->update(slot_in_node, key, key_length, value, value_length);
+                  target_x_guard.incrementGSN();
                   data_stored.fetch_add(key_length + value_length);
                   ret = OP_RESULT::OK;
                   jump_break_out = true;
@@ -674,45 +772,24 @@ OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_
             }
          }
           
-         need_allocate_node = true;
-         if (overflow_node) {
-            // add an overflow node and trigger split
-            HybridPageGuard<LinearHashingNode> node;
-            node = std::move(*overflow_node);
-            *overflow_node = HybridPageGuard<LinearHashingNode>();
-            auto overflow_node_guard = ExclusivePageGuard<LinearHashingNode>(std::move(node));
-            overflow_node_guard.init(true, bucket);
-            assert(overflow_node_guard->canInsert(key_length, value_length) == true);
-            s32 slot_idx = overflow_node_guard->insert(key, key_length, value, value_length);
-            assert(slot_idx != -1);
-            assert(target_x_guard->overflow.raw() == 0);
-            target_x_guard->overflow = overflow_node_guard.bf();
-            data_stored.fetch_add(key_length + value_length);
-            target_x_guard.incrementGSN();
-            ret = OP_RESULT::OK; 
-            jumpmu_break;
-         }
+         // add an overflow node and trigger split
+         HybridPageGuard<LinearHashingNode> node(dt_id, true);
+         auto overflow_node_guard = ExclusivePageGuard<LinearHashingNode>(std::move(node));
+         overflow_node_guard.init(true, bucket);
+         assert(overflow_node_guard->canInsert(key_length, value_length) == true);
+         s32 slot_idx = overflow_node_guard->insert(key, key_length, value, value_length);
+         assert(slot_idx != -1);
+         assert(target_x_guard->overflow.raw() == 0);
+         target_x_guard->overflow = overflow_node_guard.swip();
+         data_stored.fetch_add(key_length + value_length);
+         target_x_guard.incrementGSN();
+         ret = OP_RESULT::OK; 
+         jumpmu_break;
       }
       jumpmuCatch()
       {
          BACKOFF_STRATEGIES()
          WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
-      }
-
-      if (need_allocate_node && overflow_node == nullptr) {
-         while (true)
-         {
-            jumpmuTry()
-            {
-               overflow_node = new HybridPageGuard<LinearHashingNode>(dt_id);
-               jumpmu_break;
-            }
-            jumpmuCatch()
-            {
-               BACKOFF_STRATEGIES()
-               WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
-            }
-         }
       }
    }
 
@@ -729,39 +806,57 @@ OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_
    volatile u32 mask = 1;
    bool need_allocate_node = false;
    OP_RESULT ret = OP_RESULT::OK;
-   HybridPageGuard<LinearHashingNode> * overflow_node = nullptr;
-
-   DeferCode c([&](){
-      if (overflow_node && overflow_node->bf) {
-         (*overflow_node).reclaim();
-      }
-      
-      delete overflow_node;
-   });
 
    while (true) {
       jumpmuTry()
       {
-         auto local_i = i_.load();
-         u64 bucket = hash(key, key_length, local_i);
-         
+         //split_mtx.lock_shared();
+         auto pair1 = this->sp.load_power_and_buddy_bucket();
+         auto local_i = pair1.first;
+         auto buddy_bucket = pair1.second;
+         auto first_hash_bucket = hash(key, key_length, local_i);
+         u64 bucket = first_hash_bucket;
+         assert(buddy_bucket >= power2(local_i) * N);
+         auto s_ = buddy_bucket - power2(local_i) * N;
          if (bucket < s_) {
             bucket = hash(key, key_length, local_i + 1);
          }
+         //split_mtx.unlock_shared();
 
          BufferFrame* dirNode = table->getDirNode(bucket);
 
          HybridPageGuard<DirectoryNode> p_guard(dirNode);
          Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[bucket % kDirNodeBucketPtrCount];
+         if (hash_node.bf == nullptr) {
+            jumpmu::jump();
+         }
          HybridPageGuard<LinearHashingNode> target_x_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
          target_x_guard.toExclusive();
-         p_guard.recheck();
+         {
+            auto pair2 = this->sp.load_power_and_buddy_bucket();
+            // if (pair2 != pair1) {
+            //    jumpmu::jump();
+            // }
+            auto power = pair2.first;
+            auto bucket2 = hash(key, key_length, power);
+            auto s_2 = pair2.second - N * power2(power);
+            if (bucket2 < s_2) {
+               power = power + 1;
+               bucket2 = hash(key, key_length, power);
+            }
+            if (bucket2 != bucket) {
+               jumpmu::jump();
+            }
+         }
+         p_guard.unlock();
+         
          s32 slot_in_node = target_x_guard->find(key, key_length);
          if (slot_in_node != -1) {
             ret = OP_RESULT::DUPLICATE;
             jumpmu_break;
          } else if (target_x_guard->overflow.raw() == 0) {
             if (target_x_guard->canInsert(key_length, value_length)) {
+               p_guard.recheck();
                target_x_guard->insert(key, key_length, value, value_length);   
                target_x_guard.incrementGSN();
                data_stored.fetch_add(key_length + value_length);
@@ -787,6 +882,7 @@ OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_
                }
                if (target_x_guard->overflow.raw() == 0) {
                   if (target_x_guard->canInsert(key_length, value_length)) {
+                     p_guard.recheck();
                      target_x_guard->insert(key, key_length, value, value_length);
                      target_x_guard.incrementGSN();
                      data_stored.fetch_add(key_length + value_length);
@@ -800,45 +896,24 @@ OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_
                jumpmu_break;
             }
          }
-         need_allocate_node = true;
-         if (overflow_node) {
-            // add an overflow node and trigger split
-            HybridPageGuard<LinearHashingNode> node;
-            node = std::move(*overflow_node);
-            *overflow_node = HybridPageGuard<LinearHashingNode>();
-            auto overflow_node_guard = ExclusivePageGuard<LinearHashingNode>(std::move(node));
-            overflow_node_guard.init(true, bucket);
-            assert(overflow_node_guard->canInsert(key_length, value_length) == true);
-            s32 slot_idx = overflow_node_guard->insert(key, key_length, value, value_length);
-            assert(slot_idx != -1);
-            assert(target_x_guard->overflow.raw() == 0);
-            target_x_guard->overflow = overflow_node_guard.bf();
-            target_x_guard.incrementGSN();
-            data_stored.fetch_add(key_length + value_length);
-            ret = OP_RESULT::OK;
-            jumpmu_break;
-         }
+         // add an overflow node and trigger split
+         HybridPageGuard<LinearHashingNode> node(dt_id, true);
+         auto overflow_node_guard = ExclusivePageGuard<LinearHashingNode>(std::move(node));
+         overflow_node_guard.init(true, bucket);
+         assert(overflow_node_guard->canInsert(key_length, value_length) == true);
+         s32 slot_idx = overflow_node_guard->insert(key, key_length, value, value_length);
+         assert(slot_idx != -1);
+         assert(target_x_guard->overflow.raw() == 0);
+         target_x_guard->overflow = overflow_node_guard.swip();
+         target_x_guard.incrementGSN();
+         data_stored.fetch_add(key_length + value_length);
+         ret = OP_RESULT::OK;
+         jumpmu_break;
       }
       jumpmuCatch()
       {
          BACKOFF_STRATEGIES()
          WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
-      }
-
-      if (need_allocate_node && overflow_node == nullptr) {
-         while (true)
-         {
-            jumpmuTry()
-            {
-               overflow_node = new HybridPageGuard<LinearHashingNode>(dt_id);
-               jumpmu_break;
-            }
-            jumpmuCatch()
-            {
-               BACKOFF_STRATEGIES()
-               WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
-            }
-         }
       }
    }
 
@@ -849,51 +924,43 @@ OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_
 }
 
 void LinearHashTable::split() {
+   restart:
    split_mtx.lock();
-   auto buddy_bucket = s_buddy.fetch_add(1);
-   auto local_i = i_.load();
-   auto split_bucket = buddy_bucket - power2(i_) * N;
-   assert(buddy_bucket >= power2(i_) * N);
+   std::pair<u32, u32> pair1 = this->sp.load_power_and_buddy_bucket();
+
+   auto local_i = pair1.first;
+   auto old_buddy_bucket = pair1.second;
+   if (this_round_started_splits + 1 > this_round_split_target) {
+      assert(old_buddy_bucket == power2(local_i + 1) * N);
+      split_mtx.unlock();
+      goto restart;
+   }
+   auto buddy_bucket = old_buddy_bucket;
+   bool res = this->sp.compare_swap(local_i, old_buddy_bucket, local_i, old_buddy_bucket + 1);
+   assert(res);
+   auto split_bucket = buddy_bucket - power2(local_i) * N;
+   //assert(s_ <= split_bucket);
+   assert(buddy_bucket >= power2(local_i) * N);
+   ++this_round_started_splits;
    split_mtx.unlock();
    BufferFrame* splitDirNode = table->getDirNode(split_bucket);
    BufferFrame* buddy_bucket_node = table->getDirNode(buddy_bucket);
+
+   // allocate enough nodes so we do not have to allocate while holding write locks.
+   constexpr size_t kNTempNodes = 4;
+
+   std::vector<LinearHashingNode> split_bucket_tmp(1, LinearHashingNode(false, split_bucket));
+   std::vector<LinearHashingNode> buddy_bucket_tmp(1, LinearHashingNode(false, buddy_bucket));
    while(true) {
       bool succeed = false;
-      u32 temp_nodes_used_idx = 0;
-      // allocate enough nodes so we do not have to allocate while holding write locks.
-      constexpr size_t kNTempNodes = 4;
-      std::vector<HybridPageGuard<LinearHashingNode>> temp_nodes(kNTempNodes);
-      bool allocated = false;
-      {
-         jumpmuTry()
-         {
-            for (size_t i = 0; i < 4; ++i) {
-               temp_nodes[i] = HybridPageGuard<LinearHashingNode>(dt_id);
-               temp_nodes[i].toExclusive();
-            }
-            allocated = true;
-         }
-         
-         jumpmuCatch()
-         {
-            assert(allocated == false);
-         }
-         if (allocated == false) {
-            for (size_t i = 0; i < 4; ++i) {
-               if (temp_nodes[i].bf) {
-                  temp_nodes[i].toExclusive();
-                  temp_nodes[i].reclaim();
-               }
-            }
-            continue;
-         }
-      }
       // partition the data from the split bucket into two chains of buckets
       // handle overflow chains properly
-      std::vector<LinearHashingNode> split_bucket_tmp;
-      std::vector<LinearHashingNode> buddy_bucket_tmp;
-
-      HybridPageGuard<LinearHashingNode> original_split_bucket_chain_head_guard;
+      
+      std::vector<HybridPageGuard<LinearHashingNode>> split_bucket_x_guards(kNTempNodes);
+      u32 split_bucket_x_guard_used_idx = 0;
+      assert(split_bucket_tmp.size() == 1);
+      assert(buddy_bucket_tmp.size() == 1);
+      bool must_be_no_jump = false;
       jumpmuTry()
       {
          HybridPageGuard<DirectoryNode> p_guard(splitDirNode);
@@ -902,165 +969,163 @@ void LinearHashTable::split() {
          Swip<LinearHashingNode> & first_hash_node = p_guard->bucketPtrs[split_bucket % kDirNodeBucketPtrCount];
          HybridPageGuard<LinearHashingNode> target_x_guard(p_guard, first_hash_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
          target_x_guard.toExclusive();
+         p_guard.unlock();
 
+         split_bucket_x_guards[split_bucket_x_guard_used_idx++] = std::move(target_x_guard);
 
-         split_bucket_tmp.clear();
-         split_bucket_tmp.resize(1, LinearHashingNode(false, split_bucket));
-         buddy_bucket_tmp.clear();
-         buddy_bucket_tmp.resize(1, LinearHashingNode(false, buddy_bucket));
-         int idx = 0;
+         // obtain x locks on all the pages of this bucket
          while (true) {
-            for (int i = 0; i < target_x_guard->count; ++i) {
-               auto target_bucket = hash(target_x_guard->getKey(i), target_x_guard->getKeyLen(i), local_i + 1);
+            Swip<LinearHashingNode>& overflow_swip = split_bucket_x_guards[split_bucket_x_guard_used_idx - 1]->overflow;
+            if (overflow_swip.raw() == 0) {
+               break;
+            }
+            split_bucket_x_guards[split_bucket_x_guard_used_idx] = std::move(HybridPageGuard<LinearHashingNode>(split_bucket_x_guards[split_bucket_x_guard_used_idx - 1], overflow_swip, LATCH_FALLBACK_MODE::EXCLUSIVE));
+            split_bucket_x_guards[split_bucket_x_guard_used_idx - 1].toExclusive();
+            split_bucket_x_guards[split_bucket_x_guard_used_idx].toExclusive();
+            split_bucket_x_guard_used_idx++;
+         }
+
+         HybridPageGuard<LinearHashingNode> temp_node_1(dt_id, false);
+         HybridPageGuard<LinearHashingNode> temp_node_2(dt_id, false);
+
+         //p_guard.toExclusive();
+         // from now on, there should be no jumps
+         must_be_no_jump = true;
+         // partition the data in the split bucket into two buckets
+         for (std::size_t j = 0; j < split_bucket_x_guard_used_idx; ++j) {
+            HybridPageGuard<LinearHashingNode> & x_guard = split_bucket_x_guards[j];
+            for (int i = 0; i < x_guard->count; ++i) {
+               auto original_bucket = hash(x_guard->getKey(i), x_guard->getKeyLen(i), local_i);
+               auto target_bucket = hash(x_guard->getKey(i), x_guard->getKeyLen(i), local_i + 1);
+               assert(original_bucket == split_bucket);
                if (target_bucket == split_bucket) {
-                  if (split_bucket_tmp.back().canInsert(target_x_guard->getKeyLen(i), target_x_guard->getPayloadLength(i)) == false) {
+                  if (split_bucket_tmp.back().canInsert(x_guard->getKeyLen(i), x_guard->getPayloadLength(i)) == false) {
                      split_bucket_tmp.push_back(LinearHashingNode(true, split_bucket));
                   }
-                  assert(split_bucket_tmp.back().canInsert(target_x_guard->getKeyLen(i), target_x_guard->getPayloadLength(i)));
-                  auto slot = split_bucket_tmp.back().insert(target_x_guard->getKey(i), target_x_guard->getKeyLen(i), target_x_guard->getPayload(i), target_x_guard->getPayloadLength(i));
+                  assert(split_bucket_tmp.back().canInsert(x_guard->getKeyLen(i), x_guard->getPayloadLength(i)));
+                  auto slot = split_bucket_tmp.back().insert(x_guard->getKey(i), x_guard->getKeyLen(i), x_guard->getPayload(i), x_guard->getPayloadLength(i));
                   assert(slot != -1);
                } else {
                   assert(target_bucket == buddy_bucket);
-                  if (buddy_bucket_tmp.back().canInsert(target_x_guard->getKeyLen(i), target_x_guard->getPayloadLength(i)) == false) {
+                  if (buddy_bucket_tmp.back().canInsert(x_guard->getKeyLen(i), x_guard->getPayloadLength(i)) == false) {
                      buddy_bucket_tmp.push_back(LinearHashingNode(true, buddy_bucket));
                   }
-                  assert(buddy_bucket_tmp.back().canInsert(target_x_guard->getKeyLen(i), target_x_guard->getPayloadLength(i)));
-                  auto slot = buddy_bucket_tmp.back().insert(target_x_guard->getKey(i), target_x_guard->getKeyLen(i), target_x_guard->getPayload(i), target_x_guard->getPayloadLength(i));
+                  assert(buddy_bucket_tmp.back().canInsert(x_guard->getKeyLen(i), x_guard->getPayloadLength(i)));
+                  auto slot = buddy_bucket_tmp.back().insert(x_guard->getKey(i), x_guard->getKeyLen(i), x_guard->getPayload(i), x_guard->getPayloadLength(i));
                   assert(slot != -1);
                }
             }
-            if (pp_x_guard.swip().bfPtrAsHot() == first_hash_node.bfPtrAsHot()) {
-               pp_x_guard.bf->header.latch.assertExclusivelyLatched();
-               original_split_bucket_chain_head_guard = std::move(pp_x_guard);
-               original_split_bucket_chain_head_guard.bf->header.latch.assertExclusivelyLatched();
-            }
-            ++idx;
-            if (target_x_guard->overflow.raw() == 0) {
-               if (original_split_bucket_chain_head_guard.bf == nullptr) {
-                  target_x_guard.bf->header.latch.assertExclusivelyLatched();
-                  original_split_bucket_chain_head_guard = std::move(target_x_guard);
-                  original_split_bucket_chain_head_guard.bf->header.latch.assertExclusivelyLatched();
-               }
-               break;
-            }
-            
-            Swip<LinearHashingNode>& overflow_swip = target_x_guard->overflow;
-            target_x_guard.bf->header.latch.assertExclusivelyLatched();
-            pp_x_guard = std::move(target_x_guard);
-            pp_x_guard.bf->header.latch.assertExclusivelyLatched();
-            target_x_guard = std::move(HybridPageGuard<LinearHashingNode>(pp_x_guard, overflow_swip, LATCH_FALLBACK_MODE::EXCLUSIVE));
-            pp_x_guard.toExclusive();
-            target_x_guard.toExclusive();
          }
-         p_guard.recheck();
-         
-         // fill temp nodes for split bucket
-         HybridPageGuard<LinearHashingNode> * split_bucket_first_node_guard = &temp_nodes[temp_nodes_used_idx];
-         HybridPageGuard<LinearHashingNode> * prev_guard = nullptr;
+         assert(split_bucket_tmp.size() <= split_bucket_x_guard_used_idx);
+
          for (std::size_t i = 0; i < split_bucket_tmp.size(); ++i) {
-            assert(temp_nodes_used_idx < kNTempNodes);
-            HybridPageGuard<LinearHashingNode> * this_node_guard = &temp_nodes[temp_nodes_used_idx++];
-            (*this_node_guard)->overflow = nullptr;
-            if (prev_guard != nullptr) {
-               (*prev_guard)->overflow = (*this_node_guard).swip();
-               (*prev_guard).incrementGSN();
+            HybridPageGuard<LinearHashingNode> & x_guard = split_bucket_x_guards[i];
+            bool old_overflow = x_guard->is_overflow;
+            SwipType old_overflow_swip = x_guard->overflow;
+            auto bucket = x_guard->bucket;
+
+            assert(sizeof(*x_guard.ptr()) == sizeof(split_bucket_tmp[i]));
+            memcpy(x_guard.ptr(), &split_bucket_tmp[i], sizeof(split_bucket_tmp[i]));
+            
+            x_guard->is_overflow = old_overflow;
+            x_guard->overflow = old_overflow_swip;
+            x_guard->bucket = x_guard->bucket;
+            x_guard.incrementGSN();
+         }
+         //assert(split_bucket_tmp.size() + buddy_bucket_tmp.size() >= split_bucket_x_guard_used_idx);
+         u32 buddy_bucket_guard_idx = split_bucket_tmp.size();
+         HybridPageGuard<LinearHashingNode> * buddy_bucket_head_page_x_guard = nullptr;
+
+         assert(split_bucket_tmp.size() <= split_bucket_x_guard_used_idx);
+         HybridPageGuard<LinearHashingNode> & x_guard = split_bucket_x_guards[split_bucket_tmp.size() - 1];
+         x_guard->overflow = nullptr;
+         x_guard.incrementGSN();
+
+         //assert(temp_nodes_used_idx == 0);
+         if (split_bucket_x_guard_used_idx - split_bucket_tmp.size() < buddy_bucket_tmp.size()) {
+            temp_node_1.keep_alive = true;
+            split_bucket_x_guards[split_bucket_x_guard_used_idx] = std::move(temp_node_1);
+            split_bucket_x_guard_used_idx++;
+            if (split_bucket_x_guard_used_idx - split_bucket_tmp.size() < buddy_bucket_tmp.size()) {
+               temp_node_2.keep_alive = true;
+               split_bucket_x_guards[split_bucket_x_guard_used_idx] = std::move(temp_node_2);
+               split_bucket_x_guard_used_idx++;
             }
-            memcpy((*this_node_guard)->ptr(), &split_bucket_tmp[i], sizeof(LinearHashingNode));
-            this_node_guard->incrementGSN();
-            prev_guard = this_node_guard;
          }
 
+         assert(split_bucket_x_guard_used_idx - split_bucket_tmp.size() >= buddy_bucket_tmp.size());
+         assert(split_bucket_x_guard_used_idx <= kNTempNodes);
 
-         // Fill the buddy chain with contents from original chain
-         prev_guard = nullptr;
-         HybridPageGuard<LinearHashingNode> * buddy_bucket_first_node_guard = &temp_nodes[temp_nodes_used_idx];
+         buddy_bucket_head_page_x_guard = &split_bucket_x_guards[split_bucket_tmp.size()];
+
          for (std::size_t i = 0; i < buddy_bucket_tmp.size(); ++i) {
-            assert(temp_nodes_used_idx < kNTempNodes);
-            HybridPageGuard<LinearHashingNode> * this_node_guard = &temp_nodes[temp_nodes_used_idx++];
-            (*this_node_guard)->overflow = nullptr;
-            if (prev_guard != nullptr) {
-               (*prev_guard)->overflow = (*this_node_guard).swip();
-               (*prev_guard).incrementGSN();
+            HybridPageGuard<LinearHashingNode> & x_guard = split_bucket_x_guards[split_bucket_tmp.size() + i];
+            assert(sizeof(*x_guard.ptr()) == sizeof(buddy_bucket_tmp[i]));
+            memcpy(x_guard.ptr(), &buddy_bucket_tmp[i], sizeof(buddy_bucket_tmp[i]));
+            x_guard->overflow = nullptr;
+            x_guard->bucket = buddy_bucket;
+            if (i > 0) {
+               split_bucket_x_guards[split_bucket_tmp.size() + i - 1]->overflow = x_guard.swip();
+            } else {
+               x_guard->is_overflow = false;
             }
-            memcpy((*this_node_guard)->ptr(), &buddy_bucket_tmp[i], sizeof(LinearHashingNode));
-            this_node_guard->incrementGSN();
-            prev_guard = this_node_guard;
+            x_guard.incrementGSN();
          }
-         
-         p_guard.recheck();
-         p_guard.toExclusive();
 
          HybridPageGuard<DirectoryNode> buddy_p_guard;
          if (buddy_bucket_node != splitDirNode) { // Check if the bucket pointer is in the same directory node to avoid double locking 
             buddy_p_guard = std::move(HybridPageGuard<DirectoryNode>(buddy_bucket_node));
-            buddy_p_guard.toExclusive();
+            //buddy_p_guard.toExclusive();
          }
 
+
+         split_mtx.lock();
+         //s_ = s_ + 1;
+         ++this_round_finished_splits;
+         assert(this_round_finished_splits <= this_round_started_splits);
+         if(this_round_finished_splits == this_round_started_splits && this_round_started_splits == this_round_split_target) { 
+            std::pair<u32, u32> pair2 = this->sp.load_power_and_buddy_bucket();
+            u32 old_power = pair2.first;
+            u32 old_buddy_bucket = pair2.second;
+            u32 new_power = old_power + 1;
+            u32 new_buddy_bucket = old_buddy_bucket;
+            this_round_split_target = N * power2(new_power); // next round
+            this_round_finished_splits = this_round_started_splits = 0; // reset all counters
+            bool res = this->sp.compare_swap(old_power, old_buddy_bucket, new_power, new_buddy_bucket);
+            assert(res);
+         }
+         split_mtx.unlock();
          // Link directory slot with new chain
          if (buddy_bucket_node == splitDirNode) {
-            p_guard->bucketPtrs[buddy_bucket % kDirNodeBucketPtrCount] = buddy_bucket_first_node_guard->swip();
+            assert(p_guard->bucketPtrs[buddy_bucket % kDirNodeBucketPtrCount].bf == nullptr);
+            p_guard->bucketPtrs[buddy_bucket % kDirNodeBucketPtrCount] = (*buddy_bucket_head_page_x_guard).swip();
             p_guard.incrementGSN();
          } else {
-            buddy_p_guard->bucketPtrs[buddy_bucket % kDirNodeBucketPtrCount] = buddy_bucket_first_node_guard->swip();
+            assert(buddy_p_guard->bucketPtrs[buddy_bucket % kDirNodeBucketPtrCount].bf == nullptr);
+            buddy_p_guard->bucketPtrs[buddy_bucket % kDirNodeBucketPtrCount] = (*buddy_bucket_head_page_x_guard).swip();
             buddy_p_guard.incrementGSN();
          }
          
-         // Link directory slot with new chain
-         p_guard->bucketPtrs[split_bucket % kDirNodeBucketPtrCount] = split_bucket_first_node_guard->swip();
-
+         // Release whatever pages that are left
+         for (std::size_t i = buddy_bucket_tmp.size() + split_bucket_tmp.size(); i < split_bucket_x_guard_used_idx; ++i) {
+            HybridPageGuard<LinearHashingNode> & x_guard = split_bucket_x_guards[i];
+            x_guard.reclaim();
+         }
          succeed = true;
+         //split_dir_node_guard = std::move(p_guard);
       }
       jumpmuCatch()
       {
+         assert(must_be_no_jump == false);
          WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
          assert(succeed == false);
       }
-      if (succeed == false) {
-         // reclaim all in temp_nodes
-         for (size_t i = 0; i < temp_nodes.size(); ++i) {
-            temp_nodes[i].reclaim();
-         }
-      } else {
-         // reclaim unsed nodes left in temp_nodes
-         for (size_t i = temp_nodes_used_idx; i < temp_nodes.size(); ++i) {
-            temp_nodes[i].reclaim();
-         }
 
-         if (original_split_bucket_chain_head_guard.swip().raw()) {
-            while (true) {
-               jumpmuTry()
-               {
-                  // reclaim nodes in orignal split_bucket chain
-                  Swip<LinearHashingNode>& c_swip = original_split_bucket_chain_head_guard->overflow;
-                  if (c_swip.raw()) {
-                     HybridPageGuard<LinearHashingNode> target_x_guard(original_split_bucket_chain_head_guard, c_swip, LATCH_FALLBACK_MODE::EXCLUSIVE);
-                     target_x_guard.toExclusive();
-                     original_split_bucket_chain_head_guard.reclaim();
-                     original_split_bucket_chain_head_guard = std::move(target_x_guard);
-                  } else {
-                     original_split_bucket_chain_head_guard.reclaim();
-                     original_split_bucket_chain_head_guard = HybridPageGuard<LinearHashingNode>();
-                     jumpmu_break;
-                  }
-               }
-               jumpmuCatch()
-               {
-                  WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
-               }
-            }
-         }
+      if (succeed) {
          break;
       }
    }
 
-   split_mtx.lock();
-   s_ = s_ + 1;
-   if (s_ >= N * power2(i_)) { // next round
-      assert(s_buddy >= N * power2(i_));
-      i_ = i_ + 1;
-      s_ = 0;
-   }
-   split_mtx.unlock();
 }
 
 
@@ -1086,7 +1151,7 @@ struct ParentSwipHandler LinearHashTable::findParent(void* ht_obj, BufferFrame& 
    BufferFrame* dirNode = ht.table->getDirNode(bucket);
    
    // -------------------------------------------------------------------------------------
-   HybridPageGuard<DirectoryNode> p_guard(dirNode);
+   HybridPageGuard<DirectoryNode> p_guard(dirNode, dirNode);
    Swip<LinearHashingNode>& c_swip = p_guard->bucketPtrs[bucket % kDirNodeBucketPtrCount];
    if (c_swip.bfPtrAsHot() == &to_find) {
       p_guard.recheck();
@@ -1129,6 +1194,7 @@ struct ParentSwipHandler LinearHashTable::findParent(void* ht_obj, BufferFrame& 
    }
 
    jumpmu::jump(); // did not find
+   return {.swip = c_swip.cast<BufferFrame>(), .parent_guard = std::move(p_guard.guard), .parent_bf = dirNode};
 }
 
 

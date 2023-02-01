@@ -197,12 +197,13 @@ void LeanStore::startProfilingThread()
             table.add_row({std::to_string(seconds), cr_table.get("0", "tx"), cr_table.get("0", "tx_abort"), cr_table.get("0", "gct_committed_tx"),
                            bm_table.get("0", "w_mib"), bm_table.get("0", "r_mib"), std::to_string(instr_per_tx), std::to_string(cycles_per_tx),
                            std::to_string(cpu_table.workers_agg_events["CPU"]), std::to_string(l1_per_tx), cr_table.get("0", "wal_total"),
-                           cr_table.get("0", "wal_read_gib"), cr_table.get("0", "wal_write_gib"), cr_table.get("0", "gct_rounds"), dt_table.get("0", "split_merge_count"), dt_table.get("0", "dt_restarts_read"),
+                           cr_table.get("0", "wal_read_gib"), cr_table.get("0", "wal_write_gib"), cr_table.get("0", "gct_rounds"), dt_table.get("0", "split_merge_count"), dt_table.get("0", "dt_restarts_read") + dt_table.get("1", "dt_restarts_read") + dt_table.get("2", "dt_restarts_read") + dt_table.get("3", "dt_restarts_read"),
                            std::to_string(read_iops), std::to_string(write_iops), std::to_string(read_bw), std::to_string(write_bw), std::to_string(dev_util)});
             // -------------------------------------------------------------------------------------
             table.format().width(10);
             table.column(0).format().width(5);
-            table.column(1).format().width(10);
+            table.column(1).format().width(12);
+            table.column(15).format().width(12);
             // -------------------------------------------------------------------------------------
             auto print_table = [](tabulate::Table& table, std::function<bool(u64)> predicate) {
                std::stringstream ss;

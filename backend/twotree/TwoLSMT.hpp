@@ -203,7 +203,6 @@ struct TwoRocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       u8 key_bytes[sizeof(Key)];
       std::vector<Key> evict_keys;
       std::vector<TaggedPayload> evict_payloads;
-      Key evict_key;
       Payload evict_payload;
       bool victim_found = false;
 
@@ -221,7 +220,6 @@ struct TwoRocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
             continue;
          }
          auto real_key = leanstore::unfold(*(Key*)(it->key().data()));
-         evict_key = real_key;
          clock_hand = real_key;
          victim_found = true;
          evict_keys.push_back(real_key);
@@ -704,7 +702,6 @@ struct RocksDBTwoCFAdapter : public leanstore::StorageInterface<Key, Payload> {
       u8 key_bytes[sizeof(Key)];
       std::vector<Key> evict_keys;
       std::vector<TaggedPayload> evict_payloads;
-      Key evict_key;
       Payload evict_payload;
       bool victim_found = false;
 
@@ -726,7 +723,6 @@ struct RocksDBTwoCFAdapter : public leanstore::StorageInterface<Key, Payload> {
             continue;
          }
          auto real_key = leanstore::unfold(*(Key*)(it->key().data()));
-         evict_key = real_key;
          clock_hand = real_key;
          victim_found = true;
          evict_keys.push_back(real_key);

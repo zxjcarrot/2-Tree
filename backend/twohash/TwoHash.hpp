@@ -7,6 +7,8 @@
 #include "ART/ARTIndex.hpp"
 #include "stx/btree_map.h"
 #include "leanstore/BTreeAdapter.hpp"
+#include "leanstore/utils/DistributedCounter.hpp"
+#include "LockManager/LockManager.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore
@@ -45,26 +47,27 @@ auto old_miss = WorkerCounters::myCounters().io_reads.load();
 
 template <typename Key, typename Payload>
 struct TwoHashAdapter : StorageInterface<Key, Payload> {
+   OptimisticLockTable lock_table;
    leanstore::storage::hashing::LinearHashTable & hot_hash_table;
    leanstore::storage::hashing::LinearHashTable & cold_hash_table;
 
-   uint64_t hot_ht_ios = 0;
-   uint64_t ht_buffer_miss = 0;
-   uint64_t ht_buffer_hit = 0;
+   DistributedCounter<> hot_ht_ios = 0;
+   DistributedCounter<> ht_buffer_miss = 0;
+   DistributedCounter<> ht_buffer_hit = 0;
    DTID dt_id;
    std::size_t hot_partition_capacity_bytes;
-   std::size_t hot_partition_size_bytes = 0;
-   std::size_t scan_ops = 0;
-   std::size_t io_reads_scan = 0;
+   DistributedCounter<> hot_partition_size_bytes = 0;
+   DistributedCounter<> scan_ops = 0;
+   DistributedCounter<> io_reads_scan = 0;
    bool inclusive = false;
    static constexpr double eviction_threshold = 0.5;
-   uint64_t eviction_items = 0;
-   uint64_t eviction_io_reads= 0;
-   uint64_t io_reads_snapshot = 0;
-   uint64_t io_reads_now = 0;
-   uint64_t hot_partition_item_count = 0;
-   std::size_t upward_migrations = 0;
-   std::size_t downward_migrations = 0;
+   DistributedCounter<> eviction_items = 0;
+   DistributedCounter<> eviction_io_reads= 0;
+   DistributedCounter<> io_reads_snapshot = 0;
+   DistributedCounter<> io_reads_now = 0;
+   DistributedCounter<> hot_partition_item_count = 0;
+   DistributedCounter<> upward_migrations = 0;
+   DistributedCounter<> downward_migrations = 0;
    u64 lazy_migration_threshold = 10;
    bool lazy_migration = false;
    struct alignas(1) TaggedPayload {
@@ -137,50 +140,75 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       }
    }
 
-   static constexpr int kClockWalkSteps = 4; // # number of buckets
+   static constexpr u16 kClockWalkSteps = 4;
+   alignas(64) std::atomic<u64> eviction_round_ref_counter[2];
+   alignas(64) std::atomic<u64> eviction_round{0};
+   alignas(64) std::mutex eviction_mutex;
    void evict_a_bunch() {
-      int steps = kClockWalkSteps; // number of buckets to walk
-      u64 start_key = clock_hand;
-      if (start_key == std::numeric_limits<Key>::max()) {
-         start_key = tag_with_hot_bit(std::numeric_limits<Key>::min());
+      u64 this_eviction_round;
+      u32 start_bucket;
+      u32 end_bucket;
+      {
+         std::lock_guard<std::mutex> g(eviction_mutex);
+         start_bucket = clock_hand;
+         end_bucket = clock_hand + kClockWalkSteps;
+         u32 buckets = hot_hash_table.countBuckets();
+         this_eviction_round = eviction_round.load();
+         
+         if (eviction_round_ref_counter[1 - (this_eviction_round % 2)] != 0) {
+            return; // There are evictors working in the previous round, retry later
+         }
+
+         if (end_bucket > buckets) { // rewind
+            end_bucket = buckets;
+            clock_hand = 0;
+            eviction_round++; // end of the bucket scan, switch to the next round
+         } else {
+            clock_hand = end_bucket;
+         }
+
+         // Bump the ref count so that evictors in the next round won't start 
+         // until all of the evictors in this round finish
+         eviction_round_ref_counter[this_eviction_round % 2]++;
       }
 
       u8 key_bytes[sizeof(Key)];
       std::vector<Key> evict_keys;
+      evict_keys.reserve(512);
+      std::vector<u64> evict_keys_lock_versions;
+      evict_keys_lock_versions.reserve(512);
       std::vector<TaggedPayload> evict_payloads;
-      Key evict_key;
-      Payload evict_payload;
+      evict_payloads.reserve(512);
       bool victim_found = false;
       auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
-      while (steps--) {
+      for (size_t b = start_bucket; b != end_bucket; ++b) {
          auto evict_keys_size_snapshot = evict_keys.size();
-         hot_hash_table.iterate(clock_hand,
-         [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
-            auto real_key = unfold(*(Key*)(key));
-            assert(key_length == sizeof(Key));
-            TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(value));
-            assert(value_length == sizeof(TaggedPayload));
-            if (tp->referenced() == true) {
-               tp->clear_referenced();
+         hot_hash_table.iterate(b,
+            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+               auto real_key = unfold(*(Key*)(key));
+               assert(key_length == sizeof(Key));
+               TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(value));
+               assert(value_length == sizeof(TaggedPayload));
+               if (tp->referenced() == true) {
+                  tp->clear_referenced();
+               } else {
+                  LockGuardProxy g(&lock_table, real_key);
+                  if (g.read_lock()) { // Skip evicting records that are write-locked
+                     victim_found = true;
+                     evict_keys.emplace_back(real_key);
+                     evict_payloads.emplace_back(*tp);
+                     evict_keys_lock_versions.emplace_back(g.get_version());
+                  }
+               }
                return true;
-            }
-            evict_key = real_key;
-            evict_payload = tp->payload;
-            victim_found = true;
-            evict_keys.push_back(real_key);
-            evict_payloads.emplace_back(*tp);
-            if (evict_keys.size() >= 512) {
-               return false;
-            }
-            return true;
-         }, [&](){
-            evict_keys.resize(evict_keys_size_snapshot);
-            evict_payloads.resize(evict_keys_size_snapshot);
-         });
-         clock_hand = (clock_hand + 1) % hot_hash_table.countBuckets();
+            }, [&](){
+               evict_keys.resize(evict_keys_size_snapshot);
+               evict_payloads.resize(evict_keys_size_snapshot);
+               evict_keys_lock_versions.resize(evict_keys_size_snapshot);
+            });
       }
-      
+   
       auto new_miss = WorkerCounters::myCounters().io_reads.load();
       assert(new_miss >= old_miss);
       if (old_miss == new_miss) {
@@ -190,14 +218,27 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       }
 
       if (victim_found) {
+         std::size_t evicted_count = 0;
          for (size_t i = 0; i< evict_keys.size(); ++i) {
             auto key = evict_keys[i];
+            LockGuardProxy write_guard(&lock_table, key);
+            if (write_guard.write_lock() == false) { // Skip eviction if it is undergoing migration or modification
+               continue;
+            }
+            auto key_lock_version_from_scan = evict_keys_lock_versions[i];
+            if (write_guard.more_than_one_writer_since(key_lock_version_from_scan)) {
+               //continue;
+               // There has been other writes to this key in the hot tree between the scan and the write locking above
+               // Need to update the payload content by re-reading it from the hot tree
+               auto res = hot_hash_table.lookup(key_bytes, fold(key_bytes, key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+                  TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
+                  evict_payloads[i] = *tp;
+                  }) == leanstore::storage::hashing::OP_RESULT::OK;
+               assert(res);
+            }
+            evicted_count++;
             auto tagged_payload = evict_payloads[i];
             assert(is_in_hot_partition(key));
-            // auto op_res = hot_hash_table.remove(key_bytes, fold(key_bytes, key));
-            // hot_partition_item_count--;
-            // assert(op_res == OP_RESULT::OK);
-            // hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
             if (inclusive) {
                if (tagged_payload.modified()) {
                   upsert_cold_partition(strip_off_partition_bit(key), tagged_payload.payload); // Cold partition
@@ -205,24 +246,20 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
             } else { // exclusive, put it back in the on-disk B-Tree
                insert_partition(strip_off_partition_bit(key), tagged_payload.payload, true); // Cold partition
             }
-            ++downward_migrations;
-         }
-
-         for (size_t i = 0; i< evict_keys.size(); ++i) {
-            auto key = evict_keys[i];
-            auto tagged_payload = evict_payloads[i];
             assert(is_in_hot_partition(key));
             auto op_res = hot_hash_table.remove(key_bytes, fold(key_bytes, key));
             hot_partition_item_count--;
             assert(op_res == leanstore::storage::hashing::OP_RESULT::OK);
             hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
+            ++downward_migrations;
          }
-         
          auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
          assert(io_reads_new >= io_reads_old);
          eviction_io_reads += io_reads_new - io_reads_old;
-         eviction_items += evict_keys.size();
+         eviction_items += evicted_count;
       }
+
+      eviction_round_ref_counter[this_eviction_round % 2]--;
    }
 
 
@@ -232,10 +269,11 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       }
    }
    
-   static constexpr int kEvictionCheckInterval = 50;
-   int eviction_count_down = kEvictionCheckInterval;
+   static constexpr int kEvictionCheckInterval = 300;
+   DistributedCounter<> eviction_count_down = kEvictionCheckInterval;
    void try_eviction() {
-      if (--eviction_count_down == 0) {
+      --eviction_count_down;
+      if (eviction_count_down.load() <= 0) {
          if (cache_under_pressure()) {
             evict_a_bunch();
          }
@@ -244,7 +282,6 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    }
 
    void admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
-      try_eviction();
       insert_partition(strip_off_partition_bit(k), v, false, dirty, referenced); // Hot partition
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
    }
@@ -256,14 +293,31 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       return true;
    }
 
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
-     
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) { ensure(false); }
+   
+   bool lookup(Key k, Payload & v) override {
+      bool ret = false;
+      while (true) {
+         LockGuardProxy g(&lock_table, k);
+         if (!g.read_lock()) {
+            continue;
+         }
+         bool res = lookup_internal(k, v, g);
+         if (g.validate()) {
+            ret = res;
+            break;
+         }
+      }
+      if (ret == true) {
+         try_eviction();
+      }
+      return ret;
    }
 
-   bool lookup(Key k, Payload& v) override
+   bool lookup_internal(Key k, Payload& v, LockGuardProxy & g)
    {
       ++total_lookups;
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       TaggedPayload tp;
       // try hot partition first
@@ -273,7 +327,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       auto res = hot_hash_table.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          tp->set_referenced();
-         memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
+         memcpy(&v, &tp->payload, sizeof(tp->payload)); 
          }) ==
             leanstore::storage::hashing::OP_RESULT::OK;
       OLD_HIT_STAT_END;
@@ -286,12 +340,15 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       auto cold_key = tag_with_cold_bit(k);
       res = cold_hash_table.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused))) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
+         memcpy(&v, &tp->payload, sizeof(tp->payload)); 
          }) ==
             leanstore::storage::hashing::OP_RESULT::OK;
 
       if (res) {
          if (should_migrate()) {
+            if (g.upgrade_to_write_lock() == false) {
+               return false;
+            }
             ++upward_migrations;
             if (inclusive == false) {
                //OLD_HIT_STAT_START;
@@ -310,6 +367,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       return res;
    }
 
+
    void upsert_cold_partition(Key k, Payload & v) {
       u8 key_bytes[sizeof(Key)];
       Key key = tag_with_cold_bit(k);
@@ -317,19 +375,9 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       tp.set_modified();
       tp.set_referenced();
       tp.payload = v;
-      //HIT_STAT_START;
-      // auto op_res = cold_hash_table.updateSameSize(key_bytes, fold(key_bytes, key), [&](u8* payload, u16 payload_length) {
-      //    TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-      //    tp->set_referenced();
-      //    memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
-      // }, Payload::wal_update_generator);
-      //HIT_STAT_END;
 
       auto op_res = cold_hash_table.upsert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
       assert(op_res == leanstore::storage::hashing::OP_RESULT::OK);
-      // if (op_res == OP_RESULT::NOT_FOUND) {
-      //    insert_partition(k, v, true);
-      // }
    }
 
    // hot_or_cold: false => hot partition, true => cold partition
@@ -366,8 +414,12 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
 
    void insert(Key k, Payload& v) override
    {
+      try_eviction();
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
-      //admit_element(k, v);
+      LockGuardProxy g(&lock_table, k);
+      
+      while (g.write_lock() == false);
+
       if (inclusive) {
          admit_element(k, v, true, false);
       } else {
@@ -375,9 +427,16 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       }
    }
 
+   bool remove(Key k) override { 
+      ensure(false); // not supported yet
+   }
+
    void update(Key k, Payload& v) override {
+      try_eviction();
+      LockGuardProxy g(&lock_table, k);
+      while (g.write_lock() == false);
       ++total_lookups;
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
       HIT_STAT_START;
@@ -385,7 +444,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
          TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
          tp->set_referenced();
          tp->set_modified();
-         memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+         memcpy(&tp->payload, &v, sizeof(Payload)); 
          return true;
       });
       HIT_STAT_END;
@@ -400,10 +459,13 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       //OLD_HIT_STAT_START;
       auto res __attribute__((unused)) = cold_hash_table.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         memcpy(&old_v, tp->payload.value, sizeof(tp->payload)); 
-         }) ==
-            leanstore::storage::hashing::OP_RESULT::OK;
-      assert(res);
+         memcpy(&old_v, &tp->payload, sizeof(tp->payload)); 
+         });
+         
+      if(res == leanstore::storage::hashing::OP_RESULT::NOT_FOUND){
+         return;
+      }
+      assert(res == leanstore::storage::hashing::OP_RESULT::OK);
       //OLD_HIT_STAT_END;
 
       if (should_migrate()) {
@@ -423,7 +485,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
             TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
             tp->set_referenced();
             tp->set_modified();
-            memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+            memcpy(&tp->payload, &v, sizeof(Payload)); 
             return true;
          }) == leanstore::storage::hashing::OP_RESULT::OK;
          assert(res);
@@ -432,7 +494,10 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
 
 
    void put(Key k, Payload& v) override {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load(); try_eviction();});
+      try_eviction();
+      LockGuardProxy g(&lock_table, k);
+      while (g.write_lock() == false);
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
       HIT_STAT_START;

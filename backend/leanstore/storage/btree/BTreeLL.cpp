@@ -17,7 +17,7 @@ namespace storage
 namespace btree
 {
 // -------------------------------------------------------------------------------------
-OP_RESULT BTreeLL::lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback, bool mark_dirty)
+OP_RESULT BTreeLL::lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback, bool & mark_dirty)
 {
    volatile u32 mask = 1;
    while (true) {

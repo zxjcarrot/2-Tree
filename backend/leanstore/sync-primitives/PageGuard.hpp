@@ -50,12 +50,21 @@ class HybridPageGuard
       syncGSN();
       jumpmu_registerDestructor();
    }
+   // I: Root case
+   HybridPageGuard(BufferFrame* bf, BufferFrame* bf2) : bf(bf), guard(bf->header.latch)
+   {
+      assert(bf == bf2);
+      guard.toOptimisticOrJump();
+      syncGSN();
+      jumpmu_registerDestructor();
+   }
    // -------------------------------------------------------------------------------------
    // I: Lock coupling
    template <typename T2>
    HybridPageGuard(HybridPageGuard<T2>& p_guard, Swip<T>& swip, const LATCH_FALLBACK_MODE if_contended = LATCH_FALLBACK_MODE::SPIN)
        : bf(&BMC::global_bf->tryFastResolveSwip(p_guard.guard, swip.template cast<BufferFrame>())), guard(bf->header.latch)
    {
+      assert(bf);
       if (if_contended == LATCH_FALLBACK_MODE::SPIN) {
          guard.toOptimisticSpin();
       } else if (if_contended == LATCH_FALLBACK_MODE::EXCLUSIVE) {
@@ -63,6 +72,8 @@ class HybridPageGuard
       } else if (if_contended == LATCH_FALLBACK_MODE::SHARED) {
          guard.toOptimisticOrShared();
       }
+      auto s = bf->header.state;
+      assert(s != BufferFrame::STATE::FREE);
       syncGSN();
       jumpmu_registerDestructor();
       // -------------------------------------------------------------------------------------
@@ -96,8 +107,9 @@ class HybridPageGuard
    template <typename T2>
    constexpr HybridPageGuard& operator=(HybridPageGuard<T2>&& other)
    {
-      bf = other.bf;
       guard = std::move(other.guard);
+      bf = other.bf;
+      other.bf = nullptr;
       keep_alive = other.keep_alive;
       return *this;
    }

@@ -5,6 +5,7 @@
 #include "leanstore/sync-primitives/PageGuard.hpp"
 #include "leanstore/utils/RandomGenerator.hpp"
 #include "leanstore/utils/FNVHash.hpp"
+#include <shared_mutex>
 
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
@@ -27,7 +28,7 @@ using SwipType=Swip<LinearHashingNode>;
 static constexpr int kDirNodeBucketPtrCount = EFFECTIVE_PAGE_SIZE / sizeof(u64);
 struct DirectoryNode {
    SwipType bucketPtrs[kDirNodeBucketPtrCount];
-   u8 padding[EFFECTIVE_PAGE_SIZE - kDirNodeBucketPtrCount * sizeof(u64)];
+   u8 padding[EFFECTIVE_PAGE_SIZE - sizeof(bucketPtrs)];
    DirectoryNode() {
       memset(bucketPtrs, 0, sizeof(bucketPtrs));
    }
@@ -97,8 +98,8 @@ class LinearHashTable
    // -------------------------------------------------------------------------------------
    u64 countPages();
    u64 countEntries();
-   u64 countBuckets() { return s_buddy.load(); }
-   u64 powerMultiplier()  { return i_.load(); }
+   u64 countBuckets() { return sp.load_buddy_bucket(); }
+   u64 powerMultiplier()  { return sp.load_power(); }
    // -------------------------------------------------------------------------------------
    static void iterateChildrenSwips(void*, BufferFrame& bf, std::function<bool(Swip<BufferFrame>&)> callback);
    static struct ParentSwipHandler findParent(void * ht_object, BufferFrame& to_find);
@@ -119,11 +120,55 @@ class LinearHashTable
 private:
    constexpr static double kSplitLoadFactor = 0.8;
    constexpr static u32 N = 128;
-   std::atomic<u64> i_{0};
-   std::atomic<u64> s_{0};
+   constexpr static u64 kPowerBits = 8;
+   constexpr static u64 kPowerOffset = 64 - 8;
+   constexpr static u64 kPowerMask = ((1ull << kPowerBits) - 1)  << kPowerOffset;
+   constexpr static u64 kBuddyBucketOffset = 0;;
+   constexpr static u64 kBuddyBucketBits = 64 - kPowerBits;
+   constexpr static u64 kBuddyBucketMask = ((1ull << kBuddyBucketBits) - 1)  << kBuddyBucketOffset;
+
+   
+   struct split_pointer {
+      std::atomic<u64> w{N};
+
+      u64 make_word(u32 power, u32 buddy_bucket) {
+         return ((u64)power) << kPowerOffset | buddy_bucket;
+      }
+
+      void set(u32 power, u32 buddy_bucket) {
+         w.store(make_word(power, buddy_bucket));
+      }
+
+      std::pair<u32, u32> load_power_and_buddy_bucket() {
+         auto v = w.load();
+         return std::pair<u32, u32>((kPowerMask & v) >> kPowerOffset, (kBuddyBucketMask & v) >> kBuddyBucketOffset);
+      }
+
+      u32 load_buddy_bucket() {
+         auto v = w.load();
+         return (kBuddyBucketMask & v) >> kBuddyBucketOffset;
+      }
+
+      u32 load_power() {
+         auto v = w.load();
+         return (kPowerMask & v) >> kPowerOffset;
+      }
+
+      bool compare_swap(u32 old_power, u32 old_buddy_bucket, u32 new_power, u32 new_buddy_bucket) {
+         u64 old_v = make_word(old_power, old_buddy_bucket);
+         u64 new_v = make_word(new_power, new_buddy_bucket);
+         return w.compare_exchange_strong(old_v, new_v);
+      }
+   };
+   std::atomic<u64> this_round_started_splits{0};
+   std::atomic<u64> this_round_finished_splits{0};
+   std::atomic<u64> this_round_split_target{N};
+   //std::atomic<u64> i_{0};
+   //std::atomic<u64> s_{0};
    std::atomic<u64> data_stored{0};
-   std::atomic<u64> s_buddy{N}; // invariant: s + N * 2^i = s_buddy.
-   std::mutex split_mtx;
+   //std::atomic<u64> s_buddy{N}; // invariant: s + N * 2^i = s_buddy.
+   struct split_pointer sp;
+   std::shared_mutex split_mtx;
    MappingTable * table = nullptr;
 public:
    DTID dt_id;
@@ -168,6 +213,13 @@ struct LinearHashingNode : public LinearHashingNodeHeader {
    u8 padding[left_space_to_waste];
 
    LinearHashingNode(bool is_overflow, u64 bucket) : LinearHashingNodeHeader(bucket, is_overflow) {}
+
+   void clear() {
+      this->count = 0;
+      this->space_used = 0;
+      this->data_offset = static_cast<u16>(EFFECTIVE_PAGE_SIZE);
+      this->bucket = 0;
+   }
 
    u16 freeSpace() { 
       u64 metadata_used = reinterpret_cast<u8*>(slot + count) - ptr();

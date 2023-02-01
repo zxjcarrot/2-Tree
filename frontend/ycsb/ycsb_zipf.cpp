@@ -49,6 +49,7 @@ DEFINE_uint32(ycsb_tx_count, 0, "default = tuples");
 DEFINE_bool(verify, false, "");
 DEFINE_string(index_type, "BTree", "");
 DEFINE_bool(lsmt_use_record_cache, false, "use record cache?");
+DEFINE_string(lsmt_db_path, "./", "directory for storing lsm-tree files");
 DEFINE_uint32(cached_btree, 0, "");
 DEFINE_uint32(cached_btree_node_size_type, 0, "");
 DEFINE_bool(inclusive_cache, false, "");
@@ -276,17 +277,17 @@ int main(int argc, char** argv)
    } else if (FLAGS_index_type == kIndexTypeTrieBTree) {
       adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeLSMT) {
-      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_use_record_cache, "/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, false, FLAGS_cache_lazy_migration));
+      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_use_record_cache, FLAGS_lsmt_db_path, top_tree_size_gib, FLAGS_dram_gib, false, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeUpLSMT) {
-      adapter.reset(new UpMigrationRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", FLAGS_dram_gib + top_tree_size_gib, false, FLAGS_cache_lazy_migration));
+      adapter.reset(new UpMigrationRocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, FLAGS_dram_gib + top_tree_size_gib, false, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2LSMT) {
-      adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+      adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexType2LSMT_CF){
-      adapter.reset(new RocksDBTwoCFAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+      adapter.reset(new RocksDBTwoCFAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeTrieLSMT) {
-      adapter.reset(new TrieRocksDBAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
+      adapter.reset(new TrieRocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeAntiCache) { 
-      adapter.reset(new AntiCacheAdapter<YCSBKey, YCSBPayload>("/mnt/disks/nvme/rocksdb", top_tree_size_gib, FLAGS_dram_gib));
+      adapter.reset(new AntiCacheAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, top_tree_size_gib, FLAGS_dram_gib));
    } else if (FLAGS_index_type == kIndexTypeSTX2BTree) {
       adapter.reset(new STX2BTreeAdapter<YCSBKey, YCSBPayload>(top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeSTXBTree) {
@@ -430,7 +431,7 @@ int main(int argc, char** argv)
       cout << "Warming up" << endl;
       auto t_start = std::chrono::high_resolution_clock::now();
       int i = 0;
-      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 20000) {
+      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 30000) {
          auto key_idx = random_generator->rand() % ycsb_tuple_count;
          YCSBKey key = keys[key_idx] % FLAGS_ycsb_keyspace_count;
          C_RLOCK(key_idx);
@@ -461,12 +462,12 @@ int main(int argc, char** argv)
          while (keep_running) {
             auto idx = random_generator->rand() % ycsb_tuple_count;
             YCSBKey key = keys[idx];
-            auto old_access_timestamp = last_access_timestamps[idx];
-            last_access_timestamps[idx] = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-            if (old_access_timestamp != 0) {
-               sum_reaccess_interval[idx] += last_access_timestamps[idx] - old_access_timestamp;
-            }
-            access_count[idx]++;
+            // auto old_access_timestamp = last_access_timestamps[idx];
+            // last_access_timestamps[idx] = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            // if (old_access_timestamp != 0) {
+            //    sum_reaccess_interval[idx] += last_access_timestamps[idx] - old_access_timestamp;
+            // }
+            //access_count[idx]++;
             assert(key < ycsb_tuple_count);
             YCSBPayload result;
             int x = utils::RandomGenerator::getRandU64(0, 100);
@@ -512,9 +513,13 @@ int main(int argc, char** argv)
                   if (key_deleted[idx]) {
                      assert(res == false);
                   } else {
-                        auto correct_payload_byte = correct_payloads[idx];
-                        YCSBPayload correct_result(correct_payload_byte);
-                        assert(result == correct_result);
+                     assert(res);
+                     auto correct_payload_byte = correct_payloads[idx];
+                     YCSBPayload correct_result(correct_payload_byte);
+                     if (result != correct_result) {
+                        res = table.lookup(key, result);
+                     }
+                     assert(result == correct_result);
                   }
                }
                C_RUNLOCK(idx);

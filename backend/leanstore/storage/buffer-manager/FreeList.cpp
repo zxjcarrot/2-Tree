@@ -88,8 +88,9 @@ struct BufferFrame& FreeList::pop()
          free_bf = c_header;
          free_bf->header.next_free_bf = nullptr;
          counter--;
-         free_bf->header.latch.assertNotExclusivelyLatched();
          assert(free_bf->header.state == BufferFrame::STATE::FREE);
+         free_bf->header.latch.assertNotExclusivelyLatched();
+         
          return *free_bf;
       } else {
          // WorkerCounters::myCounters().dt_researchy_1[0]++;

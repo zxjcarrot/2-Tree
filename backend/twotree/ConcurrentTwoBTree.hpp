@@ -746,7 +746,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
          if (tp->referenced() == true) {
             tp->clear_referenced();
          } else {
-            OptimisticLockGuard g(&lock_table, real_key);
+            LockGuardProxy g(&lock_table, real_key);
             if (g.read_lock()) { // Skip evicting records that are write-locked
                evict_key = real_key;
                victim_found = true;
@@ -766,7 +766,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       if (victim_found) {
          for (size_t i = 0; i< evict_keys.size(); ++i) {
             auto key = evict_keys[i];
-            OptimisticLockGuard write_guard(&lock_table, key);
+            LockGuardProxy write_guard(&lock_table, key);
             if (write_guard.write_lock() == false) { // Skip eviction if it is undergoing migration or modification
                continue;
             }
@@ -823,10 +823,11 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       }
    }
    
-   static constexpr s64 kEvictionCheckInterval = 50;
-   std::atomic<s64> eviction_count_down {kEvictionCheckInterval};
+   static constexpr s64 kEvictionCheckInterval = 300;
+   DistributedCounter<> eviction_count_down {kEvictionCheckInterval};
    void try_eviction() {
-      if (--eviction_count_down <= 0) {
+      --eviction_count_down;
+      if (eviction_count_down.load() <= 0) {
          if (cache_under_pressure()) {
             evict_a_bunch();
          }
@@ -967,9 +968,9 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    }
 
    bool lookup(Key k, Payload & v) {
-      try_eviction();
+      //try_eviction();
       while (true) {
-         OptimisticLockGuard g(&lock_table, k);
+         LockGuardProxy g(&lock_table, k);
          if (!g.read_lock()) {
             continue;
          }
@@ -980,27 +981,30 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       }
    }
 
-   bool lookup_internal(Key k, Payload& v, OptimisticLockGuard & g)
+   bool lookup_internal(Key k, Payload& v, LockGuardProxy & g)
    {
-      ++total_lookups;
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      //++total_lookups;
+      //DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       TaggedPayload tp;
       // try hot partition first
       auto hot_key = tag_with_hot_bit(k);
       uint64_t old_miss, new_miss;
       OLD_HIT_STAT_START;
-      bool mark_dirty = utils::RandomGenerator::getRandU64(0, 1000) < 30;
+      bool mark_dirty = false;
       auto res = hot_btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         tp->set_referenced();
+         if (tp->referenced() == false) {
+            tp->set_referenced();
+            mark_dirty = true;
+         }
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
          }, mark_dirty) ==
             OP_RESULT::OK;
       OLD_HIT_STAT_END;
-      hot_tree_ios += new_miss - old_miss;
+      //hot_tree_ios += new_miss - old_miss;
       if (res) {
-         ++lookups_hit_top;
+         //++lookups_hit_top;
          return res;
       }
 
@@ -1092,7 +1096,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    {
       try_eviction();
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
-      OptimisticLockGuard g(&lock_table, k);
+      LockGuardProxy g(&lock_table, k);
       
       while (g.write_lock() == false);
 
@@ -1105,7 +1109,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    void update(Key k, Payload& v) override {
       try_eviction();
-      OptimisticLockGuard g(&lock_table, k);
+      LockGuardProxy g(&lock_table, k);
       while (g.write_lock() == false);
       ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
@@ -1161,7 +1165,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    void put(Key k, Payload& v) override {
       try_eviction();
-      OptimisticLockGuard g(&lock_table, k);
+      LockGuardProxy g(&lock_table, k);
       while (g.write_lock() == false);
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
@@ -1226,7 +1230,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       std::cout << total_lookups<< " lookups, "  << lookups_hit_top << " lookup hit top" << " hot_tree_ios " << hot_tree_ios << " ios/tophit " << hot_tree_ios / (lookups_hit_top + 0.00)  << std::endl;
       std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01) << std::endl;
-      std::cout << "Average eviction bounding time " << eviction_bounding_time / (eviction_bounding_n) << std::endl;
+      std::cout << "Average eviction bounding time " << eviction_bounding_time / (eviction_bounding_n + 1) << std::endl;
    }
 };
 

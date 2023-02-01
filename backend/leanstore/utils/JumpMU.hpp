@@ -64,4 +64,5 @@ class JMUW
    static void des(void* t) { reinterpret_cast<JMUW<T>*>(t)->~JMUW<T>(); }
    ~JMUW() { jumpmu::clearLastDestructor(); }
    T* operator->() { return reinterpret_cast<T*>(&obj); }
+   T& get_ref() { return obj; }
 };

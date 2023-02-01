@@ -67,7 +67,7 @@ enum class LATCH_FALLBACK_MODE : u8 { SHARED = 0, EXCLUSIVE = 1, JUMP = 2, SPIN 
 struct Guard {
    HybridLatch* latch = nullptr;
    GUARD_STATE state = GUARD_STATE::UNINITIALIZED;
-   u64 version;
+   u64 version = 0;
    bool faced_contention = false;
    // -------------------------------------------------------------------------------------
    Guard(HybridLatch& latch) : latch(&latch) {}
@@ -106,11 +106,13 @@ struct Guard {
    inline void unlock()
    {
       if (state == GUARD_STATE::EXCLUSIVE) {
+         assert(this->latch != nullptr);
          version += LATCH_EXCLUSIVE_BIT;
          latch->ref().store(version, std::memory_order_release);
          latch->mutex.unlock();
          state = GUARD_STATE::OPTIMISTIC;
       } else if (state == GUARD_STATE::SHARED) {
+         assert(this->latch != nullptr);
          latch->mutex.unlock_shared();
          state = GUARD_STATE::OPTIMISTIC;
       }

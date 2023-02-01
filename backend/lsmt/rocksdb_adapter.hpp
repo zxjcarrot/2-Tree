@@ -29,11 +29,11 @@ struct RocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
       }
-      options.write_buffer_size = 32 * 1024 * 1024;
+      options.write_buffer_size = 64 * 1024 * 1024;
       std::size_t block_cache_size = 0;
       std::size_t row_cache_size = 0;
-      //std::size_t write_buffer_count = options.max_write_buffer_number;
-      std::size_t write_buffer_count = 1;
+      std::size_t write_buffer_count = options.max_write_buffer_number;
+      //std::size_t write_buffer_count = 1;
       if (use_row_cache) {
          std::cout << "RocksDB record cache budget " << (row_cache_memory_budget_gib) << "gib" << std::endl;   
          std::cout << "RocksDB block cache budget " << (block_cache_memory_budget_gib) << "gib" << std::endl;
@@ -58,14 +58,14 @@ struct RocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       options.use_direct_io_for_flush_and_compaction = true;
       options.level_compaction_dynamic_level_bytes = true;
       if (use_row_cache) {
-         options.row_cache = rocksdb::NewLRUCache(row_cache_size, 0, true);
+         options.row_cache = rocksdb::NewLRUCache(row_cache_size, 5, true);
       }
       rocksdb::BlockBasedTableOptions table_options;
       table_options.block_size = 16 * 1024;
       table_options.cache_index_and_filter_blocks = true;
       table_options.prepopulate_block_cache = rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushOnly;
       table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
-      table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true);
+      table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 5, true);
       
       options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
       options.statistics = rocksdb::CreateDBStatistics();

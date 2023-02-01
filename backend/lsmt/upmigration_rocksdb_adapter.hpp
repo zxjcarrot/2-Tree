@@ -7,6 +7,7 @@
 #include "interface/StorageInterface.hpp"
 #include "leanstore/utils/RandomGenerator.hpp"
 #include "LockManager/LockManager.hpp"
+#include "leanstore/utils/DistributedCounter.hpp"
 // -------------------------------------------------------------------------------------
 #include <atomic>
 #include <cassert>
@@ -26,17 +27,17 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
    bool lazy_migration;
    bool wal;
    u64 lazy_migration_threshold = 1;
-   u64 up_migrations = 0;
-   u64 hot_record_up_migrations = 0;
-   u64 hot_up_migrations = 1000;
-   std::size_t total_lookups = 0;
+   DistributedCounter<> up_migrations = 0;
+   DistributedCounter<> hot_record_up_migrations = 0;
+   DistributedCounter<> hot_up_migrations = 200;
+   DistributedCounter<> total_lookups = 0;
    UpMigrationRocksDBAdapter(const std::string & db_dir,  double block_cache_memory_budget_gib, bool wal = false, int lazy_migration_sampling_rate = 100): lazy_migration(lazy_migration_sampling_rate < 100), wal(wal) {
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
       }
-      options.write_buffer_size = 32 * 1024 * 1024;
-      //std::size_t write_buffer_count = options.max_write_buffer_number;
-      std::size_t write_buffer_count = 1;
+      options.write_buffer_size = 64 * 1024 * 1024;
+      std::size_t write_buffer_count = options.max_write_buffer_number;
+      //std::size_t write_buffer_count = 1;
       std::size_t block_cache_size = 0;
       std::cout << "RocksDB with upward migration " << lazy_migration_threshold << std::endl;
       std::cout << "RocksDB block cache budget " << (block_cache_memory_budget_gib) << "gib" << std::endl;
@@ -59,7 +60,7 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
       table_options.cache_index_and_filter_blocks = true;
       table_options.prepopulate_block_cache = rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushOnly;
       table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
-      table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 0, true, 0.9);
+      table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 5, true, 0.9);
       options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
       options.statistics = rocksdb::CreateDBStatistics();
       rocksdb::Status status =
@@ -111,14 +112,14 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
       delete it;
    }
 
-   bool lookup_internal(Key k, Payload& v, leanstore::OptimisticLockGuard & g, bool from_update = false) {
+   bool lookup_internal(Key k, Payload& v, leanstore::LockGuardProxy & g, bool from_update = false) {
       ++total_lookups;
       rocksdb::ReadOptions options;
       u8 key_bytes[sizeof(Key)];
       auto key_len = leanstore::fold(key_bytes, k);
       std::string value;
       auto old_block_read_count = rocksdb::get_perf_context()->block_read_count;
-      auto old_last_level_block_read_count = rocksdb::get_perf_context()->last_level_block_read_count;
+      //auto old_last_level_block_read_count = rocksdb::get_perf_context()->last_level_block_read_count;
       auto status = db->Get(options, rocksdb::Slice((const char *)key_bytes, key_len), &value);
       assert(status == rocksdb::Status::OK());
       assert(sizeof(v) == value.size());
@@ -152,7 +153,7 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
 
    bool lookup(Key k, Payload& v) {
       while (true) {
-         leanstore::OptimisticLockGuard g(&lock_table, k);
+         leanstore::LockGuardProxy g(&lock_table, k);
          if (!g.read_lock()) {
             continue;
          }
@@ -171,7 +172,7 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
       Payload t;
 
       while (true) {
-         leanstore::OptimisticLockGuard g(&lock_table, k);
+         leanstore::LockGuardProxy g(&lock_table, k);
          if (!g.read_lock()) {
             continue;
          }
@@ -180,7 +181,7 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
             break;
          }
       }
-      leanstore::OptimisticLockGuard g(&lock_table, k);
+      leanstore::LockGuardProxy g(&lock_table, k);
       
       while (g.write_lock() == false);
 
