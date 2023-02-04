@@ -211,7 +211,7 @@ public:
       assert(status == leanstore::storage::btree::OP_RESULT::OK);
       //assert(evict_block_size >= block.size());
 
-      auto tuple_size = sizeof(TaggedPayload) - sizeof(TaggedPayload::prev) - sizeof(TaggedPayload::next);
+      [[maybe_unused]] auto tuple_size = sizeof(TaggedPayload) - sizeof(TaggedPayload::prev) - sizeof(TaggedPayload::next);
       memcpy(&v, &block[trec.tuple_offset + sizeof(Key)], sizeof(Payload));
       return true;
    }
@@ -285,14 +285,14 @@ public:
       return lookup(k, v);
    }
 
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, [[maybe_unused]] int length) {
       scan_ops++;
       auto io_reads_old = leanstore::WorkerCounters::myCounters().io_reads.load();
       constexpr std::size_t scan_buffer_size = 32;
-      int hot_len = 0;
+      size_t hot_len = 0;
       Key hot_keys[scan_buffer_size];
       Payload hot_payloads[scan_buffer_size];
-      int cold_len = 0;
+      size_t cold_len = 0;
       Key cold_keys[scan_buffer_size];
       Payload cold_payloads[scan_buffer_size];
       bool hot_tree_end = false;
@@ -333,8 +333,8 @@ public:
          }
       };
 
-      int hot_idx = 0;
-      int cold_idx = 0;
+      size_t hot_idx = 0;
+      size_t cold_idx = 0;
       fill_hot_scan_buffer(start_key);
       fill_cold_scan_buffer(start_key);
       while (true) {

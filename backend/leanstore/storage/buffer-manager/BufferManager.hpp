@@ -55,8 +55,9 @@ class BufferManager
    // For cooling and inflight io
    u64 partitions_count;
    u64 partitions_mask;
+   u64 cold_partition_idx_end = 0;
+   u64 cold_buffer_frame_idx_end = 0;
    Partition* partitions;
-
   private:
    // -------------------------------------------------------------------------------------
    // Threads managements
@@ -66,16 +67,23 @@ class BufferManager
    // -------------------------------------------------------------------------------------
    // Misc
    Partition& randomPartition();
+   Partition& randomColdPartition();
+   Partition& randomHotPartition();
    BufferFrame& randomBufferFrame();
+   BufferFrame& randomHotBufferFrame();
+   BufferFrame& randomColdBufferFrame();
+   BufferFrame& nextBufferFrame(bool & hot_cold);
    Partition& getPartition(PID);
    u64 getPartitionID(PID);
 
+   atomic<u64> cold_clock_hand = 0;  // used to track the next frame for considering eviction
+   atomic<u64> hot_clock_hand = 0;  // used to track the next frame for considering eviction
   public:
    // -------------------------------------------------------------------------------------
    BufferManager(s32 ssd_fd);
    ~BufferManager();
    // -------------------------------------------------------------------------------------
-   BufferFrame& allocatePage();
+   BufferFrame& allocatePage(bool from_hot_partition);
    inline BufferFrame& tryFastResolveSwip(Guard& swip_guard, Swip<BufferFrame>& swip_value)
    {
       if (swip_value.isHOT()) {

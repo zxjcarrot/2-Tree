@@ -230,10 +230,11 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
                //continue;
                // There has been other writes to this key in the hot tree between the scan and the write locking above
                // Need to update the payload content by re-reading it from the hot tree
+               bool mark_dirty = false;
                auto res = hot_hash_table.lookup(key_bytes, fold(key_bytes, key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
                   TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
                   evict_payloads[i] = *tp;
-                  }) == leanstore::storage::hashing::OP_RESULT::OK;
+                  }, mark_dirty) == leanstore::storage::hashing::OP_RESULT::OK;
                assert(res);
             }
             evicted_count++;
@@ -293,7 +294,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       return true;
    }
 
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) { ensure(false); }
+   void scan([[maybe_unused]] Key start_key, [[maybe_unused]] std::function<bool(const Key&, const Payload &)> processor, [[maybe_unused]] int length) { ensure(false); }
    
    bool lookup(Key k, Payload & v) override {
       bool ret = false;
@@ -324,11 +325,16 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       auto hot_key = tag_with_hot_bit(k);
       uint64_t old_miss, new_miss;
       OLD_HIT_STAT_START;
+      bool mark_dirty = false;
       auto res = hot_hash_table.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         tp->set_referenced();
+         if (tp->referenced() == false) {
+            tp->set_referenced();
+            mark_dirty = true;
+         }
+         
          memcpy(&v, &tp->payload, sizeof(tp->payload)); 
-         }) ==
+         }, mark_dirty) ==
             leanstore::storage::hashing::OP_RESULT::OK;
       OLD_HIT_STAT_END;
       hot_ht_ios += new_miss - old_miss;
@@ -338,10 +344,11 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       }
 
       auto cold_key = tag_with_cold_bit(k);
+      mark_dirty = false;
       res = cold_hash_table.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused))) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          memcpy(&v, &tp->payload, sizeof(tp->payload)); 
-         }) ==
+         }, mark_dirty) ==
             leanstore::storage::hashing::OP_RESULT::OK;
 
       if (res) {
@@ -427,7 +434,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       }
    }
 
-   bool remove(Key k) override { 
+   bool remove([[maybe_unused]] Key k) override { 
       ensure(false); // not supported yet
    }
 
@@ -442,10 +449,18 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       HIT_STAT_START;
       auto op_res = hot_hash_table.lookupForUpdate(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
          TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-         tp->set_referenced();
-         tp->set_modified();
+         bool ret = false;
+         if (tp->referenced() == false) {
+            tp->set_referenced();
+            ret = true;
+         }
+         if (tp->modified() == false) {
+            tp->set_modified();
+            ret = true;
+         }
+
          memcpy(&tp->payload, &v, sizeof(Payload)); 
-         return true;
+         return ret;
       });
       HIT_STAT_END;
       hot_ht_ios += new_miss - old_miss;
@@ -457,10 +472,11 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       Payload old_v;
       auto cold_key = tag_with_cold_bit(k);
       //OLD_HIT_STAT_START;
+      bool mark_dirty = false;
       auto res __attribute__((unused)) = cold_hash_table.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          memcpy(&old_v, &tp->payload, sizeof(tp->payload)); 
-         });
+         }, mark_dirty);
          
       if(res == leanstore::storage::hashing::OP_RESULT::NOT_FOUND){
          return;
@@ -503,10 +519,18 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       HIT_STAT_START;
       auto op_res = hot_hash_table.lookupForUpdate(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
          TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-         tp->set_referenced();
-         tp->set_modified();
-         memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
-         return true;
+         bool ret = false;
+         if (tp->referenced() == false) {
+            tp->set_referenced();
+            ret = true;
+         }
+         if (tp->modified() == false) {
+            tp->set_modified();
+            ret = true;
+         }
+
+         memcpy(&tp->payload, &v, sizeof(Payload)); 
+         return ret;
       });
       HIT_STAT_END;
 
@@ -536,7 +560,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       return minimal_pages / (pages + 0.0);
    }
 
-   void report(u64 entries, u64 pages) override {
+   void report([[maybe_unused]] u64 entries, u64 pages) override {
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
       std::size_t hot_hash_table_pages = 0;

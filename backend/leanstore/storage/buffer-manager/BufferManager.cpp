@@ -49,19 +49,50 @@ BufferManager::BufferManager(s32 ssd_fd) : ssd_fd(ssd_fd)
       partitions_mask = partitions_count - 1;
       const u64 free_bfs_limit = std::ceil((FLAGS_free_pct * 1.0 * dram_pool_size / 100.0) / static_cast<double>(partitions_count));
       const u64 cooling_bfs_upper_bound = std::ceil((FLAGS_cool_pct * 1.0 * dram_pool_size / 100.0) / static_cast<double>(partitions_count));
+      std::cout << "free_bfs_limit " << free_bfs_limit << std::endl;
+      std::cout << "cooling_bfs_upper_bound " << cooling_bfs_upper_bound << std::endl;
+      std::cout << "sizeof(BufferFrame) " << sizeof(BufferFrame) << std::endl;
+      std::cout << "sizeof(BufferFrame::header) " << sizeof(BufferFrame::header) << std::endl;
+      std::cout << "sizeof(BufferFrame::page) " << sizeof(BufferFrame::page) << std::endl;
       partitions = reinterpret_cast<Partition*>(malloc(sizeof(Partition) * partitions_count));
       for (u64 p_i = 0; p_i < partitions_count; p_i++) {
          new (partitions + p_i) Partition(p_i, partitions_count, free_bfs_limit, cooling_bfs_upper_bound);
       }
+      if (FLAGS_hot_cold_partition) {
+         cold_buffer_frame_idx_end = (1 - FLAGS_top_component_dram_ratio) * dram_pool_size;
+         cold_partition_idx_end = std::ceil((1 - FLAGS_top_component_dram_ratio) * partitions_count);
+         assert(cold_buffer_frame_idx_end != 0);
+         assert(cold_partition_idx_end != 0);
+      } else {
+         cold_buffer_frame_idx_end = dram_pool_size;
+         cold_partition_idx_end = partitions_count;
+      }
+      std::cout << "cold_partition_idx_end " << cold_partition_idx_end << std::endl;
+      std::cout << "cold_buffer_frame_idx_end " << cold_buffer_frame_idx_end << std::endl;
+      std::cout << "dram_pool_size " << dram_pool_size << std::endl;
       // -------------------------------------------------------------------------------------
       utils::Parallelize::parallelRange(dram_total_size, [&](u64 begin, u64 end) { memset(reinterpret_cast<u8*>(bfs) + begin, 0, end - begin); });
       utils::Parallelize::parallelRange(dram_pool_size, [&](u64 bf_b, u64 bf_e) {
          u64 p_i = 0;
          for (u64 bf_i = bf_b; bf_i < bf_e; bf_i++) {
-            partitions[p_i].dram_free_list.push(*new (bfs + bf_i) BufferFrame());
-            p_i = (p_i + 1) % partitions_count;
+            u64 p_idx;
+            if (FLAGS_hot_cold_partition) {
+               if (bf_i < cold_buffer_frame_idx_end) {
+                  p_idx = p_i % cold_partition_idx_end;
+               } else { 
+                  p_idx = (p_i % (partitions_count - cold_partition_idx_end)) + cold_partition_idx_end;
+                  assert(p_idx >= cold_partition_idx_end);
+               }
+            } else {
+               p_idx = p_i % partitions_count;
+            }
+            partitions[p_idx].dram_free_list.push(*new (bfs + bf_i) BufferFrame());
+            ++p_i;
          }
       });
+      for (u64 p_i = 0; p_i < partitions_count; ++p_i) {
+         std::cout << "partition " << p_i << " has " << partitions[p_i].dram_free_list.counter.load() << " free pages" << std::endl;
+      }
       // -------------------------------------------------------------------------------------
    }
    // -------------------------------------------------------------------------------------
@@ -151,23 +182,90 @@ Partition& BufferManager::randomPartition()
    auto rand_partition_i = utils::RandomGenerator::getRand<u64>(0, partitions_count);
    return partitions[rand_partition_i];
 }
+
+// -------------------------------------------------------------------------------------
+// Buffer Frames Management
+// -------------------------------------------------------------------------------------
+Partition& BufferManager::randomHotPartition()
+{
+   auto rand_partition_i = utils::RandomGenerator::getRand<u64>(cold_partition_idx_end, partitions_count);
+   assert(rand_partition_i >= cold_partition_idx_end && rand_partition_i < partitions_count);
+   return partitions[rand_partition_i];
+}
+
+// -------------------------------------------------------------------------------------
+// Buffer Frames Management
+// -------------------------------------------------------------------------------------
+Partition& BufferManager::randomColdPartition()
+{
+   auto rand_partition_i = utils::RandomGenerator::getRand<u64>(0, cold_partition_idx_end);
+   assert(rand_partition_i < cold_partition_idx_end);
+   return partitions[rand_partition_i];
+}
 // -------------------------------------------------------------------------------------
 BufferFrame& BufferManager::randomBufferFrame()
 {
    auto rand_buffer_i = utils::RandomGenerator::getRand<u64>(0, dram_pool_size);
    return bfs[rand_buffer_i];
 }
+
+BufferFrame& BufferManager::randomColdBufferFrame()
+{
+   //auto rand_buffer_i = (cold_clock_hand++) % (cold_buffer_frame_idx_end);
+   auto idx = utils::RandomGenerator::getRand<u64>(0, cold_buffer_frame_idx_end);
+   return bfs[idx];
+}
+
+BufferFrame& BufferManager::randomHotBufferFrame()
+{
+   //auto rand_buffer_i = (hot_clock_hand++) % (dram_pool_size - cold_buffer_frame_idx_end) + cold_buffer_frame_idx_end;
+   auto idx = utils::RandomGenerator::getRand<u64>(cold_buffer_frame_idx_end, dram_pool_size);
+   return bfs[idx];
+}
+// -------------------------------------------------------------------------------------
+BufferFrame& BufferManager::nextBufferFrame(bool & hot_cold) {
+   // while (true) {
+   //    auto buffer_i = clock_hand.fetch_add(1) % dram_pool_size;
+   //    return bfs[buffer_i];
+   //    // if (bfs[buffer_i].page.dt_id == 9999) {
+   //    //    continue;
+   //    // }
+   //    // if (getDTRegistry().keepInMemory(bfs[buffer_i].page.dt_id) == false) {
+   //    //    return bfs[buffer_i];
+   //    // }
+   // }
+   if (FLAGS_hot_cold_partition) {
+      if (utils::RandomGenerator::getRand<u64>(0, 100) < 10) {
+         hot_cold = false;
+         return randomHotBufferFrame();
+      } else {
+         hot_cold = true;
+         return randomColdBufferFrame();
+      }
+   } else {
+      return randomBufferFrame();
+   }
+}
 // -------------------------------------------------------------------------------------
 // returns a *write locked* new buffer frame
-BufferFrame& BufferManager::allocatePage()
+BufferFrame& BufferManager::allocatePage(bool from_hot_partition)
 {
+   Partition * partition = nullptr;
+   if (FLAGS_hot_cold_partition) {
+      if (from_hot_partition) {
+         partition = &randomHotPartition();
+      } else {
+         partition = &randomColdPartition();
+      }
+   } else {
+      partition = &randomPartition();
+   }
    // Pick a pratition randomly
    PID free_pid;
    BufferFrame* free_bf;
    
-   Partition& partition = randomPartition();
-   free_bf = &partition.dram_free_list.pop();
-   free_pid = partition.nextPID();
+   free_bf = &partition->dram_free_list.pop();
+   free_pid = partition->nextPID();
    
    
    assert(free_bf->header.state == BufferFrame::STATE::FREE);
@@ -179,6 +277,16 @@ BufferFrame& BufferManager::allocatePage()
    free_bf->header.pid = free_pid;
    free_bf->header.state = BufferFrame::STATE::HOT;
    free_bf->header.lastWrittenGSN = free_bf->page.GSN = 0;
+   u32 partition_id = partition - &partitions[0];
+   assert(getPartitionID(free_bf->header.pid) == partition_id);
+   if (FLAGS_hot_cold_partition) {
+      if (partition_id < cold_partition_idx_end) {
+         assert(free_bf < &bfs[cold_buffer_frame_idx_end]);
+      } else {
+         assert(free_bf >= &bfs[cold_buffer_frame_idx_end]);
+      }
+   }
+   
    // -------------------------------------------------------------------------------------
    if (free_pid == dram_pool_size) {
       cout << "-------------------------------------------------------------------------------------" << endl;
@@ -249,7 +357,18 @@ BufferFrame& BufferManager::resolveSwip(Guard& swip_guard, Swip<BufferFrame>& sw
    // -------------------------------------------------------------------------------------
    auto frame_handler = partition.io_ht.lookup(pid);
    if (!frame_handler) {
-      BufferFrame& bf = randomPartition().dram_free_list.tryPop(g_guard);  // EXP
+      BufferFrame * new_buf = nullptr;
+      if (FLAGS_hot_cold_partition) {
+         if (getPartitionID(pid) < cold_partition_idx_end) {
+            // allocate from cold partitions
+            new_buf = &randomColdPartition().dram_free_list.tryPop(g_guard);
+         } else { // allocate from hot partitions
+            new_buf = &randomHotPartition().dram_free_list.tryPop(g_guard);
+         }
+      } else {
+         new_buf = &randomPartition().dram_free_list.tryPop(g_guard);  // EXP
+      }
+      BufferFrame& bf = *new_buf;
       IOFrame& io_frame = partition.io_ht.insert(pid);
       assert(bf.header.state == BufferFrame::STATE::FREE);
       bf.header.latch.assertNotExclusivelyLatched();
@@ -332,7 +451,7 @@ BufferFrame& BufferManager::resolveSwip(Guard& swip_guard, Swip<BufferFrame>& sw
          // try to evict them when its IO is done
          bf->header.latch.assertNotExclusivelyLatched();
          assert(bf->header.state == BufferFrame::STATE::LOADED);
-         OptimisticGuard bf_guard(bf->header.latch, true);
+         OptimisticGuard bf_guard(bf->header.latch);
          ExclusiveUpgradeIfNeeded swip_x_guard(swip_guard);
          ExclusiveGuard bf_x_guard(bf_guard);
          // -------------------------------------------------------------------------------------

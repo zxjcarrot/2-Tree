@@ -245,27 +245,27 @@ void LeanStore::startProfilingThread()
    profiling_thread.detach();
 }
 // -------------------------------------------------------------------------------------
-storage::btree::BTreeLL& LeanStore::registerBTreeLL(string name, bool keep_in_memory)
+storage::btree::BTreeLL& LeanStore::registerBTreeLL(string name, bool hot_partition)
 {
    assert(btrees_ll.find(name) == btrees_ll.end());
    auto& btree = btrees_ll[name];
    DTID dtid = DTRegistry::global_dt_registry.registerDatastructureInstance(0, reinterpret_cast<void*>(&btree), name);
-   auto& bf = buffer_manager->allocatePage();
+   auto& bf = buffer_manager->allocatePage(true);
    Guard guard(bf.header.latch, GUARD_STATE::EXCLUSIVE);
    bf.header.keep_in_memory = true;
    bf.page.dt_id = dtid;
-   btree.keep_in_memory = keep_in_memory;
+   btree.hot_partition = hot_partition;
    guard.unlock();
    btree.create(dtid, &bf);
    return btree;
 }
 // -------------------------------------------------------------------------------------
-storage::hashing::LinearHashTable& LeanStore::registerHashTable(string name, bool keep_in_memory)
+storage::hashing::LinearHashTable& LeanStore::registerHashTable(string name, bool hot_partition)
 {
    assert(hts.find(name) == hts.end());
    auto& ht = hts[name];
    DTID dtid = DTRegistry::global_dt_registry.registerDatastructureInstance(1, reinterpret_cast<void*>(&ht), name);
-   ht.keep_in_memory = keep_in_memory;
+   ht.hot_partition = hot_partition;
    ht.create(dtid);
    return ht;
 }

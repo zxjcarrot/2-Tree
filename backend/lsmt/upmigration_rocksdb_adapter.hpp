@@ -92,7 +92,7 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
       return true;
    }
 
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, [[maybe_unused]] int length) {
       rocksdb::ReadOptions ropts;
       u8 key_bytes[sizeof(Key)];
       auto key_len = leanstore::fold(key_bytes, start_key);
@@ -176,7 +176,7 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
          if (!g.read_lock()) {
             continue;
          }
-         bool res = lookup_internal(k, t, g, true);
+         [[maybe_unused]] bool res = lookup_internal(k, t, g, true);
          if (g.validate()) {
             break;
          }

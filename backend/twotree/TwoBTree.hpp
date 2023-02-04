@@ -596,15 +596,15 @@ struct BTreeCachedVSAdapter : StorageInterface<Key, Payload> {
    }
 
 
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, [[maybe_unused]] int length) {
       ++scan_ops;
       auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
       constexpr std::size_t scan_buffer_size = 32;
       u8 key_bytes[sizeof(Key)];
-      int hot_len = 0;
+      size_t hot_len = 0;
       Key hot_keys[scan_buffer_size];
       Payload hot_payloads[scan_buffer_size];
-      int cold_len = 0;
+      size_t cold_len = 0;
       Key cold_keys[scan_buffer_size];
       Payload cold_payloads[scan_buffer_size];
       bool hot_tree_end = false;
@@ -648,8 +648,8 @@ struct BTreeCachedVSAdapter : StorageInterface<Key, Payload> {
          }
       };
 
-      int hot_idx = 0;
-      int cold_idx = 0;
+      size_t hot_idx = 0;
+      size_t cold_idx = 0;
       fill_hot_scan_buffer(start_key);
       fill_cold_scan_buffer(start_key);
       while (true) {
@@ -1325,7 +1325,7 @@ struct TwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btree, std::size_t & pages) {
       constexpr std::size_t scan_buffer_cap = 64;
-      int scan_buffer_len = 0;
+      size_t scan_buffer_len = 0;
       Key keys[scan_buffer_cap];
       bool tree_end = false;
       pages = 0;
@@ -1334,7 +1334,7 @@ struct TwoBTreeAdapter : StorageInterface<Key, Payload> {
       auto fill_scan_buffer = [&](Key startk) {
          if (scan_buffer_len < scan_buffer_cap && tree_end == false) {
             btree.scanAsc(key_bytes, fold(key_bytes, startk),
-            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length, const char * leaf_frame) -> bool {
+            [&](const u8 * key, u16 key_length, [[maybe_unused]] const u8 * value, [[maybe_unused]] u16 value_length, const char * leaf_frame) -> bool {
                auto real_key = unfold(*(Key*)(key));
                assert(key_length == sizeof(Key));
                keys[scan_buffer_len] = real_key;
@@ -1359,7 +1359,7 @@ struct TwoBTreeAdapter : StorageInterface<Key, Payload> {
       
       while (true) {
          fill_scan_buffer(start_key);
-         int idx = 0;
+         size_t idx = 0;
          while (idx < scan_buffer_len) {
             idx++;
             entries++;
@@ -1498,15 +1498,15 @@ struct TwoBTreeAdapter : StorageInterface<Key, Payload> {
       return true;
    }
 
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, [[maybe_unused]] int length) {
       scan_ops++;
       auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
       constexpr std::size_t scan_buffer_size = 8;
       u8 key_bytes[sizeof(Key)];
-      int hot_len = 0;
+      size_t hot_len = 0;
       Key hot_keys[scan_buffer_size];
       Payload hot_payloads[scan_buffer_size];
-      int cold_len = 0;
+      size_t cold_len = 0;
       Key cold_keys[scan_buffer_size];
       Payload cold_payloads[scan_buffer_size];
       bool hot_tree_end = false;
@@ -1554,8 +1554,8 @@ struct TwoBTreeAdapter : StorageInterface<Key, Payload> {
          }
       };
 
-      int hot_idx = 0;
-      int cold_idx = 0;
+      size_t hot_idx = 0;
+      size_t cold_idx = 0;
       fill_hot_scan_buffer(start_key);
       fill_cold_scan_buffer(start_key);
       while (true) {
@@ -1683,7 +1683,7 @@ struct TwoBTreeAdapter : StorageInterface<Key, Payload> {
       // }, Payload::wal_update_generator);
       //HIT_STAT_END;
 
-      auto op_res = cold_btree.upsert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+      [[maybe_unused]] auto op_res = cold_btree.upsert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
       assert(op_res == OP_RESULT::OK);
       // if (op_res == OP_RESULT::NOT_FOUND) {
       //    insert_partition(k, v, true);
@@ -1825,7 +1825,7 @@ struct TwoBTreeAdapter : StorageInterface<Key, Payload> {
       return minimal_pages / (pages + 0.0);
    }
 
-   void report(u64 entries, u64 pages) override {
+   void report([[maybe_unused]] u64 entries, u64 pages) override {
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
       std::size_t hot_btree_pages = 0;
@@ -2070,7 +2070,7 @@ struct STX2BTreeAdapter : StorageInterface<Key, Payload> {
       }
       
       miss_count++;
-      u8 key_bytes[sizeof(Key)];
+      [[maybe_unused]] u8 key_bytes[sizeof(Key)];
       bool res = false;
       auto it_btree = btree.find(k);
       if (it_btree != btree.end()) {
@@ -2131,10 +2131,10 @@ struct STX2BTreeAdapter : StorageInterface<Key, Payload> {
 
       if (should_migrate()) {
          upward_migrations++;
-         u8 key_bytes[sizeof(Key)];
+         [[maybe_unused]] u8 key_bytes[sizeof(Key)];
          Payload old_v;
          auto it_btree = btree.find(k);
-         bool res = false;
+         [[maybe_unused]] bool res = false;
          assert(it_btree != btree.end());
          if (it_btree != btree.end()) {
             old_v = it_btree.data();
@@ -2187,7 +2187,7 @@ struct STX2BTreeAdapter : StorageInterface<Key, Payload> {
       std::cout << "Top btree miss rate " << (1 - hit_rate) * 100  << "%"<< std::endl;
    }
 
-   void report(u64 entries __attribute__((unused)) , u64 pages) override {
+   void report(u64 entries __attribute__((unused)) , [[maybe_unused]] u64 pages) override {
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
       auto num_btree_entries = btree_entries();
@@ -2323,10 +2323,10 @@ struct STXBTreeAdapter : StorageInterface<Key, Payload> {
       btree[k] = v;
    }
 
-   void report(u64 entries __attribute__((unused)) , u64 pages) override {
+   void report(u64 entries __attribute__((unused)) , [[maybe_unused]]u64 pages) override {
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
-      auto num_btree_entries = btree_entries();
+      [[maybe_unused]]  auto num_btree_entries = btree_entries();
       std::cout << "capacity bytes " << cache_capacity_bytes << std::endl;
       std::cout << "stx::btree size bytes " << get_btree_size() << std::endl;
       std::cout << "stx::btree size # entries " << btree.size() << std::endl;

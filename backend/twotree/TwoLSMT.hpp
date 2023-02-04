@@ -148,7 +148,6 @@ struct TwoRocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       u8 key_bytes[sizeof(Key)];
       std::vector<Key> evict_keys;
       std::vector<TaggedPayload> evict_payloads;
-      Key evict_key;
       Payload evict_payload;
       bool victim_found = false;
 
@@ -157,7 +156,6 @@ struct TwoRocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
          assert(it->value().size() == sizeof(TaggedPayload));
          auto tp = ((TaggedPayload*)(it->value().data()));
          auto real_key = leanstore::unfold(*(Key*)(it->key().data()));
-         evict_key = real_key;
          clock_hand = real_key;
          victim_found = true;
          evict_keys.push_back(real_key);
@@ -278,7 +276,7 @@ struct TwoRocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       assert(s == rocksdb::Status::OK());
    }
 
-   void admit_element(Key k, Payload & v, bool dirty = false, bool insert = false) {
+   void admit_element(Key k, Payload & v, bool dirty = false, [[maybe_unused]] bool insert = false) {
       if (empty_slots <= 0 && cache_under_pressure())
          evict_a_bunch();
       rocksdb::WriteOptions options;
@@ -457,9 +455,9 @@ struct RocksDBTwoCFAdapter : public leanstore::StorageInterface<Key, Payload> {
    class ToggleReferenceBitOperator : public rocksdb::AssociativeMergeOperator {
    public:
       virtual ~ToggleReferenceBitOperator() {}
-      virtual bool Merge(const rocksdb::Slice& key, const rocksdb::Slice* existing_value,
+      virtual bool Merge([[maybe_unused]]  const rocksdb::Slice& key, const rocksdb::Slice* existing_value,
                          const rocksdb::Slice& value, std::string* new_value,
-                         rocksdb::Logger* logger) const override {
+                         [[maybe_unused]]  rocksdb::Logger* logger) const override {
          assert(existing_value != nullptr);
          assert(existing_value->size() == sizeof(TaggedPayload));
          TaggedPayload new_payload = *((TaggedPayload*)(existing_value->data()));
@@ -635,7 +633,6 @@ struct RocksDBTwoCFAdapter : public leanstore::StorageInterface<Key, Payload> {
       u8 key_bytes[sizeof(Key)];
       std::vector<Key> evict_keys;
       std::vector<TaggedPayload> evict_payloads;
-      Key evict_key;
       Payload evict_payload;
       bool victim_found = false;
 
@@ -644,7 +641,6 @@ struct RocksDBTwoCFAdapter : public leanstore::StorageInterface<Key, Payload> {
          assert(it->value().size() == sizeof(TaggedPayload));
          auto tp = ((TaggedPayload*)(it->value().data()));
          auto real_key = leanstore::unfold(*(Key*)(it->key().data()));
-         evict_key = real_key;
          clock_hand = real_key;
          victim_found = true;
          evict_keys.push_back(real_key);
@@ -794,7 +790,7 @@ struct RocksDBTwoCFAdapter : public leanstore::StorageInterface<Key, Payload> {
       }
    }
 
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) override {
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, [[maybe_unused]] int length) override {
       rocksdb::ReadOptions ropts;
       u8 key_bytes[sizeof(Key)];
       ropts.snapshot = db->GetSnapshot();

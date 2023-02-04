@@ -107,7 +107,7 @@ struct BTreeVSAdapter : StorageInterface<Key, Payload> {
    }
 
 
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, [[maybe_unused]]int length) {
       scan_ops++;
       u8 key_bytes[sizeof(Key)];
       auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
@@ -130,7 +130,7 @@ struct BTreeVSAdapter : StorageInterface<Key, Payload> {
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
-      auto op_res = btree.updateSameSize(key_bytes, fold(key_bytes, k), 
+      [[maybe_unused]] auto op_res = btree.updateSameSize(key_bytes, fold(key_bytes, k), 
                                          [&](u8* payload, u16 payload_length) { memcpy(payload, &v, payload_length); },
                                          Payload::wal_update_generator);
       auto new_miss = WorkerCounters::myCounters().io_reads.load();

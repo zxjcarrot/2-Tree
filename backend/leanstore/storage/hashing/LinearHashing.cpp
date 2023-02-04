@@ -175,7 +175,7 @@ void LinearHashTable::create(DTID dtid) {
       BufferFrame * dirNode = table->getDirNode(b);
       HybridPageGuard<DirectoryNode> p_guard(dirNode);
       p_guard.toExclusive();
-      HybridPageGuard<LinearHashingNode>  target_x_guard(dt_id);
+      HybridPageGuard<LinearHashingNode>  target_x_guard(dt_id, true, this->hot_partition);
       target_x_guard.toExclusive();
       target_x_guard.init(false, b);
       target_x_guard.incrementGSN();
@@ -196,7 +196,7 @@ u64 LinearHashTable::hash(const u8 *key, u16 key_length, int i) {
 }
 
 
-OP_RESULT LinearHashTable::lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback) {
+OP_RESULT LinearHashTable::lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback, bool & mark_dirty) {
     volatile u32 mask = 1;
 
     while (true) {
@@ -228,6 +228,9 @@ OP_RESULT LinearHashTable::lookup(u8* key, u16 key_length, function<void(const u
          if (slot_in_node != -1) {
             payload_callback(target_guard->getPayload(slot_in_node), target_guard->getPayloadLength(slot_in_node));
             target_guard.recheck();
+            if (mark_dirty) {
+               target_guard.incrementGSN();
+            }
             jumpmu_return OP_RESULT::OK;
          }
 
@@ -531,9 +534,9 @@ OP_RESULT LinearHashTable::remove(u8* key, u16 key_length) {
          p_guard.recheck();
          {
             auto pair2 = this->sp.load_power_and_buddy_bucket();
-            // if (pair2 != pair1) {
-            //    jumpmu::jump();
-            // }
+            if (pair2 != pair1) {
+               jumpmu::jump();
+            }
             auto power = pair2.first;
             auto bucket2 = hash(key, key_length, power);
             auto s_2 = pair2.second - N * power2(power);
@@ -705,9 +708,9 @@ OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_
          p_guard.recheck();
          {
             auto pair2 = this->sp.load_power_and_buddy_bucket();
-            // if (pair2 != pair1) {
-            //    jumpmu::jump();
-            // }
+            if (pair2 != pair1) {
+               jumpmu::jump();
+            }
             auto power = pair2.first;
             auto bucket2 = hash(key, key_length, power);
             auto s_2 = pair2.second - N * power2(power);
@@ -773,7 +776,7 @@ OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_
          }
           
          // add an overflow node and trigger split
-         HybridPageGuard<LinearHashingNode> node(dt_id, true);
+         HybridPageGuard<LinearHashingNode> node(dt_id, true, this->hot_partition);
          auto overflow_node_guard = ExclusivePageGuard<LinearHashingNode>(std::move(node));
          overflow_node_guard.init(true, bucket);
          assert(overflow_node_guard->canInsert(key_length, value_length) == true);
@@ -834,9 +837,9 @@ OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_
          target_x_guard.toExclusive();
          {
             auto pair2 = this->sp.load_power_and_buddy_bucket();
-            // if (pair2 != pair1) {
-            //    jumpmu::jump();
-            // }
+            if (pair2 != pair1) {
+               jumpmu::jump();
+            }
             auto power = pair2.first;
             auto bucket2 = hash(key, key_length, power);
             auto s_2 = pair2.second - N * power2(power);
@@ -897,7 +900,7 @@ OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_
             }
          }
          // add an overflow node and trigger split
-         HybridPageGuard<LinearHashingNode> node(dt_id, true);
+         HybridPageGuard<LinearHashingNode> node(dt_id, true, this->hot_partition);
          auto overflow_node_guard = ExclusivePageGuard<LinearHashingNode>(std::move(node));
          overflow_node_guard.init(true, bucket);
          assert(overflow_node_guard->canInsert(key_length, value_length) == true);
@@ -985,8 +988,8 @@ void LinearHashTable::split() {
             split_bucket_x_guard_used_idx++;
          }
 
-         HybridPageGuard<LinearHashingNode> temp_node_1(dt_id, false);
-         HybridPageGuard<LinearHashingNode> temp_node_2(dt_id, false);
+         HybridPageGuard<LinearHashingNode> temp_node_1(dt_id, false, this->hot_partition);
+         HybridPageGuard<LinearHashingNode> temp_node_2(dt_id, false, this->hot_partition);
 
          //p_guard.toExclusive();
          // from now on, there should be no jumps
@@ -1203,7 +1206,7 @@ bool LinearHashTable::isBTreeLeaf(void* ht_object, BufferFrame& to_find) {
 }
 
 bool LinearHashTable::keepInMemory(void* ht_object) {
-   return reinterpret_cast<LinearHashTable*>(ht_object)->keep_in_memory;
+   return reinterpret_cast<LinearHashTable*>(ht_object)->hot_partition;
 }
 
 // -------------------------------------------------------------------------------------

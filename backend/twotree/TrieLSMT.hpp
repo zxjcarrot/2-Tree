@@ -328,7 +328,7 @@ struct TrieRocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       }
 
       if (should_migrate()) {
-         u8 key_bytes[sizeof(Key)];
+         [[maybe_unused]]  u8 key_bytes[sizeof(Key)];
          Payload old_v;
          bool res __attribute__((unused)) = lookup_lsmt(k, old_v);
          assert(res == true);

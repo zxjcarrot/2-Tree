@@ -25,7 +25,7 @@ class LinearHashingNode;
 using SwipType=Swip<LinearHashingNode>;
 // -------------------------------------------------------------------------------------
 
-static constexpr int kDirNodeBucketPtrCount = EFFECTIVE_PAGE_SIZE / sizeof(u64);
+static constexpr int kDirNodeBucketPtrCount = EFFECTIVE_PAGE_SIZE / sizeof(u64) / 4;
 struct DirectoryNode {
    SwipType bucketPtrs[kDirNodeBucketPtrCount];
    u8 padding[EFFECTIVE_PAGE_SIZE - sizeof(bucketPtrs)];
@@ -50,7 +50,7 @@ public:
          while (true) {
             jumpmuTry() 
             {
-               auto write_guard_h = leanstore::storage::HybridPageGuard<DirectoryNode>(dt_id);
+               auto write_guard_h = leanstore::storage::HybridPageGuard<DirectoryNode>(dt_id, true, true);
                auto write_guard = ExclusivePageGuard<DirectoryNode>(std::move(write_guard_h));
                write_guard.init();
                auto bf = write_guard.bf();
@@ -84,7 +84,7 @@ class LinearHashTable
   public:
    ~LinearHashTable() {}
    // -------------------------------------------------------------------------------------
-   OP_RESULT lookup(u8* key, u16 key_length, std::function<void(const u8*, u16)> payload_callback);
+   OP_RESULT lookup(u8* key, u16 key_length, std::function<void(const u8*, u16)> payload_callback, bool & mark_dirty);
    OP_RESULT lookupForUpdate(u8* key, u16 key_length, std::function<bool(u8*, u16)> payload_callback);
    OP_RESULT insert(u8* key, u16 key_length, u8* value, u16 value_length);
    OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length);
@@ -172,7 +172,7 @@ private:
    MappingTable * table = nullptr;
 public:
    DTID dt_id;
-   bool keep_in_memory = false;
+   bool hot_partition = false;
 };
 
 

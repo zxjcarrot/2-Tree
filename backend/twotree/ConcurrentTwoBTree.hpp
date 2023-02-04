@@ -617,9 +617,9 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btree, std::size_t & pages) {
       constexpr std::size_t scan_buffer_cap = 64;
-      int scan_buffer_len = 0;
+      size_t scan_buffer_len = 0;
       Key keys[scan_buffer_cap];
-      Payload payloads[scan_buffer_cap];
+      [[maybe_unused]] Payload payloads[scan_buffer_cap];
       bool tree_end = false;
       pages = 0;
       const char * last_leaf_frame = nullptr;
@@ -627,7 +627,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       auto fill_scan_buffer = [&](Key startk) {
          if (scan_buffer_len < scan_buffer_cap && tree_end == false) {
             btree.scanAsc(key_bytes, fold(key_bytes, startk),
-            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length, const char * leaf_frame) -> bool {
+            [&](const u8 * key, u16 key_length, [[maybe_unused]] const u8 * value, [[maybe_unused]] u16 value_length, const char * leaf_frame) -> bool {
                auto real_key = unfold(*(Key*)(key));
                assert(key_length == sizeof(Key));
                keys[scan_buffer_len] = real_key;
@@ -652,7 +652,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       
       while (true) {
          fill_scan_buffer(start_key);
-         int idx = 0;
+         size_t idx = 0;
          while (idx < scan_buffer_len) {
             idx++;
             entries++;
@@ -679,7 +679,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    alignas(64) std::atomic<u64> eviction_round{0};
    alignas(64) std::mutex eviction_mutex;
    void evict_a_bunch() {
-      u16 steps = kClockWalkSteps; // number of nodes to scan
+      [[maybe_unused]] u16 steps = kClockWalkSteps; // number of nodes to scan
       Key start_key;
       Key end_key;
       u64 this_eviction_round;
@@ -823,7 +823,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       }
    }
    
-   static constexpr s64 kEvictionCheckInterval = 300;
+   static constexpr s64 kEvictionCheckInterval = 100;
    DistributedCounter<> eviction_count_down {kEvictionCheckInterval};
    void try_eviction() {
       --eviction_count_down;
@@ -847,15 +847,15 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       return true;
    }
 
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, [[maybe_unused]] int length) {
       scan_ops++;
       auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
       constexpr std::size_t scan_buffer_size = 8;
       u8 key_bytes[sizeof(Key)];
-      int hot_len = 0;
+      size_t hot_len = 0;
       Key hot_keys[scan_buffer_size];
       Payload hot_payloads[scan_buffer_size];
-      int cold_len = 0;
+      size_t cold_len = 0;
       Key cold_keys[scan_buffer_size];
       Payload cold_payloads[scan_buffer_size];
       bool hot_tree_end = false;
@@ -903,8 +903,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
          }
       };
 
-      int hot_idx = 0;
-      int cold_idx = 0;
+      size_t hot_idx = 0;
+      size_t cold_idx = 0;
       fill_hot_scan_buffer(start_key);
       fill_cold_scan_buffer(start_key);
       while (true) {
@@ -968,7 +968,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    }
 
    bool lookup(Key k, Payload & v) {
-      //try_eviction();
+      try_eviction();
       while (true) {
          LockGuardProxy g(&lock_table, k);
          if (!g.read_lock()) {
@@ -983,8 +983,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    bool lookup_internal(Key k, Payload& v, LockGuardProxy & g)
    {
-      //++total_lookups;
-      //DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      ++total_lookups;
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       TaggedPayload tp;
       // try hot partition first
@@ -1002,9 +1002,9 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
          }, mark_dirty) ==
             OP_RESULT::OK;
       OLD_HIT_STAT_END;
-      //hot_tree_ios += new_miss - old_miss;
+      hot_tree_ios += new_miss - old_miss;
       if (res) {
-         //++lookups_hit_top;
+         ++lookups_hit_top;
          return res;
       }
 
@@ -1032,7 +1032,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
             OLD_HIT_STAT_START;
             admit_element(k, v);
             OLD_HIT_STAT_END;
-            hot_tree_ios += new_miss - old_miss;
+            //hot_tree_ios += new_miss - old_miss;
          }
       }
       return res;
@@ -1205,7 +1205,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       return minimal_pages / (pages + 0.0);
    }
 
-   void report(u64 entries, u64 pages) override {
+   void report([[maybe_unused]] u64 entries, u64 pages) override {
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
       std::size_t hot_btree_pages = 0;

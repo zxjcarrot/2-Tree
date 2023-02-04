@@ -40,7 +40,8 @@ struct HashVSAdapter : StorageInterface<Key, Payload> {
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
-      auto res = hash_table.lookup(key_bytes, fold(key_bytes, k), [&](const u8* payload, u16 payload_length) { memcpy(&v, payload, payload_length); }) ==
+      bool mark_dirty = false;
+      auto res = hash_table.lookup(key_bytes, fold(key_bytes, k), [&](const u8* payload, u16 payload_length) { memcpy(&v, payload, payload_length); }, mark_dirty) ==
             HT_OP_RESULT::OK;
       auto new_miss = WorkerCounters::myCounters().io_reads.load();
       assert(new_miss >= old_miss);
@@ -80,9 +81,9 @@ struct HashVSAdapter : StorageInterface<Key, Payload> {
       }
       return res;
    }
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+   void scan([[maybe_unused]] Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
       scan_ops++;
-      u8 key_bytes[sizeof(Key)];
+      [[maybe_unused]] u8 key_bytes[sizeof(Key)];
       auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
       // hash_table.scanAsc(key_bytes, fold(key_bytes, start_key),
       // [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {

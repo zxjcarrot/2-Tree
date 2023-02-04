@@ -21,7 +21,7 @@ BTreeGeneric::BTreeGeneric() {}
 // -------------------------------------------------------------------------------------
 void BTreeGeneric::create(DTID dtid, BufferFrame* meta_bf)
 {
-   auto root_write_guard_h = HybridPageGuard<BTreeNode>(dtid);
+   auto root_write_guard_h = HybridPageGuard<BTreeNode>(dtid, true, this->hot_partition);
    auto root_write_guard = ExclusivePageGuard<BTreeNode>(std::move(root_write_guard_h));
    root_write_guard.init(true);
    // -------------------------------------------------------------------------------------
@@ -60,9 +60,9 @@ void BTreeGeneric::trySplit(BufferFrame& to_split, s16 favored_split_pos)
       assert(height == 1 || !c_x_guard->is_leaf);
       // -------------------------------------------------------------------------------------
       // create new root
-      auto new_root_h = HybridPageGuard<BTreeNode>(dt_id, false);
+      auto new_root_h = HybridPageGuard<BTreeNode>(dt_id, false, this->hot_partition);
       auto new_root = ExclusivePageGuard<BTreeNode>(std::move(new_root_h));
-      auto new_left_node_h = HybridPageGuard<BTreeNode>(dt_id);
+      auto new_left_node_h = HybridPageGuard<BTreeNode>(dt_id, true, this->hot_partition);
       auto new_left_node = ExclusivePageGuard<BTreeNode>(std::move(new_left_node_h));
       // -------------------------------------------------------------------------------------
       auto exec = [&]() {
@@ -123,7 +123,7 @@ void BTreeGeneric::trySplit(BufferFrame& to_split, s16 favored_split_pos)
          assert(meta_node_bf != p_x_guard.bf());
          assert(!p_x_guard->is_leaf);
          // -------------------------------------------------------------------------------------
-         auto new_left_node_h = HybridPageGuard<BTreeNode>(dt_id);
+         auto new_left_node_h = HybridPageGuard<BTreeNode>(dt_id, true, this->hot_partition);
          auto new_left_node = ExclusivePageGuard<BTreeNode>(std::move(new_left_node_h));
          // -------------------------------------------------------------------------------------
          auto exec = [&]() {

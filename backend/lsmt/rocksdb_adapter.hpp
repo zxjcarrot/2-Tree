@@ -140,7 +140,7 @@ struct RocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       assert(status == rocksdb::Status::OK());
    }
 
-   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, int length) {
+   void scan(Key start_key, std::function<bool(const Key&, const Payload &)> processor, [[maybe_unused]] int length) {
       rocksdb::ReadOptions ropts;
       u8 key_bytes[sizeof(Key)];
       auto key_len = leanstore::fold(key_bytes, start_key);

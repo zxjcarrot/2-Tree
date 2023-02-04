@@ -53,7 +53,6 @@ DEFINE_string(lsmt_db_path, "./", "directory for storing lsm-tree files");
 DEFINE_uint32(cached_btree, 0, "");
 DEFINE_uint32(cached_btree_node_size_type, 0, "");
 DEFINE_bool(inclusive_cache, false, "");
-DEFINE_double(cached_btree_ram_ratio, 0.0, "");
 DEFINE_uint32(update_or_put, 0, "");
 DEFINE_uint32(cache_lazy_migration, 100, "lazy upward migration sampling rate(%)");
 DEFINE_bool(ycsb_scan, false, "");
@@ -192,9 +191,10 @@ int main(int argc, char** argv)
    chrono::high_resolution_clock::time_point begin, end;
    // -------------------------------------------------------------------------------------
    // LeanStore DB
+   double effective_page_to_frame_ratio = sizeof(leanstore::storage::BufferFrame::Page) / (sizeof(leanstore::storage::BufferFrame) + 0.0);
    double top_tree_size_gib = 0;
    if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
-      top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
+      top_tree_size_gib = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * effective_page_to_frame_ratio;
    } else if (FLAGS_index_type == kIndexTypeUpLSMT || 
               FLAGS_index_type == kIndexTypeLSMT || 
               FLAGS_index_type == kIndexTypeAntiCache || 
@@ -205,14 +205,15 @@ int main(int argc, char** argv)
               FLAGS_index_type == kIndexTypeTrieLSMT ||
               FLAGS_index_type == kIndexTypeC2BTree ||
               FLAGS_index_type == kIndexTypeSTX2BTree) {
-      top_tree_size_gib = FLAGS_dram_gib * FLAGS_cached_btree_ram_ratio;
-      FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_cached_btree_ram_ratio);
+      top_tree_size_gib = FLAGS_dram_gib * FLAGS_top_component_dram_ratio;
+      FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_top_component_dram_ratio);
    } else {
       cout << "Unknown index type " << FLAGS_index_type << std::endl;
       assert(false);
       exit(1);
    }
 
+   cout << "effective_page_to_frame_ratio " << effective_page_to_frame_ratio << std::endl;
    cout << "index type " << FLAGS_index_type << std::endl; 
    cout << "request distribution " << FLAGS_ycsb_request_dist << std::endl;
    cout << "dram_gib " << FLAGS_dram_gib << std::endl;

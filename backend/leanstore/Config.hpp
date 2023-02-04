@@ -27,6 +27,8 @@ DECLARE_bool(profiling);
 DECLARE_uint32(print_debug_interval_s);
 DECLARE_bool(enable_perf);
 DECLARE_bool(lower_eviction_prob_for_hot_data);
+DECLARE_bool(hot_cold_partition);
+DECLARE_double(top_component_dram_ratio);
 DECLARE_string(iostat_dev);
 // -------------------------------------------------------------------------------------
 DECLARE_bool(contention_split);

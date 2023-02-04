@@ -453,7 +453,7 @@ bool BTreeLL::isBTreeLeaf(void* btree_object, BufferFrame& to_find)
 }
 
 bool BTreeLL::keepInMemory(void* btree_object) {
-   return reinterpret_cast<BTreeLL*>(btree_object)->keep_in_memory;
+   return reinterpret_cast<BTreeLL*>(btree_object)->hot_partition;
 }
 
 struct ParentSwipHandler BTreeLL::findParent(void* btree_object, BufferFrame& to_find)
