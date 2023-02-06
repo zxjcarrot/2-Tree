@@ -260,13 +260,13 @@ BufferFrame& BufferManager::allocatePage(bool from_hot_partition)
    } else {
       partition = &randomPartition();
    }
+
    // Pick a pratition randomly
    PID free_pid;
    BufferFrame* free_bf;
    
    free_bf = &partition->dram_free_list.pop();
    free_pid = partition->nextPID();
-   
    
    assert(free_bf->header.state == BufferFrame::STATE::FREE);
    // -------------------------------------------------------------------------------------
@@ -297,6 +297,9 @@ BufferFrame& BufferManager::allocatePage(bool from_hot_partition)
    // -------------------------------------------------------------------------------------
    COUNTERS_BLOCK() { WorkerCounters::myCounters().allocate_operations_counter++; }
    // -------------------------------------------------------------------------------------
+   if (from_hot_partition) {
+      hot_pages++;
+   }
    return *free_bf;
 }
 // -------------------------------------------------------------------------------------
@@ -309,6 +312,11 @@ void BufferManager::reclaimPage(BufferFrame& bf)
    Partition& partition = getPartition(bf.header.pid);
    partition.freePage(bf.header.pid);
    assert(bf.header.state != BufferFrame::STATE::FREE);
+   bool was_hot_data_page = bf.page.hot_data;
+   if (was_hot_data_page) {
+      --hot_pages;
+      assert(hot_pages >= 0);
+   }
    // -------------------------------------------------------------------------------------
    if (bf.header.isWB) {
       // DO NOTHING ! we have a garbage collector ;-)

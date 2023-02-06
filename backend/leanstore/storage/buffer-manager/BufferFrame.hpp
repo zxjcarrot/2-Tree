@@ -46,7 +46,8 @@ struct BufferFrame {
       u64 GSN = 0;
       DTID dt_id = 9999;                                                                // INIT: datastructure id
       u64 magic_debugging_number;                                                       // ATTENTION
-      u8 dt[PAGE_SIZE - sizeof(GSN) - sizeof(dt_id) - sizeof(magic_debugging_number)];  // Datastruture BE CAREFUL HERE !!!!!
+      u64 hot_data = false;
+      u8 dt[PAGE_SIZE - sizeof(GSN) - sizeof(dt_id) - sizeof(magic_debugging_number) - sizeof(hot_data)];  // Datastruture BE CAREFUL HERE !!!!!
       // -------------------------------------------------------------------------------------
       operator u8*() { return reinterpret_cast<u8*>(this); }
       // -------------------------------------------------------------------------------------
@@ -72,6 +73,7 @@ struct BufferFrame {
       header.state = STATE::FREE;  // INIT:
       header.isWB = false;
       header.pid = 9999;
+      header.keep_in_memory = false;
       header.next_free_bf = nullptr;
       header.contention_tracker.reset();
       // std::memset(reinterpret_cast<u8*>(&page), 0, PAGE_SIZE);

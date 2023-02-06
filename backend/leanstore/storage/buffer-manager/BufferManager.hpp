@@ -122,6 +122,7 @@ class BufferManager
    DTRegistry& getDTRegistry() { return DTRegistry::global_dt_registry; }
    u64 consumedPages();
    BufferFrame& getContainingBufferFrame(const u8*);  // get the buffer frame containing the given ptr address
+   atomic<s64> hot_pages {0};
 };                                                    // namespace storage
 // -------------------------------------------------------------------------------------
 class BMC

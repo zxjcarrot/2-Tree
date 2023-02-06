@@ -51,6 +51,8 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::hashing::LinearHashTable & hot_hash_table;
    leanstore::storage::hashing::LinearHashTable & cold_hash_table;
 
+   leanstore::storage::BufferManager * buf_mgr = nullptr;
+
    DistributedCounter<> hot_ht_ios = 0;
    DistributedCounter<> ht_buffer_miss = 0;
    DistributedCounter<> ht_buffer_hit = 0;
@@ -115,7 +117,9 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    }
 
    bool cache_under_pressure() {
+      //return buf_mgr->hot_pages.load() * leanstore::storage::PAGE_SIZE >=  hot_partition_capacity_bytes;
       return hot_partition_size_bytes >= hot_partition_capacity_bytes * eviction_threshold;
+      //return hot_hash_table.dataStored() / (hot_hash_table.dataPages() * leanstore::storage::PAGE_SIZE + 0.00001) >= hot_partition_capacity_bytes;
    }
 
    void clear_stats() override {
@@ -245,7 +249,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
                   upsert_cold_partition(strip_off_partition_bit(key), tagged_payload.payload); // Cold partition
                }
             } else { // exclusive, put it back in the on-disk B-Tree
-               insert_partition(strip_off_partition_bit(key), tagged_payload.payload, true); // Cold partition
+               insert_cold_partition(strip_off_partition_bit(key), tagged_payload.payload); // Cold partition
             }
             assert(is_in_hot_partition(key));
             auto op_res = hot_hash_table.remove(key_bytes, fold(key_bytes, key));
@@ -283,7 +287,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    }
 
    void admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
-      insert_partition(strip_off_partition_bit(k), v, false, dirty, referenced); // Hot partition
+      insert_hot_partition(strip_off_partition_bit(k), v, dirty, referenced); // Hot partition
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
    }
    
@@ -296,6 +300,10 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
 
    void scan([[maybe_unused]] Key start_key, [[maybe_unused]] std::function<bool(const Key&, const Payload &)> processor, [[maybe_unused]] int length) { ensure(false); }
    
+   void set_buffer_manager(storage::BufferManager * buf_mgr) { 
+      this->buf_mgr = buf_mgr;
+   }
+
    bool lookup(Key k, Payload & v) override {
       bool ret = false;
       while (true) {
@@ -346,8 +354,8 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       auto cold_key = tag_with_cold_bit(k);
       mark_dirty = false;
       res = cold_hash_table.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused))) { 
-         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         memcpy(&v, &tp->payload, sizeof(tp->payload)); 
+         Payload *pl =  const_cast<Payload*>(reinterpret_cast<const Payload*>(payload));
+         memcpy(&v, pl, sizeof(Payload)); 
          }, mark_dirty) ==
             leanstore::storage::hashing::OP_RESULT::OK;
 
@@ -378,22 +386,15 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    void upsert_cold_partition(Key k, Payload & v) {
       u8 key_bytes[sizeof(Key)];
       Key key = tag_with_cold_bit(k);
-      TaggedPayload tp;
-      tp.set_modified();
-      tp.set_referenced();
-      tp.payload = v;
 
-      auto op_res = cold_hash_table.upsert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+      auto op_res = cold_hash_table.upsert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&v), sizeof(Payload));
       assert(op_res == leanstore::storage::hashing::OP_RESULT::OK);
    }
 
-   // hot_or_cold: false => hot partition, true => cold partition
-   void insert_partition(Key k, Payload & v, bool hot_or_cold, bool modified = false, bool referenced = true) {
+   void insert_hot_partition(Key k, Payload & v, bool modified = false, bool referenced = true) {
       u8 key_bytes[sizeof(Key)];
-      Key key = hot_or_cold == false ? tag_with_hot_bit(k) : tag_with_cold_bit(k);
-      if (hot_or_cold == false) {
-         hot_partition_item_count++;
-      }
+      Key key = tag_with_hot_bit(k);
+      hot_partition_item_count++;
       TaggedPayload tp;
       if (referenced == false) {
          tp.clear_referenced();
@@ -408,15 +409,17 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       }
       tp.payload = v;
       
-      if (hot_or_cold == false) {
-         HIT_STAT_START;
-         auto op_res = hot_hash_table.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
-         assert(op_res == leanstore::storage::hashing::OP_RESULT::OK);
-         HIT_STAT_END;
-      } else {
-         auto op_res = cold_hash_table.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
-         assert(op_res == leanstore::storage::hashing::OP_RESULT::OK);
-      }
+      HIT_STAT_START;
+      auto op_res = hot_hash_table.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+      assert(op_res == leanstore::storage::hashing::OP_RESULT::OK);
+      HIT_STAT_END;
+   }
+
+   void insert_cold_partition(Key k, Payload & v) {
+      u8 key_bytes[sizeof(Key)];
+      Key key = tag_with_cold_bit(k);
+      auto op_res = cold_hash_table.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&v), sizeof(Payload));
+      assert(op_res == leanstore::storage::hashing::OP_RESULT::OK);
    }
 
    void insert(Key k, Payload& v) override
@@ -474,8 +477,8 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       //OLD_HIT_STAT_START;
       bool mark_dirty = false;
       auto res __attribute__((unused)) = cold_hash_table.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
-         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         memcpy(&old_v, &tp->payload, sizeof(tp->payload)); 
+         Payload *pl =  const_cast<Payload*>(reinterpret_cast<const Payload*>(payload));
+         memcpy(&old_v, pl, sizeof(Payload)); 
          }, mark_dirty);
          
       if(res == leanstore::storage::hashing::OP_RESULT::NOT_FOUND){
@@ -498,10 +501,8 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
          }
       } else {
          bool res = cold_hash_table.lookupForUpdate(key_bytes, fold(key_bytes, cold_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
-            TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-            tp->set_referenced();
-            tp->set_modified();
-            memcpy(&tp->payload, &v, sizeof(Payload)); 
+            Payload *pl =  reinterpret_cast<Payload*>(payload);
+            memcpy(pl, &v, sizeof(Payload)); 
             return true;
          }) == leanstore::storage::hashing::OP_RESULT::OK;
          assert(res);
@@ -573,12 +574,16 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       std::cout << "Hot partition capacity in bytes " << hot_partition_capacity_bytes << std::endl;
       std::cout << "Hot partition size in bytes " << hot_partition_size_bytes << std::endl;
       std::cout << "Hash Table # entries " << num_hash_table_entries << std::endl;
-      std::cout << "Hot Hash Table # hot entries " << num_hot_entries << std::endl;
+      std::cout << "Hot Hash Table # entries " << num_hot_entries << std::endl;
       std::cout << "Hot Hash Table # pages " << hot_hash_table_pages << std::endl;
+      std::cout << "Hot Hash Table # pages (fast) " << hot_hash_table.dataPages() << std::endl;
+      std::cout << "Hot Hash Table bytes stored " << hot_hash_table.dataStored() << std::endl;
       std::cout << "Hot Hash Table # buckets " << hot_hash_table.countBuckets() << std::endl;
       std::cout << "Hot Hash Table power multiplier " << hot_hash_table.powerMultiplier() << std::endl;
-      std::cout << "Cold Hash Table # hot entries " << num_cold_entries << std::endl;
+      std::cout << "Cold Hash Table # entries " << num_cold_entries << std::endl;
       std::cout << "Cold Hash Table # pages " << cold_hash_table_pages << std::endl;
+      std::cout << "Cold Hash Table # pages (fast) " << cold_hash_table.dataPages() << std::endl;
+      std::cout << "Cold Hash Table bytes stored " << cold_hash_table.dataStored() << std::endl;
       std::cout << "Cold Hash Table # buckets " << cold_hash_table.countBuckets() << std::endl;
       std::cout << "Cold Hash Table power multiplier " << cold_hash_table.powerMultiplier() << std::endl;
       auto minimal_pages = (num_hash_table_entries) * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;

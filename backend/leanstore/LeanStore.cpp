@@ -203,7 +203,7 @@ void LeanStore::startProfilingThread()
             table.format().width(10);
             table.column(0).format().width(5);
             table.column(1).format().width(12);
-            table.column(15).format().width(12);
+            //table.column(15).format().width(12);
             // -------------------------------------------------------------------------------------
             auto print_table = [](tabulate::Table& table, std::function<bool(u64)> predicate) {
                std::stringstream ss;

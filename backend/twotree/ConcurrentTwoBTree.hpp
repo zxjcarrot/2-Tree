@@ -516,6 +516,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    OptimisticLockTable lock_table;
    leanstore::storage::btree::BTreeInterface& hot_btree;
    leanstore::storage::btree::BTreeInterface& cold_btree;
+   leanstore::storage::BufferManager * buf_mgr = nullptr;
 
    DistributedCounter<> hot_tree_ios;
    DistributedCounter<> btree_buffer_miss;
@@ -600,7 +601,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    }
 
    bool cache_under_pressure() {
-      return hot_partition_size_bytes >= hot_partition_capacity_bytes * eviction_threshold;
+      return buf_mgr->hot_pages.load() * leanstore::storage::PAGE_SIZE >=  hot_partition_capacity_bytes;
+      //return hot_partition_size_bytes >= hot_partition_capacity_bytes * eviction_threshold;
    }
 
    void clear_stats() override {
@@ -782,18 +784,15 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
             }
             auto tagged_payload = &evict_payloads[i];
             assert(is_in_hot_partition(key));
-            // auto op_res = hot_btree.remove(key_bytes, fold(key_bytes, key));
-            // hot_partition_item_count--;
-            // assert(op_res == OP_RESULT::OK);
-            // hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
             if (inclusive) {
                if (tagged_payload->modified()) {
                   upsert_cold_partition(strip_off_partition_bit(key), tagged_payload->payload); // Cold partition
+                  ++downward_migrations;
                }
             } else { // exclusive, put it back in the on-disk B-Tree
-               insert_partition(strip_off_partition_bit(key), tagged_payload->payload, true); // Cold partition
+               insert_cold_partition(strip_off_partition_bit(key), tagged_payload->payload); // Cold partition
+               ++downward_migrations;
             }
-            ++downward_migrations;
 
             assert(is_in_hot_partition(key));
             auto op_res = hot_btree.remove(key_bytes, fold(key_bytes, key));
@@ -801,12 +800,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
             assert(op_res == OP_RESULT::OK);
             hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
          }
-         // for (size_t i = 0; i< evict_keys.size(); ++i) {
-         //    auto key = evict_keys[i];
-         //    auto tagged_payload = evict_payloads[i];
-            
-         // }
-         
+
          auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
          assert(io_reads_new >= io_reads_old);
          eviction_io_reads += io_reads_new - io_reads_old;
@@ -836,7 +830,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    }
 
    void admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
-      insert_partition(strip_off_partition_bit(k), v, false, dirty, referenced); // Hot partition
+      insert_hot_partition(strip_off_partition_bit(k), v, dirty, referenced);
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
    }
    
@@ -967,6 +961,10 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       return;
    }
 
+   void set_buffer_manager(storage::BufferManager * buf_mgr) { 
+      this->buf_mgr = buf_mgr;
+   }
+
    bool lookup(Key k, Payload & v) {
       try_eviction();
       while (true) {
@@ -996,7 +994,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
          TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
          if (tp->referenced() == false) {
             tp->set_referenced();
-            mark_dirty = true;
+            mark_dirty = utils::RandomGenerator::getRandU64(0, 100) < 10;
          }
          memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
          }, mark_dirty) ==
@@ -1010,8 +1008,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
       auto cold_key = tag_with_cold_bit(k);
       res = cold_btree.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused))) { 
-         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
+         Payload *pl =  const_cast<Payload*>(reinterpret_cast<const Payload*>(payload));
+         memcpy(&v, pl, sizeof(Payload)); 
          }) ==
             OP_RESULT::OK;
 
@@ -1041,32 +1039,16 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    void upsert_cold_partition(Key k, Payload & v) {
       u8 key_bytes[sizeof(Key)];
       Key key = tag_with_cold_bit(k);
-      TaggedPayload tp;
-      tp.set_modified();
-      tp.set_referenced();
-      tp.payload = v;
-      //HIT_STAT_START;
-      // auto op_res = cold_btree.updateSameSize(key_bytes, fold(key_bytes, key), [&](u8* payload, u16 payload_length) {
-      //    TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-      //    tp->set_referenced();
-      //    memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
-      // }, Payload::wal_update_generator);
-      //HIT_STAT_END;
 
-      auto op_res = cold_btree.upsert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+      auto op_res = cold_btree.upsert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&v), sizeof(Payload));
       assert(op_res == OP_RESULT::OK);
-      // if (op_res == OP_RESULT::NOT_FOUND) {
-      //    insert_partition(k, v, true);
-      // }
    }
 
    // hot_or_cold: false => hot partition, true => cold partition
-   void insert_partition(Key k, Payload & v, bool hot_or_cold, bool modified = false, bool referenced = true) {
+   void insert_hot_partition(Key k, Payload & v, bool modified = false, bool referenced = true) {
       u8 key_bytes[sizeof(Key)];
-      Key key = hot_or_cold == false ? tag_with_hot_bit(k) : tag_with_cold_bit(k);
-      if (hot_or_cold == false) {
-         hot_partition_item_count++;
-      }
+      Key key = tag_with_hot_bit(k);
+      hot_partition_item_count++;
       TaggedPayload tp;
       if (referenced == false) {
          tp.clear_referenced();
@@ -1081,15 +1063,17 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       }
       tp.payload = v;
       
-      if (hot_or_cold == false) {
-         HIT_STAT_START;
-         auto op_res = hot_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
-         assert(op_res == OP_RESULT::OK);
-         HIT_STAT_END;
-      } else {
-         auto op_res = cold_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
-         assert(op_res == OP_RESULT::OK);
-      }
+      HIT_STAT_START;
+      auto op_res = hot_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+      assert(op_res == OP_RESULT::OK);
+      HIT_STAT_END;
+   }
+
+   void insert_cold_partition(Key k, Payload & v) {
+      u8 key_bytes[sizeof(Key)];
+      Key key = tag_with_cold_bit(k);
+      auto op_res = cold_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&v), sizeof(Payload));
+      assert(op_res == OP_RESULT::OK);
    }
 
    void insert(Key k, Payload& v) override
@@ -1133,8 +1117,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       auto cold_key = tag_with_cold_bit(k);
       //OLD_HIT_STAT_START;
       auto res __attribute__((unused)) = cold_btree.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
-         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         memcpy(&old_v, tp->payload.value, sizeof(tp->payload)); 
+         Payload *pl =  const_cast<Payload*>(reinterpret_cast<const Payload*>(payload));
+         memcpy(&old_v, pl, sizeof(Payload)); 
          }) ==
             OP_RESULT::OK;
       assert(res);
@@ -1154,10 +1138,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
          }
       } else {
          cold_btree.updateSameSize(key_bytes, fold(key_bytes, cold_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
-            TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-            tp->set_referenced();
-            tp->set_modified();
-            memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+            Payload *pl =  reinterpret_cast<Payload*>(payload);
+            memcpy(pl, &v, sizeof(Payload)); 
          }, Payload::wal_update_generator);
       }
    }

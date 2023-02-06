@@ -98,6 +98,8 @@ class LinearHashTable
    // -------------------------------------------------------------------------------------
    u64 countPages();
    u64 countEntries();
+   u64 dataPages() { return data_pages.load(); }
+   u64 dataStored() { return data_stored.load(); }
    u64 countBuckets() { return sp.load_buddy_bucket(); }
    u64 powerMultiplier()  { return sp.load_power(); }
    // -------------------------------------------------------------------------------------
@@ -166,6 +168,7 @@ private:
    //std::atomic<u64> i_{0};
    //std::atomic<u64> s_{0};
    std::atomic<u64> data_stored{0};
+   std::atomic<s64> data_pages{0};
    //std::atomic<u64> s_buddy{N}; // invariant: s + N * 2^i = s_buddy.
    struct split_pointer sp;
    std::shared_mutex split_mtx;

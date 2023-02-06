@@ -264,7 +264,7 @@ int main(int argc, char** argv)
    });
    
    if (FLAGS_index_type == kIndexTypeHash) {
-      adapter.reset(new HashVSAdapter<YCSBKey, YCSBPayload>(*ht_ptr, ht_ptr->dt_id));
+      adapter.reset(new HashVSAdapter<YCSBKey, YCSBPayload>(*ht2_ptr, ht2_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexTypeBTree) {
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, btree2_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexType2BTree) {
@@ -301,6 +301,7 @@ int main(int argc, char** argv)
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
    db.registerConfigEntry("ycsb_target_gib", FLAGS_target_gib);
    db.startProfilingThread();
+   adapter->set_buffer_manager(db.buffer_manager.get());
    // -------------------------------------------------------------------------------------
    auto& table = *adapter;
    // Insert values
@@ -425,7 +426,7 @@ int main(int argc, char** argv)
    cout << "~Transactions" << endl;
 
    adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
-   
+   std::cout << "Hot pages: " << db.buffer_manager->hot_pages << std::endl;
    //adapter->evict_all();
    // if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeLSMT)
    {
@@ -544,6 +545,7 @@ int main(int argc, char** argv)
       // -------------------------------------------------------------------------------------
       cout << "Total commit: " << calculateMTPS(begin, end, txs.load()) << " M tps" << endl;
       adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
+      std::cout << "Hot pages: " << db.buffer_manager->hot_pages << std::endl;
       show_5_min_rule_placement(access_count, sum_reaccess_interval, sizeof(YCSBPayload) + sizeof(YCSBKey));
       if (FLAGS_ycsb_request_dist == kRequestDistributionZipfian) {
          zipf_keyspace_stats((utils::ScrambledZipfGenerator*)random_generator.get());

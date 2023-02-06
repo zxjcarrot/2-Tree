@@ -1,5 +1,7 @@
 #pragma once
 #include<functional>
+
+#include "leanstore/storage/buffer-manager/BufferManager.hpp"
 namespace leanstore {
 
 template <typename Key, typename Payload>
@@ -15,6 +17,7 @@ struct StorageInterface {
    virtual void report_cache(){}
    virtual void clear_stats() {}
    virtual void evict_all() {}
+   virtual void set_buffer_manager(storage::BufferManager *) {}
 };
 
 

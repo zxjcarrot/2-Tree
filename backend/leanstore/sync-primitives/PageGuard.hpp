@@ -35,11 +35,18 @@ class HybridPageGuard
    HybridPageGuard(HybridPageGuard&& other) = delete;  // Move constructor
    // -------------------------------------------------------------------------------------
    // I: Allocate a new page
-   HybridPageGuard(DTID dt_id, bool keep_alive = true, bool from_hot_partition = true)
-       : bf(&BMC::global_bf->allocatePage(from_hot_partition)), guard(bf->header.latch, GUARD_STATE::EXCLUSIVE), keep_alive(keep_alive)
+   HybridPageGuard(DTID dt_id, bool keep_alive = true, bool keep_in_memory = true)
+       : bf(&BMC::global_bf->allocatePage(keep_in_memory)), guard(bf->header.latch, GUARD_STATE::EXCLUSIVE), keep_alive(keep_alive)
    {
       assert(BMC::global_bf != nullptr);
       bf->page.dt_id = dt_id;
+      if (keep_in_memory) {
+         bf->header.keep_in_memory = true;
+         bf->page.hot_data = true;
+      } else {
+         bf->header.keep_in_memory = false;
+         bf->page.hot_data = false;
+      }
       jumpmu_registerDestructor();
    }
    // -------------------------------------------------------------------------------------

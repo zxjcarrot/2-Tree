@@ -134,6 +134,8 @@ struct HashVSAdapter : StorageInterface<Key, Payload> {
       std::cout << "Hash Table # entries (real) " << real_entries << std::endl;
       std::cout << "Hash Table # pages " << pages << std::endl;
       std::cout << "Hash Table # pages (real) " << real_pages << std::endl;
+      std::cout << "Hash Table # pages (fast) " << hash_table.dataPages() << std::endl;
+      std::cout << "Hash Table bytes stored " << hash_table.dataStored() << std::endl;
       std::cout << "Hash Table # buckets " << hash_table.countBuckets() << std::endl;
       std::cout << "Hash Table power multiplier " << hash_table.powerMultiplier() << std::endl;
       auto minimal_pages = entries * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;
