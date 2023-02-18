@@ -242,25 +242,72 @@ class BTreeExclusiveIterator : public BTreePessimisticIterator<LATCH_FALLBACK_MO
          jumpmuCatch() {}
       }
    }
+   virtual void splitForKeyMightFail(Slice key)
+   {
+      if (cur == -1 || !keyFitsInCurrentNode(key)) {
+         btree.findLeafCanJump<LATCH_FALLBACK_MODE::SHARED>(leaf, key.data(), key.length());
+      }
+      BufferFrame* bf = leaf.bf;
+      leaf.unlock();
+      cur = -1;
+      // -------------------------------------------------------------------------------------
+      btree.trySplit(*bf);
+   }
    virtual OP_RESULT insertKV(Slice key, Slice value)
    {
       OP_RESULT ret;
-   restart : {
-      ret = seekToInsert(key);
-      if (ret != OP_RESULT::OK) {
-         return ret;
-      }
-      ret = canInsertInCurrentNode(key, value.length());
-      if (ret == OP_RESULT::NOT_ENOUGH_SPACE) {
-         splitForKey(key);
-         goto restart;
-      } else if (ret == OP_RESULT::OK) {
-         insertInCurrentNode(key, value);
-         return OP_RESULT::OK;
-      } else {
-         return ret;
+      restart : {
+         ret = seekToInsert(key);
+         if (ret != OP_RESULT::OK) {
+            return ret;
+         }
+         ret = canInsertInCurrentNode(key, value.length());
+         if (ret == OP_RESULT::NOT_ENOUGH_SPACE) {
+            splitForKey(key);
+            goto restart;
+         } else if (ret == OP_RESULT::OK) {
+            insertInCurrentNode(key, value);
+            return OP_RESULT::OK;
+         } else {
+            return ret;
+         }
       }
    }
+
+   virtual OP_RESULT insertKVMightFail(Slice key, Slice value)
+   {
+      OP_RESULT ret;
+      restart : {
+         ret = seekToInsert(key);
+         if (ret != OP_RESULT::OK) {
+            return ret;
+         }
+         ret = canInsertInCurrentNode(key, value.length());
+         if (ret == OP_RESULT::NOT_ENOUGH_SPACE) {
+            bool good = true;
+            jumpmuTry()
+            {
+               splitForKeyMightFail(key);
+               good = true;
+            }
+            jumpmuCatch() {
+               if (BufferManager::this_thread_alloc_failed == true) {
+                  good = false;
+               }
+            }
+            //BufferManager::this_thread_alloc_failed = false;
+            if (good) {
+               goto restart;
+            } else {
+               return OP_RESULT::NOT_ENOUGH_SPACE;
+            }
+         } else if (ret == OP_RESULT::OK) {
+            insertInCurrentNode(key, value);
+            return OP_RESULT::OK;
+         } else {
+            return ret;
+         }
+      }
    }
    // -------------------------------------------------------------------------------------
    virtual OP_RESULT replaceKV(Slice key, Slice value)

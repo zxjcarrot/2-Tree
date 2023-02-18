@@ -253,6 +253,7 @@ storage::btree::BTreeLL& LeanStore::registerBTreeLL(string name, bool hot_partit
    auto& bf = buffer_manager->allocatePage(true);
    Guard guard(bf.header.latch, GUARD_STATE::EXCLUSIVE);
    bf.header.keep_in_memory = true;
+   bf.page.hot_data = true;
    bf.page.dt_id = dtid;
    btree.hot_partition = hot_partition;
    guard.unlock();

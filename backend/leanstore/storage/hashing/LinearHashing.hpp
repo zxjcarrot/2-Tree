@@ -55,6 +55,7 @@ public:
                write_guard.init();
                auto bf = write_guard.bf();
                bf->header.keep_in_memory = true;
+               bf->page.hot_data = true;
                int j = idx.fetch_add(1);
                dirNodes[j] = (bf);
                jumpmu_break;

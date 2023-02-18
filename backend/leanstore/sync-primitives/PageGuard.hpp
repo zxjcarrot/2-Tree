@@ -79,8 +79,6 @@ class HybridPageGuard
       } else if (if_contended == LATCH_FALLBACK_MODE::SHARED) {
          guard.toOptimisticOrShared();
       }
-      [[maybe_unused]] auto s = bf->header.state;
-      assert(s != BufferFrame::STATE::FREE);
       syncGSN();
       jumpmu_registerDestructor();
       // -------------------------------------------------------------------------------------
@@ -93,6 +91,8 @@ class HybridPageGuard
       }
       // -------------------------------------------------------------------------------------
       p_guard.recheck();
+      [[maybe_unused]] auto s = bf->header.state;
+      assert(s != BufferFrame::STATE::FREE);
    }
    // I: Downgrade exclusive
    HybridPageGuard(ExclusivePageGuard<T>&&) = delete;

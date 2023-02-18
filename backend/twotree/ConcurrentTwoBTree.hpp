@@ -548,6 +548,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    DistributedCounter<> hot_partition_item_count = 0;
    DistributedCounter<> upward_migrations = 0;
+   DistributedCounter<> failed_upward_migrations = 0;
    DistributedCounter<> downward_migrations = 0;
    DistributedCounter<> eviction_bounding_time = 0;
    DistributedCounter<> eviction_bounding_n = 0;
@@ -680,8 +681,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    alignas(64) std::atomic<u64> eviction_round_ref_counter[2];
    alignas(64) std::atomic<u64> eviction_round{0};
    alignas(64) std::mutex eviction_mutex;
-   void evict_a_bunch() {
-      [[maybe_unused]] u16 steps = kClockWalkSteps; // number of nodes to scan
+   void evict_a_bunch(int steps_to_walk = kClockWalkSteps) {
+      [[maybe_unused]] u16 steps = steps_to_walk; // number of nodes to scan
       Key start_key;
       Key end_key;
       u64 this_eviction_round;
@@ -817,7 +818,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       }
    }
    
-   static constexpr s64 kEvictionCheckInterval = 100;
+   static constexpr s64 kEvictionCheckInterval = 30;
    DistributedCounter<> eviction_count_down {kEvictionCheckInterval};
    void try_eviction() {
       --eviction_count_down;
@@ -829,9 +830,20 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       }
    }
 
-   void admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
-      insert_hot_partition(strip_off_partition_bit(k), v, dirty, referenced);
-      hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
+   void try_eviction_direct() {
+      --eviction_count_down;
+      if (eviction_count_down.load() <= 0) {
+            evict_a_bunch();
+         eviction_count_down += kEvictionCheckInterval;
+      }
+   }
+
+   bool admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
+      if (insert_hot_partition(strip_off_partition_bit(k), v, dirty, referenced)) {
+         hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
+         return true;
+      }
+      return false;
    }
    
    bool should_migrate() {
@@ -1018,18 +1030,25 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
             if (g.upgrade_to_write_lock() == false) { // obtain a write lock for migration
                return false;
             }
-            ++upward_migrations;
-            if (inclusive == false) {
+            
+            // move to hot partition
+            OLD_HIT_STAT_START;
+            bool res = admit_element(k, v);
+            OLD_HIT_STAT_END;
+            if (res) {
+               ++upward_migrations;
+            } else {
+               ++failed_upward_migrations;
+               assert(false);
+            }
+            if (inclusive == false && res) {
                //OLD_HIT_STAT_START;
                // remove from the cold partition
                auto op_res __attribute__((unused))= cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
                assert(op_res == OP_RESULT::OK);
                //OLD_HIT_STAT_END
             }
-            // move to hot partition
-            OLD_HIT_STAT_START;
-            admit_element(k, v);
-            OLD_HIT_STAT_END;
+            
             //hot_tree_ios += new_miss - old_miss;
          }
       }
@@ -1045,7 +1064,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    }
 
    // hot_or_cold: false => hot partition, true => cold partition
-   void insert_hot_partition(Key k, Payload & v, bool modified = false, bool referenced = true) {
+   bool insert_hot_partition(Key k, Payload & v, bool modified = false, bool referenced = true) {
       u8 key_bytes[sizeof(Key)];
       Key key = tag_with_hot_bit(k);
       hot_partition_item_count++;
@@ -1067,6 +1086,13 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       auto op_res = hot_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
       assert(op_res == OP_RESULT::OK);
       HIT_STAT_END;
+      return true;
+      // if (op_res != OP_RESULT::OK) {
+      //    assert(op_res == OP_RESULT::NOT_ENOUGH_SPACE);
+      //    return false;
+      // } else {
+      //    return true;
+      // }
    }
 
    void insert_cold_partition(Key k, Payload & v) {
@@ -1078,16 +1104,29 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    void insert(Key k, Payload& v) override
    {
+      int retries = 0;
+      retry:
       try_eviction();
+      // if (retries == 0) {
+      //    try_eviction();
+      // } else {
+      //    evict_a_bunch();
+      //    retries = -1;
+      // }
+      ++retries;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       LockGuardProxy g(&lock_table, k);
       
       while (g.write_lock() == false);
 
+      bool res = false;
       if (inclusive) {
-         admit_element(k, v, true, false);
+         res = admit_element(k, v, true, false);
       } else {
-         admit_element(k, v);
+         res = admit_element(k, v);
+      }
+      if (res == false) {
+         goto retry;
       }
    }
 
@@ -1125,12 +1164,14 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       //OLD_HIT_STAT_END;
 
       if (should_migrate()) {
-         ++upward_migrations;
          OLD_HIT_STAT_START;
-         admit_element(k, v, true);
+         bool succeed = admit_element(k, v, true);
          OLD_HIT_STAT_END;
          hot_tree_ios += new_miss - old_miss;
-         if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
+         if (succeed) {
+            ++upward_migrations;
+         }
+         if (inclusive == false && succeed) { // If exclusive, remove the tuple from the on-disk B-Tree
             //OLD_HIT_STAT_START;
             // remove from the cold partition
             auto op_res __attribute__((unused)) = cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
@@ -1146,6 +1187,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
 
    void put(Key k, Payload& v) override {
+      retry:
       try_eviction();
       LockGuardProxy g(&lock_table, k);
       while (g.write_lock() == false);
@@ -1164,7 +1206,10 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       if (op_res == OP_RESULT::OK) {
          return;
       }
-
+      // move to hot partition
+      if(admit_element(k, v, true) == false) {
+         goto retry;
+      }
       if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
          auto cold_key = tag_with_cold_bit(k);
          //OLD_HIT_STAT_START;
@@ -1173,8 +1218,6 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
          assert(op_res == OP_RESULT::OK);
          //OLD_HIT_STAT_END;
       }
-      // move to hot partition
-      admit_element(k, v, true);
    }
 
    double hot_btree_utilization(u64 entries, u64 pages) {

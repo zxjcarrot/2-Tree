@@ -107,12 +107,16 @@ struct Guard {
    {
       if (state == GUARD_STATE::EXCLUSIVE) {
          assert(this->latch != nullptr);
+         latch->assertExclusivelyLatched();
+         assert(version == latch->ref());
          version += LATCH_EXCLUSIVE_BIT;
          latch->ref().store(version, std::memory_order_release);
          latch->mutex.unlock();
          state = GUARD_STATE::OPTIMISTIC;
       } else if (state == GUARD_STATE::SHARED) {
          assert(this->latch != nullptr);
+         latch->assertNotExclusivelyLatched();
+         assert(version == latch->ref());
          latch->mutex.unlock_shared();
          state = GUARD_STATE::OPTIMISTIC;
       }

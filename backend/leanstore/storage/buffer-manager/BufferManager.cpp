@@ -31,6 +31,7 @@ namespace leanstore
 {
 namespace storage
 {
+thread_local atomic<bool> BufferManager::this_thread_alloc_failed{false};
 // -------------------------------------------------------------------------------------
 BufferManager::BufferManager(s32 ssd_fd) : ssd_fd(ssd_fd)
 {
@@ -250,6 +251,10 @@ BufferFrame& BufferManager::nextBufferFrame(bool & hot_cold) {
 // returns a *write locked* new buffer frame
 BufferFrame& BufferManager::allocatePage(bool from_hot_partition)
 {
+   // if (from_hot_partition && hot_pages >= hot_pages_limit) {
+   //    jumpmu::jump();
+   //    this_thread_alloc_failed.store(true);
+   // }
    Partition * partition = nullptr;
    if (FLAGS_hot_cold_partition) {
       if (from_hot_partition) {
@@ -299,6 +304,7 @@ BufferFrame& BufferManager::allocatePage(bool from_hot_partition)
    // -------------------------------------------------------------------------------------
    if (from_hot_partition) {
       hot_pages++;
+      this_thread_alloc_failed.store(true);
    }
    return *free_bf;
 }
@@ -356,10 +362,12 @@ BufferFrame& BufferManager::resolveSwip(Guard& swip_guard, Swip<BufferFrame>& sw
    swip_guard.unlock();  // otherwise we would get a deadlock, P->G, G->P
    const PID pid = swip_value.asPageID();
    Partition& partition = getPartition(pid);
-   JMUW<std::unique_lock<std::mutex>> g_guard(partition.io_mutex, std::try_to_lock);
-   if (g_guard->owns_lock() == false) {
-      jumpmu::jump();
-   }
+   // JMUW<std::unique_lock<std::mutex>> g_guard(partition.io_mutex, std::try_to_lock);
+   // if (g_guard->owns_lock() == false) {
+   //    jumpmu::jump();
+   // }
+   JMUW<std::unique_lock<std::mutex>> g_guard(partition.io_mutex);
+
    swip_guard.recheck();
    assert(!swip_value.isHOT());
    // -------------------------------------------------------------------------------------

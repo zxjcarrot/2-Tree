@@ -193,7 +193,9 @@ int main(int argc, char** argv)
    // LeanStore DB
    double effective_page_to_frame_ratio = sizeof(leanstore::storage::BufferFrame::Page) / (sizeof(leanstore::storage::BufferFrame) + 0.0);
    double top_tree_size_gib = 0;
+   s64 hot_pages_limit = std::numeric_limits<s64>::max();
    if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
+      hot_pages_limit = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * 1024 * 1024 * 1024 / sizeof(leanstore::storage::BufferFrame);
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * effective_page_to_frame_ratio;
    } else if (FLAGS_index_type == kIndexTypeUpLSMT || 
               FLAGS_index_type == kIndexTypeLSMT || 
@@ -203,7 +205,6 @@ int main(int argc, char** argv)
               FLAGS_index_type == kIndexTypeIM2BTree ||
               FLAGS_index_type == kIndexType2LSMT || 
               FLAGS_index_type == kIndexTypeTrieLSMT ||
-              FLAGS_index_type == kIndexTypeC2BTree ||
               FLAGS_index_type == kIndexTypeSTX2BTree) {
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_top_component_dram_ratio;
       FLAGS_dram_gib = FLAGS_dram_gib * (1 - FLAGS_top_component_dram_ratio);
@@ -213,6 +214,7 @@ int main(int argc, char** argv)
       exit(1);
    }
 
+   cout << "hot_pages_limit " << hot_pages_limit << std::endl;
    cout << "effective_page_to_frame_ratio " << effective_page_to_frame_ratio << std::endl;
    cout << "index type " << FLAGS_index_type << std::endl; 
    cout << "request distribution " << FLAGS_ycsb_request_dist << std::endl;
@@ -244,6 +246,7 @@ int main(int argc, char** argv)
       random_generator.reset(new utils::SelfSimilarGenerator(0, ycsb_tuple_count, FLAGS_ycsb_request_selfsimilar_skew));
    }
    LeanStore db;
+   db.getBufferManager().hot_pages_limit = hot_pages_limit;
    unique_ptr<StorageInterface<YCSBKey, YCSBPayload>> adapter;
    leanstore::storage::btree::BTreeLL* btree_ptr = nullptr;
    leanstore::storage::btree::BTreeLL* btree2_ptr = nullptr;

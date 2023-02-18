@@ -958,9 +958,11 @@ void LinearHashTable::split() {
    // allocate enough nodes so we do not have to allocate while holding write locks.
    constexpr size_t kNTempNodes = 10;
 
+   int times = 0;
    std::vector<LinearHashingNode> split_bucket_tmp(1, LinearHashingNode(false, split_bucket));
    std::vector<LinearHashingNode> buddy_bucket_tmp(1, LinearHashingNode(false, buddy_bucket));
    while(true) {
+      ++times;
       bool succeed = false;
       // partition the data from the split bucket into two chains of buckets
       // handle overflow chains properly

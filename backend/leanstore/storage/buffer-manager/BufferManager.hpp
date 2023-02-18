@@ -123,6 +123,8 @@ class BufferManager
    u64 consumedPages();
    BufferFrame& getContainingBufferFrame(const u8*);  // get the buffer frame containing the given ptr address
    atomic<s64> hot_pages {0};
+   atomic<s64> hot_pages_limit {std::numeric_limits<s64>::max()};
+   static thread_local atomic<bool> this_thread_alloc_failed;
 };                                                    // namespace storage
 // -------------------------------------------------------------------------------------
 class BMC
