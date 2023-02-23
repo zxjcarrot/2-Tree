@@ -7,11 +7,17 @@ zipf_cache_*
 a.out
 data/
 log/
+CMakeFiles/
 adhoc/
+cmake_install.cmake
+backend/Makefile
+frontend/Makefile
+ycsb_zipf
 #release/
 #debug/
 log.txt
 git-ignore
+libleanstore.a
 *#
 debug*
 release*

@@ -452,26 +452,26 @@ struct RocksDBTwoCFAdapter : public leanstore::StorageInterface<Key, Payload> {
    };
    rocksdb::SstFileManager * top_file_manager;
 
-   class ToggleReferenceBitOperator : public rocksdb::AssociativeMergeOperator {
-   public:
-      virtual ~ToggleReferenceBitOperator() {}
-      virtual bool Merge([[maybe_unused]]  const rocksdb::Slice& key, const rocksdb::Slice* existing_value,
-                         const rocksdb::Slice& value, std::string* new_value,
-                         [[maybe_unused]]  rocksdb::Logger* logger) const override {
-         assert(existing_value != nullptr);
-         assert(existing_value->size() == sizeof(TaggedPayload));
-         TaggedPayload new_payload = *((TaggedPayload*)(existing_value->data()));
-         char toggle_value = value.data()[0];
-         assert(toggle_value == kToggleReferenceBitOff || toggle_value == kToggleReferenceBitOn);
-         new_payload.referenced = (bool)toggle_value;
-         *new_value = std::string((const char *)&new_payload, sizeof(new_payload));
-         return true;// always return true for this, since we treat all errors as "zero".
-      }
+   // class ToggleReferenceBitOperator : public rocksdb::AssociativeMergeOperator {
+   // public:
+   //    virtual ~ToggleReferenceBitOperator() {}
+   //    virtual bool Merge([[maybe_unused]]  const rocksdb::Slice& key, const rocksdb::Slice* existing_value,
+   //                       const rocksdb::Slice& value, std::string* new_value,
+   //                       [[maybe_unused]]  rocksdb::Logger* logger) const override {
+   //       assert(existing_value != nullptr);
+   //       assert(existing_value->size() == sizeof(TaggedPayload));
+   //       TaggedPayload new_payload = *((TaggedPayload*)(existing_value->data()));
+   //       char toggle_value = value.data()[0];
+   //       assert(toggle_value == kToggleReferenceBitOff || toggle_value == kToggleReferenceBitOn);
+   //       new_payload.referenced = (bool)toggle_value;
+   //       *new_value = std::string((const char *)&new_payload, sizeof(new_payload));
+   //       return true;// always return true for this, since we treat all errors as "zero".
+   //    }
 
-      virtual const char* Name() const override {
-         return "ToggleReferenceBitOperator";
-      }
-   };
+   //    virtual const char* Name() const override {
+   //       return "ToggleReferenceBitOperator";
+   //    }
+   // };
    RocksDBTwoCFAdapter(const std::string & db_dir, double toptree_cache_budget_gib, double dram_budget_gib, int lazy_migration_sampling_rate = 100, bool inclusive = false): lazy_migration(lazy_migration_sampling_rate < 100), inclusive(inclusive) {
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
@@ -524,7 +524,7 @@ struct RocksDBTwoCFAdapter : public leanstore::StorageInterface<Key, Payload> {
 
       assert(status.ok());
 
-      db_options.merge_operator.reset(new ToggleReferenceBitOperator());
+      //db_options.merge_operator.reset(new ToggleReferenceBitOperator());
       // open DB with two column families
       std::vector<rocksdb::ColumnFamilyDescriptor> column_families;
       // have to open default column family

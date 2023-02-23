@@ -43,7 +43,10 @@ public:
    }
 
    BufferFrame* getDirNode(u64 bucket_id) {
-      if (bucket_id < numSlots()) {
+      while (bucket_id < numSlots()) {
+         if (dirNodes[bucket_id / kDirNodeBucketPtrCount] == nullptr) {
+            continue;
+         }
          return dirNodes[bucket_id / kDirNodeBucketPtrCount];
       }
       while (bucket_id >= numSlots()) {
@@ -88,6 +91,7 @@ class LinearHashTable
    OP_RESULT lookup(u8* key, u16 key_length, std::function<void(const u8*, u16)> payload_callback, bool & mark_dirty);
    OP_RESULT lookupForUpdate(u8* key, u16 key_length, std::function<bool(u8*, u16)> payload_callback);
    OP_RESULT insert(u8* key, u16 key_length, u8* value, u16 value_length);
+   OP_RESULT insert_might_fail(u8* key, u16 key_length, u8* value, u16 value_length);
    OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length);
    // virtual OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length) override;
    //OP_RESULT updateSameSize(u8* key, u16 key_length, function<void(u8* value, u16 value_size)>, WALUpdateGenerator = {{}, {}, 0}) override;

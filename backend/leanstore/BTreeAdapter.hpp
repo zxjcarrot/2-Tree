@@ -6,6 +6,7 @@
 #include "leanstore/storage/btree/core/WALMacros.hpp"
 #include "ART/ARTIndex.hpp"
 #include "stx/btree_map.h"
+#include "leanstore/utils/DistributedCounter.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore
@@ -59,12 +60,14 @@ template <typename Key, typename Payload>
 struct BTreeVSAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::btree::BTreeInterface& btree;
 
-   std::size_t io_reads_snapshot = 0;
-   std::size_t io_reads_now = 0;
-   uint64_t btree_buffer_miss = 0;
-   uint64_t btree_buffer_hit = 0;
-   std::size_t scan_ops = 0;
-   std::size_t io_reads_scan = 0;
+   DistributedCounter<> total_lookups = 0;
+   DistributedCounter<> io_reads = 0;
+   DistributedCounter<> io_reads_snapshot = 0;
+   DistributedCounter<> io_reads_now = 0;
+   DistributedCounter<> btree_buffer_miss = 0;
+   DistributedCounter<> btree_buffer_hit = 0;
+   DistributedCounter<> scan_ops = 0;
+   DistributedCounter<> io_reads_scan = 0;
    DTID dt_id;
    BTreeVSAdapter(leanstore::storage::btree::BTreeInterface& btree, DTID dt_id = -1) : btree(btree), dt_id(dt_id) {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
@@ -74,10 +77,13 @@ struct BTreeVSAdapter : StorageInterface<Key, Payload> {
       btree_buffer_miss = btree_buffer_hit = 0;
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
       io_reads_scan = scan_ops = 0;
+      io_reads = 0;
    }
 
    bool lookup(Key k, Payload& v) override
    {
+      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
+      total_lookups++;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
@@ -127,6 +133,8 @@ struct BTreeVSAdapter : StorageInterface<Key, Payload> {
 
    void update(Key k, Payload& v) override
    {
+      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
+      total_lookups++;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
@@ -157,6 +165,7 @@ struct BTreeVSAdapter : StorageInterface<Key, Payload> {
       double btree_hit_rate = btree_buffer_hit / (btree_buffer_hit + btree_buffer_miss + 1.0);
       std::cout << "BTree buffer hits/misses " <<  btree_buffer_hit << "/" << btree_buffer_miss << std::endl;
       std::cout << "BTree buffer hit rate " <<  btree_hit_rate << " miss rate " << (1 - btree_hit_rate) << std::endl;
+      std::cout << total_lookups<< " lookups, " << io_reads.get() << " ios, " << io_reads / (total_lookups + 0.00) << " ios/lookup" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01);
    }
 };

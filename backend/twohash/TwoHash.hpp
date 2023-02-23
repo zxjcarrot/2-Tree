@@ -47,7 +47,6 @@ auto old_miss = WorkerCounters::myCounters().io_reads.load();
 
 template <typename Key, typename Payload>
 struct TwoHashAdapter : StorageInterface<Key, Payload> {
-   OptimisticLockTable lock_table;
    leanstore::storage::hashing::LinearHashTable & hot_hash_table;
    leanstore::storage::hashing::LinearHashTable & cold_hash_table;
 
@@ -56,19 +55,22 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> hot_ht_ios = 0;
    DistributedCounter<> ht_buffer_miss = 0;
    DistributedCounter<> ht_buffer_hit = 0;
+   OptimisticLockTable lock_table;
    DTID dt_id;
    std::size_t hot_partition_capacity_bytes;
    DistributedCounter<> hot_partition_size_bytes = 0;
    DistributedCounter<> scan_ops = 0;
    DistributedCounter<> io_reads_scan = 0;
    bool inclusive = false;
-   static constexpr double eviction_threshold = 0.5;
+   static constexpr double eviction_threshold = 0.55;
    DistributedCounter<> eviction_items = 0;
    DistributedCounter<> eviction_io_reads= 0;
    DistributedCounter<> io_reads_snapshot = 0;
    DistributedCounter<> io_reads_now = 0;
+   DistributedCounter<> io_reads = 0;
    DistributedCounter<> hot_partition_item_count = 0;
    DistributedCounter<> upward_migrations = 0;
+   DistributedCounter<> failed_upward_migrations = 0;
    DistributedCounter<> downward_migrations = 0;
    u64 lazy_migration_threshold = 10;
    bool lazy_migration = false;
@@ -83,8 +85,8 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       void clear_referenced() { bits &= ~(2u); }
    };
    static_assert(sizeof(TaggedPayload) == sizeof(Payload) + 1, "!!!");
-   uint64_t total_lookups = 0;
-   uint64_t lookups_hit_top = 0;
+   DistributedCounter<> total_lookups = 0;
+   DistributedCounter<> lookups_hit_top = 0;
    u64 clock_hand = 0;
    constexpr static u64 PartitionBitPosition = 63;
    constexpr static u64 PartitionBitMask = 0x8000000000000000;
@@ -123,14 +125,18 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    }
 
    void clear_stats() override {
+      upward_migrations = downward_migrations = 0;
+      clear_io_stats();
+   }
+
+   void clear_io_stats() override {
       ht_buffer_miss = ht_buffer_hit = 0;
       eviction_items = eviction_io_reads = 0;
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
       lookups_hit_top = total_lookups = 0;
       hot_ht_ios = 0;
-      upward_migrations = downward_migrations = 0;
+      io_reads = 0;
       io_reads_scan = 0;
-      scan_ops = 0;
    }
 
    std::size_t hash_table_entries(leanstore::storage::hashing::LinearHashTable& hash_table, std::size_t & pages) {
@@ -277,18 +283,29 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    static constexpr int kEvictionCheckInterval = 300;
    DistributedCounter<> eviction_count_down = kEvictionCheckInterval;
    void try_eviction() {
-      --eviction_count_down;
-      if (eviction_count_down.load() <= 0) {
-         if (cache_under_pressure()) {
-            evict_a_bunch();
-         }
-         eviction_count_down = kEvictionCheckInterval;
+      // --eviction_count_down;
+      // if (eviction_count_down.load() <= 0) {
+      //    if (cache_under_pressure()) {
+      //       evict_a_bunch();
+      //    }
+      //    eviction_count_down = kEvictionCheckInterval;
+      // }
+      if (cache_under_pressure()) {
+         evict_a_bunch();
       }
    }
 
    void admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
       insert_hot_partition(strip_off_partition_bit(k), v, dirty, referenced); // Hot partition
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
+   }
+
+   bool admit_element_might_fail(Key k, Payload & v, bool dirty = false, bool referenced = true) {
+      if (insert_hot_partition_might_fail(strip_off_partition_bit(k), v, dirty, referenced)) { // Hot partition
+         hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
+         return true;
+      }; 
+      return false;
    }
    
    bool should_migrate() {
@@ -317,7 +334,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
             break;
          }
       }
-      if (ret == true) {
+      if (ret == true && utils::RandomGenerator::getRandU64(0, 100) < 5) {
          try_eviction();
       }
       return ret;
@@ -325,6 +342,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
 
    bool lookup_internal(Key k, Payload& v, LockGuardProxy & g)
    {
+      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
       ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
@@ -364,19 +382,34 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
             if (g.upgrade_to_write_lock() == false) {
                return false;
             }
-            ++upward_migrations;
-            if (inclusive == false) {
+            // move to hot partition
+            bool res = false;
+            OLD_HIT_STAT_START;
+            // if (cache_under_pressure_soft()) {
+            //    res = admit_element_might_fail(k, v);
+            // } else {
+            //    admit_element(k, v);
+            // }
+            if (utils::RandomGenerator::getRandU64(0, 100) < 4) {
+               admit_element(k, v);
+               res = true;
+            } else {
+               res = admit_element_might_fail(k, v);
+            }
+            OLD_HIT_STAT_END;
+            hot_ht_ios += new_miss - old_miss;
+            if (res) {
+               ++upward_migrations;
+            } else {
+               ++failed_upward_migrations;
+            }
+            if (inclusive == false && res) {
                //OLD_HIT_STAT_START;
                // remove from the cold partition
                auto op_res __attribute__((unused))= cold_hash_table.remove(key_bytes, fold(key_bytes, cold_key));
                assert(op_res == leanstore::storage::hashing::OP_RESULT::OK);
                //OLD_HIT_STAT_END
             }
-            // move to hot partition
-            OLD_HIT_STAT_START;
-            admit_element(k, v);
-            OLD_HIT_STAT_END;
-            hot_ht_ios += new_miss - old_miss;
          }
       }
       return res;
@@ -415,6 +448,34 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       HIT_STAT_END;
    }
 
+   bool insert_hot_partition_might_fail(Key k, Payload & v, bool modified = false, bool referenced = true) {
+      u8 key_bytes[sizeof(Key)];
+      Key key = tag_with_hot_bit(k);
+      hot_partition_item_count++;
+      TaggedPayload tp;
+      if (referenced == false) {
+         tp.clear_referenced();
+      } else {
+         tp.set_referenced();
+      }
+
+      if (modified) {
+         tp.set_modified();
+      } else {
+         tp.clear_modified();
+      }
+      tp.payload = v;
+      
+      HIT_STAT_START;
+      auto op_res = hot_hash_table.insert_might_fail(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+      if (op_res == leanstore::storage::hashing::OP_RESULT::OK) {
+         return true;
+      } else {
+         assert(op_res == leanstore::storage::hashing::OP_RESULT::NOT_ENOUGH_SPACE);
+         return false;
+      }
+   }
+
    void insert_cold_partition(Key k, Payload & v) {
       u8 key_bytes[sizeof(Key)];
       Key key = tag_with_cold_bit(k);
@@ -442,7 +503,10 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    }
 
    void update(Key k, Payload& v) override {
-      try_eviction();
+      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
+      if (utils::RandomGenerator::getRandU64(0, 100) < 5) {
+         try_eviction();
+      }
       LockGuardProxy g(&lock_table, k);
       while (g.write_lock() == false);
       ++total_lookups;
@@ -580,20 +644,22 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       std::cout << "Hot Hash Table bytes stored " << hot_hash_table.dataStored() << std::endl;
       std::cout << "Hot Hash Table # buckets " << hot_hash_table.countBuckets() << std::endl;
       std::cout << "Hot Hash Table power multiplier " << hot_hash_table.powerMultiplier() << std::endl;
+      std::cout << "Hot Hash Table fill factor " << ((num_hot_entries) * sizeof(TaggedPayload) / leanstore::storage::PAGE_SIZE + 0.0) / hot_hash_table_pages << std::endl;
       std::cout << "Cold Hash Table # entries " << num_cold_entries << std::endl;
       std::cout << "Cold Hash Table # pages " << cold_hash_table_pages << std::endl;
       std::cout << "Cold Hash Table # pages (fast) " << cold_hash_table.dataPages() << std::endl;
       std::cout << "Cold Hash Table bytes stored " << cold_hash_table.dataStored() << std::endl;
       std::cout << "Cold Hash Table # buckets " << cold_hash_table.countBuckets() << std::endl;
       std::cout << "Cold Hash Table power multiplier " << cold_hash_table.powerMultiplier() << std::endl;
+      std::cout << "Cold Hash Table fill factor " << ((num_cold_entries) * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE + 0.0) / cold_hash_table_pages << std::endl;
       auto minimal_pages = (num_hash_table_entries) * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;
       std::cout << "Average fill factor " <<  (minimal_pages + 0.0) / pages << std::endl;
       double btree_hit_rate = ht_buffer_hit / (ht_buffer_hit + ht_buffer_miss + 1.0);
       std::cout << "Hash Table buffer hits/misses " <<  ht_buffer_hit << "/" << ht_buffer_miss << std::endl;
       std::cout << "Hash Table buffer hit rate " <<  btree_hit_rate << " miss rate " << (1 - btree_hit_rate) << std::endl;
       std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
-      std::cout << total_lookups<< " lookups, "  << lookups_hit_top << " lookup hit top" << " hot_ht_ios " << hot_ht_ios << " ios/tophit " << hot_ht_ios / (lookups_hit_top + 0.00)  << std::endl;
-      std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations" << std::endl;
+      std::cout << total_lookups<< " lookups, " << io_reads.get() << " ios, " << io_reads / (total_lookups + 0.00) << " ios/lookup, " << lookups_hit_top << " lookup hit top" << " hot_ht_ios " << hot_ht_ios << " ios/tophit " << hot_ht_ios / (lookups_hit_top + 0.00)  << std::endl;
+      std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations, "<< failed_upward_migrations << " failed_upward_migrations" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01) << std::endl;
    }
 };

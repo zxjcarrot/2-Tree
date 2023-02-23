@@ -16,6 +16,7 @@ struct StorageInterface {
    virtual void report(u64, u64){}
    virtual void report_cache(){}
    virtual void clear_stats() {}
+   virtual void clear_io_stats() {}
    virtual void evict_all() {}
    virtual void set_buffer_manager(storage::BufferManager *) {}
 };

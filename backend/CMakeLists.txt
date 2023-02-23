@@ -24,7 +24,7 @@ IF(SANI)
   endif ()
 ENDIF(SANI)
 
-target_link_libraries(leanstore gflags rocksdb Threads::Threads aio tbb atomic tabluate lz4 rapidjson ${CMAKE_DL_LIBS}) #tbb
+target_link_libraries(leanstore gflags rocksdb Threads::Threads aio tbb atomic zstd uring tabluate z bz2 snappy lz4 rapidjson ${CMAKE_DL_LIBS}) #tbb
 
 # ---------------------------------------------------------------------------
 #SET(COUNTERS_LEVEL "all" CACHE STRING "Which counters to leave in leanstore build")

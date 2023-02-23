@@ -1,9 +1,11 @@
 #pragma once
 #include "Units.hpp"
+#include "leanstore/profiling/counters/WorkerCounters.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 #include <chrono>
 #include <cmath>
+#include <functional>
 // -------------------------------------------------------------------------------------
 namespace leanstore
 {
@@ -56,5 +58,18 @@ inline u64 downAlign4K(u64 x)
 // -------------------------------------------------------------------------------------
 u32 CRC(const u8* src, u64 size);
 // -------------------------------------------------------------------------------------
+
+class IOScopedCounter {
+public:
+   IOScopedCounter(std::function<void(u64)> f):  f(f) {
+      io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
+   }
+   ~IOScopedCounter() {
+      f(io_reads_snapshot = WorkerCounters::myCounters().io_reads.load() - io_reads_snapshot);
+   }
+private:
+   u64 io_reads_snapshot = 0;
+   std::function<void(u64)> f;
+};
 }  // namespace utils
 }  // namespace leanstore

@@ -105,24 +105,25 @@ double calculateMTPS(chrono::high_resolution_clock::time_point begin, chrono::hi
 
 void zipf_keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
    std::vector<YCSBKey> generated_keys;
-   std::unordered_map<YCSBKey, int> unique_keys;
+   //std::unordered_map<YCSBKey, int> unique_keys;
    size_t n = FLAGS_ycsb_tuple_count;
-   for (size_t i = 0; i < n * 2; ++i) {
+   std::vector<uint64_t> key_frequency(n, 0);
+   for (size_t i = 0; i < n * 20; ++i) {
       YCSBKey key = zipf_gen->zipf_generator.rand() % n;
       generated_keys.push_back(key);
-      unique_keys[key]++;
+      key_frequency[key]++;
    }
    sort(generated_keys.begin(), generated_keys.end());
    std::cout << "Keyspace Stats: " << std::endl;
    std::cout << "Skew factor: " << FLAGS_zipf_factor << std::endl;
    std::cout << "# total keys: " << generated_keys.size() << std::endl;
-   std::cout << "# unique keys: " << unique_keys.size() << std::endl;
-   std::cout << "Most frequent key occurrence: " << unique_keys[generated_keys[0]] << std::endl;
+   //std::cout << "# unique keys: " << unique_keys.size() << std::endl;
+   std::cout << "Most frequent key occurrence: " << key_frequency[generated_keys[0]] << std::endl;
    auto print_percentile_info = [&](int p) {
       double pd = p / 100.0;
-      std::cout << "p" << p  << ": " << generated_keys[pd*generated_keys.size()] << ", covering " << generated_keys[pd*generated_keys.size()] / (0.0 + n) * 100 << "% of the keys, occurrence :" << unique_keys[generated_keys[pd*generated_keys.size()]] << std::endl;
+      std::cout << "p" << p  << ": " << generated_keys[pd*generated_keys.size()] << ", covering " << generated_keys[pd*generated_keys.size()] / (0.0 + n) * 100 << "% of the keys, occurrence :" << key_frequency[generated_keys[pd*generated_keys.size()]] << std::endl;
    };
-   for (size_t i = 5; i <= 95; i += 5) {
+   for (size_t i = 1; i <= 99; i += 1) {
       print_percentile_info(i);
    }
    print_percentile_info(99);
@@ -538,7 +539,10 @@ int main(int argc, char** argv)
    }
    {
       // Shutdown threads
-      sleep(FLAGS_run_for_seconds);
+      sleep(FLAGS_run_for_seconds * 0.8);
+      cout << "Clearing IO stats after reaching steady state" << endl;
+      table.clear_io_stats();
+      sleep(FLAGS_run_for_seconds * 0.2);
       keep_running = false;
       while (running_threads_counter) {
          MYPAUSE();

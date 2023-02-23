@@ -284,23 +284,24 @@ class BTreeExclusiveIterator : public BTreePessimisticIterator<LATCH_FALLBACK_MO
          }
          ret = canInsertInCurrentNode(key, value.length());
          if (ret == OP_RESULT::NOT_ENOUGH_SPACE) {
-            bool good = true;
-            jumpmuTry()
-            {
-               splitForKeyMightFail(key);
-               good = true;
-            }
-            jumpmuCatch() {
-               if (BufferManager::this_thread_alloc_failed == true) {
-                  good = false;
-               }
-            }
-            //BufferManager::this_thread_alloc_failed = false;
-            if (good) {
-               goto restart;
-            } else {
-               return OP_RESULT::NOT_ENOUGH_SPACE;
-            }
+            // bool good = true;
+            // jumpmuTry()
+            // {
+            //    splitForKeyMightFail(key);
+            //    good = true;
+            // }
+            // jumpmuCatch() {
+            //    if (BufferManager::this_thread_alloc_failed == true) {
+            //       good = false;
+            //    }
+            // }
+            // //BufferManager::this_thread_alloc_failed = false;
+            // if (good) {
+            //    goto restart;
+            // } else {
+            //    return OP_RESULT::NOT_ENOUGH_SPACE;
+            // }
+            return OP_RESULT::NOT_ENOUGH_SPACE;
          } else if (ret == OP_RESULT::OK) {
             insertInCurrentNode(key, value);
             return OP_RESULT::OK;

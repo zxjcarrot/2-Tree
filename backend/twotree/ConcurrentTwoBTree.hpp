@@ -513,19 +513,18 @@ struct ConcurrentMemBTreeDiskBTree : StorageInterface<Key, Payload> {
 
 template <typename Key, typename Payload>
 struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
-   OptimisticLockTable lock_table;
    leanstore::storage::btree::BTreeInterface& hot_btree;
    leanstore::storage::btree::BTreeInterface& cold_btree;
-   leanstore::storage::BufferManager * buf_mgr = nullptr;
 
    DistributedCounter<> hot_tree_ios;
    DistributedCounter<> btree_buffer_miss;
    DistributedCounter<> btree_buffer_hit;
-   //alignas(64) uint64_t hot_tree_ios = 0;
-   //alignas(64) uint64_t btree_buffer_miss = 0;
-   //alignas(64) uint64_t btree_buffer_hit = 0;
+   // alignas(64) uint64_t hot_tree_ios = 0;
+   // alignas(64) uint64_t btree_buffer_miss = 0;
+   // alignas(64) uint64_t btree_buffer_hit = 0;
    DTID dt_id;
 
+   OptimisticLockTable lock_table;
    
    DistributedCounter<> hot_partition_size_bytes;
    DistributedCounter<> scan_ops;
@@ -541,6 +540,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> eviction_io_reads;
    DistributedCounter<> io_reads_snapshot;
    DistributedCounter<> io_reads_now;
+   DistributedCounter<> io_reads = 0;
    // alignas(64) uint64_t eviction_items = 0;
    // alignas(64) uint64_t eviction_io_reads= 0;
    // alignas(64) uint64_t io_reads_snapshot = 0;
@@ -552,6 +552,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> downward_migrations = 0;
    DistributedCounter<> eviction_bounding_time = 0;
    DistributedCounter<> eviction_bounding_n = 0;
+
+   leanstore::storage::BufferManager * buf_mgr = nullptr;
 
    // alignas(64) std::atomic<uint64_t> hot_partition_item_count = 0;
    // alignas(64) std::atomic<uint64_t> upward_migrations = 0;
@@ -603,7 +605,10 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    bool cache_under_pressure() {
       return buf_mgr->hot_pages.load() * leanstore::storage::PAGE_SIZE >=  hot_partition_capacity_bytes;
-      //return hot_partition_size_bytes >= hot_partition_capacity_bytes * eviction_threshold;
+   }
+
+   bool cache_under_pressure_soft() {
+      return buf_mgr->hot_pages.load() * leanstore::storage::PAGE_SIZE >=  hot_partition_capacity_bytes * 0.9; 
    }
 
    void clear_stats() override {
@@ -615,6 +620,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       upward_migrations = downward_migrations = 0;
       io_reads_scan = 0;
       scan_ops = 0;
+      io_reads = 0;
       eviction_bounding_time = eviction_bounding_n = 0;
    }
 
@@ -821,12 +827,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    static constexpr s64 kEvictionCheckInterval = 30;
    DistributedCounter<> eviction_count_down {kEvictionCheckInterval};
    void try_eviction() {
-      --eviction_count_down;
-      if (eviction_count_down.load() <= 0) {
-         if (cache_under_pressure()) {
-            evict_a_bunch();
-         }
-         eviction_count_down += kEvictionCheckInterval;
+      if (cache_under_pressure()) {
+         evict_a_bunch();
       }
    }
 
@@ -838,12 +840,17 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       }
    }
 
-   bool admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
-      if (insert_hot_partition(strip_off_partition_bit(k), v, dirty, referenced)) {
+   bool admit_element_might_fail(Key k, Payload & v, bool dirty = false, bool referenced = true) {
+      if (insert_hot_partition_might_fail(strip_off_partition_bit(k), v, dirty, referenced)) {
          hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
          return true;
       }
       return false;
+   }
+
+   void admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
+      insert_hot_partition(strip_off_partition_bit(k), v, dirty, referenced);
+      hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
    }
    
    bool should_migrate() {
@@ -991,8 +998,36 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       }
    }
 
+
+   bool lookup_internal(Key k, Payload& v)
+   {
+      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
+      ++total_lookups;
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      u8 key_bytes[sizeof(Key)];
+      TaggedPayload tp;
+      // try hot partition first
+      auto hot_key = k;
+      
+      auto old_miss = WorkerCounters::myCounters().io_reads.load();
+      auto res = hot_btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
+         memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
+         }) ==
+            OP_RESULT::OK;
+      auto new_miss = WorkerCounters::myCounters().io_reads.load();
+      assert(new_miss >= old_miss);
+      if (old_miss == new_miss) {
+         btree_buffer_hit++;
+      } else {
+         btree_buffer_miss += new_miss - old_miss;
+      }
+      return res;
+   }
+
    bool lookup_internal(Key k, Payload& v, LockGuardProxy & g)
    {
+      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
       ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
@@ -1012,9 +1047,9 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
          }, mark_dirty) ==
             OP_RESULT::OK;
       OLD_HIT_STAT_END;
-      hot_tree_ios += new_miss - old_miss;
+      //hot_tree_ios += new_miss - old_miss;
       if (res) {
-         ++lookups_hit_top;
+         //++lookups_hit_top;
          return res;
       }
 
@@ -1032,14 +1067,25 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
             }
             
             // move to hot partition
+            bool res = false;
             OLD_HIT_STAT_START;
-            bool res = admit_element(k, v);
+            // if (cache_under_pressure_soft()) {
+            //    res = admit_element_might_fail(k, v);
+            // } else {
+            //    admit_element(k, v);
+            // }
+            if (utils::RandomGenerator::getRandU64(0, 100) < 4) {
+               admit_element(k, v);
+               res = true;
+            } else {
+               res = admit_element_might_fail(k, v);
+            }
             OLD_HIT_STAT_END;
+            hot_tree_ios += new_miss - old_miss;
             if (res) {
                ++upward_migrations;
             } else {
                ++failed_upward_migrations;
-               assert(false);
             }
             if (inclusive == false && res) {
                //OLD_HIT_STAT_START;
@@ -1048,8 +1094,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
                assert(op_res == OP_RESULT::OK);
                //OLD_HIT_STAT_END
             }
-            
-            //hot_tree_ios += new_miss - old_miss;
+
          }
       }
       return res;
@@ -1064,7 +1109,38 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    }
 
    // hot_or_cold: false => hot partition, true => cold partition
-   bool insert_hot_partition(Key k, Payload & v, bool modified = false, bool referenced = true) {
+   bool insert_hot_partition_might_fail(Key k, Payload & v, bool modified = false, bool referenced = true) {
+      u8 key_bytes[sizeof(Key)];
+      Key key = tag_with_hot_bit(k);
+      TaggedPayload tp;
+      if (referenced == false) {
+         tp.clear_referenced();
+      } else {
+         tp.set_referenced();
+      }
+
+      if (modified) {
+         tp.set_modified();
+      } else {
+         tp.clear_modified();
+      }
+      tp.payload = v;
+      
+      HIT_STAT_START;
+      auto op_res = hot_btree.insert_might_fail(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
+      assert(op_res == OP_RESULT::OK);
+      HIT_STAT_END;
+      if (op_res != OP_RESULT::OK) {
+         assert(op_res == OP_RESULT::NOT_ENOUGH_SPACE);
+         return false;
+      } else {
+         hot_partition_item_count++;
+         return true;
+      }
+   }
+
+   // hot_or_cold: false => hot partition, true => cold partition
+   void insert_hot_partition(Key k, Payload & v, bool modified = false, bool referenced = true) {
       u8 key_bytes[sizeof(Key)];
       Key key = tag_with_hot_bit(k);
       hot_partition_item_count++;
@@ -1086,13 +1162,6 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       auto op_res = hot_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&tp), sizeof(tp));
       assert(op_res == OP_RESULT::OK);
       HIT_STAT_END;
-      return true;
-      // if (op_res != OP_RESULT::OK) {
-      //    assert(op_res == OP_RESULT::NOT_ENOUGH_SPACE);
-      //    return false;
-      // } else {
-      //    return true;
-      // }
    }
 
    void insert_cold_partition(Key k, Payload & v) {
@@ -1104,33 +1173,21 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    void insert(Key k, Payload& v) override
    {
-      int retries = 0;
-      retry:
       try_eviction();
-      // if (retries == 0) {
-      //    try_eviction();
-      // } else {
-      //    evict_a_bunch();
-      //    retries = -1;
-      // }
-      ++retries;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       LockGuardProxy g(&lock_table, k);
       
       while (g.write_lock() == false);
 
-      bool res = false;
       if (inclusive) {
-         res = admit_element(k, v, true, false);
+         admit_element(k, v, true, false);
       } else {
-         res = admit_element(k, v);
-      }
-      if (res == false) {
-         goto retry;
+         admit_element(k, v);
       }
    }
 
    void update(Key k, Payload& v) override {
+      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
       try_eviction();
       LockGuardProxy g(&lock_table, k);
       while (g.write_lock() == false);
@@ -1164,14 +1221,22 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       //OLD_HIT_STAT_END;
 
       if (should_migrate()) {
+         // move to hot partition
+         bool res = false;
          OLD_HIT_STAT_START;
-         bool succeed = admit_element(k, v, true);
-         OLD_HIT_STAT_END;
-         hot_tree_ios += new_miss - old_miss;
-         if (succeed) {
-            ++upward_migrations;
+         if (cache_under_pressure_soft()) {
+            res = admit_element_might_fail(k, v);
+         } else {
+            admit_element(k, v);
+            res = true;
          }
-         if (inclusive == false && succeed) { // If exclusive, remove the tuple from the on-disk B-Tree
+         OLD_HIT_STAT_END;
+         if (res) {
+            ++upward_migrations;
+         } else {
+            ++failed_upward_migrations;
+         }
+         if (inclusive == false && res) { // If exclusive, remove the tuple from the on-disk B-Tree
             //OLD_HIT_STAT_START;
             // remove from the cold partition
             auto op_res __attribute__((unused)) = cold_btree.remove(key_bytes, fold(key_bytes, cold_key));
@@ -1207,9 +1272,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
          return;
       }
       // move to hot partition
-      if(admit_element(k, v, true) == false) {
-         goto retry;
-      }
+      admit_element(k, v, true);
+
       if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
          auto cold_key = tag_with_cold_bit(k);
          //OLD_HIT_STAT_START;
@@ -1252,8 +1316,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       std::cout << "BTree buffer hits/misses " <<  btree_buffer_hit << "/" << btree_buffer_miss << std::endl;
       std::cout << "BTree buffer hit rate " <<  btree_hit_rate << " miss rate " << (1 - btree_hit_rate) << std::endl;
       std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
-      std::cout << total_lookups<< " lookups, "  << lookups_hit_top << " lookup hit top" << " hot_tree_ios " << hot_tree_ios << " ios/tophit " << hot_tree_ios / (lookups_hit_top + 0.00)  << std::endl;
-      std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations" << std::endl;
+      std::cout << total_lookups<< " lookups, " << io_reads.get() << " ios, " << io_reads / (total_lookups + 0.00) << " ios/lookup, " << lookups_hit_top << " lookup hit top" << " hot_tree_ios " << hot_tree_ios<< " ios/tophit " << hot_tree_ios / (lookups_hit_top + 0.00)  << std::endl;
+      std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations, "<< failed_upward_migrations << " failed_upward_migrations" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01) << std::endl;
       std::cout << "Average eviction bounding time " << eviction_bounding_time / (eviction_bounding_n + 1) << std::endl;
    }

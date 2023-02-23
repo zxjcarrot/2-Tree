@@ -6,6 +6,7 @@
 #include "leanstore/storage/btree/core/WALMacros.hpp"
 #include "ART/ARTIndex.hpp"
 #include "stx/btree_map.h"
+#include "leanstore/utils/DistributedCounter.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore
@@ -18,12 +19,14 @@ template <typename Key, typename Payload>
 struct HashVSAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::hashing::LinearHashTable & hash_table;
 
-   std::size_t io_reads_snapshot = 0;
-   std::size_t io_reads_now = 0;
-   uint64_t ht_buffer_miss = 0;
-   uint64_t ht_buffer_hit = 0;
-   std::size_t scan_ops = 0;
-   std::size_t io_reads_scan = 0;
+   DistributedCounter<> total_lookups = 0;
+   DistributedCounter<> io_reads = 0;
+   DistributedCounter<> io_reads_snapshot = 0;
+   DistributedCounter<> io_reads_now = 0;
+   DistributedCounter<> ht_buffer_miss = 0;
+   DistributedCounter<> ht_buffer_hit = 0;
+   DistributedCounter<> scan_ops = 0;
+   DistributedCounter<> io_reads_scan = 0;
    DTID dt_id;
    HashVSAdapter(leanstore::storage::hashing::LinearHashTable& ht, DTID dt_id = -1) : hash_table(ht), dt_id(dt_id) {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
@@ -33,10 +36,13 @@ struct HashVSAdapter : StorageInterface<Key, Payload> {
       ht_buffer_miss = ht_buffer_hit = 0;
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
       io_reads_scan = scan_ops = 0;
+      io_reads = 0;
    }
 
    bool lookup(Key k, Payload& v) override
    {
+      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
+      ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
@@ -101,6 +107,8 @@ struct HashVSAdapter : StorageInterface<Key, Payload> {
 
    void update(Key k, Payload& v) override
    {
+      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
+      ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
@@ -143,6 +151,7 @@ struct HashVSAdapter : StorageInterface<Key, Payload> {
       double ht_hit_rate = ht_buffer_hit / (ht_buffer_hit + ht_buffer_miss + 1.0);
       std::cout << "Hash Table buffer hits/misses " <<  ht_buffer_hit << "/" << ht_buffer_miss << std::endl;
       std::cout << "Hash Table buffer hit rate " <<  ht_hit_rate << " miss rate " << (1 - ht_hit_rate) << std::endl;
+      std::cout << total_lookups<< " lookups, " << io_reads.get() << " ios, " << io_reads / (total_lookups + 0.00) << " ios/lookup" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01) << std::endl;
    }
 };
