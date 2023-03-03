@@ -15,7 +15,7 @@ class FNV
    static constexpr u64 FNV_PRIME_64 = 1099511628211L;
 
   public:
-   static u64 hash(u64 val);
+   static u64 hash_u64(u64 val);
    static u64 hash(const u8* d, u16 len);
 };
 // -------------------------------------------------------------------------------------

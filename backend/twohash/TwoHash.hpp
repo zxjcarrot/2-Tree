@@ -45,7 +45,7 @@ auto old_miss = WorkerCounters::myCounters().io_reads.load();
          ht_buffer_miss += new_miss - old_miss; \
       }
 
-template <typename Key, typename Payload>
+template <typename Key, typename Payload, typename Hasher1=leanstore::utils::XXH, typename Hasher2=leanstore::utils::XXH>
 struct TwoHashAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::hashing::LinearHashTable & hot_hash_table;
    leanstore::storage::hashing::LinearHashTable & cold_hash_table;
@@ -62,7 +62,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> scan_ops = 0;
    DistributedCounter<> io_reads_scan = 0;
    bool inclusive = false;
-   static constexpr double eviction_threshold = 0.55;
+   static constexpr double eviction_threshold = 0.65;
    DistributedCounter<> eviction_items = 0;
    DistributedCounter<> eviction_io_reads= 0;
    DistributedCounter<> io_reads_snapshot = 0;
@@ -112,6 +112,8 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
                   : hot_hash_table(hot_hash_table), cold_hash_table(cold_hash_table), 
                   hot_partition_capacity_bytes(hot_partition_size_gb * 1024ULL * 1024ULL * 1024ULL), 
                   inclusive(inclusive), lazy_migration(lazy_migration_sampling_rate < 100) {
+      hot_hash_table.register_hash_function(Hasher1::hash);
+      cold_hash_table.register_hash_function(Hasher2::hash);
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
       }
@@ -119,8 +121,8 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    }
 
    bool cache_under_pressure() {
-      //return buf_mgr->hot_pages.load() * leanstore::storage::PAGE_SIZE >=  hot_partition_capacity_bytes;
-      return hot_partition_size_bytes >= hot_partition_capacity_bytes * eviction_threshold;
+      return buf_mgr->hot_pages.load() * leanstore::storage::PAGE_SIZE >=  hot_partition_capacity_bytes;
+      //return hot_partition_size_bytes >= hot_partition_capacity_bytes * eviction_threshold;
       //return hot_hash_table.dataStored() / (hot_hash_table.dataPages() * leanstore::storage::PAGE_SIZE + 0.00001) >= hot_partition_capacity_bytes;
    }
 
@@ -283,13 +285,6 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    static constexpr int kEvictionCheckInterval = 300;
    DistributedCounter<> eviction_count_down = kEvictionCheckInterval;
    void try_eviction() {
-      // --eviction_count_down;
-      // if (eviction_count_down.load() <= 0) {
-      //    if (cache_under_pressure()) {
-      //       evict_a_bunch();
-      //    }
-      //    eviction_count_down = kEvictionCheckInterval;
-      // }
       if (cache_under_pressure()) {
          evict_a_bunch();
       }

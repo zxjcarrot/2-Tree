@@ -73,6 +73,7 @@ LeanStore::LeanStore()
    // -------------------------------------------------------------------------------------
    DTRegistry::global_dt_registry.registerDatastructureType(0, storage::btree::BTreeLL::getMeta());
    DTRegistry::global_dt_registry.registerDatastructureType(1, storage::hashing::LinearHashTable::getMeta());
+   DTRegistry::global_dt_registry.registerDatastructureType(2, storage::heap::HeapFile::getMeta());
    // -------------------------------------------------------------------------------------
    if (FLAGS_recover) {
       deserializeState();
@@ -269,6 +270,16 @@ storage::hashing::LinearHashTable& LeanStore::registerHashTable(string name, boo
    ht.hot_partition = hot_partition;
    ht.create(dtid);
    return ht;
+}
+// -------------------------------------------------------------------------------------
+storage::heap::HeapFile& LeanStore::registerHeapFile(string name, bool hot_partition)
+{
+   assert(hfs.find(name) == hfs.end());
+   auto& hf = hfs[name];
+   DTID dtid = DTRegistry::global_dt_registry.registerDatastructureInstance(2, reinterpret_cast<void*>(&hf), name);
+   hf.hot_partition = hot_partition;
+   hf.create(dtid);
+   return hf;
 }
 // -------------------------------------------------------------------------------------
 u64 LeanStore::getConfigHash()

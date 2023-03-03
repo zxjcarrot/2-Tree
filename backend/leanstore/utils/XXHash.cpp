@@ -1,16 +1,20 @@
-#include "ScrambledZipfGenerator.hpp"
+#include "XXHash.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore
 {
 namespace utils
-{
 // -------------------------------------------------------------------------------------
-u64 ScrambledZipfGenerator::rand()
 {
-   u64 zipf_value = zipf_generator.rand();
-   return min + (FNV::hash_u64(zipf_value) % n);
+// u64 XXH::hash(u64 val)
+// {
+//   return val;
+// }
+
+u64 XXH::hash(const u8* d, u16 len)
+{
+   return static_cast<u64>(xxh::xxhash<64>((const void*)d, (size_t)len));
 }
 // -------------------------------------------------------------------------------------
 }  // namespace utils

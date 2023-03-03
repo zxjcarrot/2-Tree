@@ -7,7 +7,7 @@ namespace leanstore
 namespace utils
 // -------------------------------------------------------------------------------------
 {
-u64 FNV::hash(u64 val)
+u64 FNV::hash_u64(u64 val)
 {
    // from http://en.wikipedia.org/wiki/Fowler_Noll_Vo_hash
    u64 hash_val = FNV_OFFSET_BASIS_64;

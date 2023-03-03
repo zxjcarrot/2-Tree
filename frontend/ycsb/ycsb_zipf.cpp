@@ -25,6 +25,7 @@
 #include "anti-caching/AntiCache.hpp"
 #include "anti-caching/AntiCacheBTree.hpp"
 #include "hash/HashAdapter.hpp"
+#include "heap/HeapFileAdapter.hpp"
 //#include "rocksdb_adapter.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
@@ -58,6 +59,7 @@ DEFINE_uint32(cache_lazy_migration, 100, "lazy upward migration sampling rate(%)
 DEFINE_bool(ycsb_scan, false, "");
 DEFINE_bool(ycsb_tx, true, "");
 DEFINE_bool(ycsb_count_unique_lookup_keys, true, "");
+DEFINE_bool(ycsb_2hash_use_different_hash, false, "whether to use different hash functions for two hash tables");
 
 DEFINE_string(ycsb_request_dist, "hotspot", "");
 DEFINE_double(ycsb_request_hotspot_keyspace_fraction, 0.2, "");
@@ -73,6 +75,7 @@ const std::string kRequestDistributionHotspotZipfian = "hotspot_zipfian";
 const std::string kIndexTypeBTree = "BTree";
 const std::string kIndexTypeHash = "Hash";
 const std::string kIndexTypeLSMT = "LSMT";
+const std::string kIndexTypeHeap = "Heap";
 
 const std::string kIndexTypeAntiCache = "AntiCache";
 const std::string kIndexTypeAntiCacheB = "AntiCacheB";
@@ -108,7 +111,7 @@ void zipf_keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
    //std::unordered_map<YCSBKey, int> unique_keys;
    size_t n = FLAGS_ycsb_tuple_count;
    std::vector<uint64_t> key_frequency(n, 0);
-   for (size_t i = 0; i < n * 20; ++i) {
+   for (size_t i = 0; i < n * 2; ++i) {
       YCSBKey key = zipf_gen->zipf_generator.rand() % n;
       generated_keys.push_back(key);
       key_frequency[key]++;
@@ -195,7 +198,7 @@ int main(int argc, char** argv)
    double effective_page_to_frame_ratio = sizeof(leanstore::storage::BufferFrame::Page) / (sizeof(leanstore::storage::BufferFrame) + 0.0);
    double top_tree_size_gib = 0;
    s64 hot_pages_limit = std::numeric_limits<s64>::max();
-   if (FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
+   if (FLAGS_index_type == kIndexTypeHeap || FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
       hot_pages_limit = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * 1024 * 1024 * 1024 / sizeof(leanstore::storage::BufferFrame);
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * effective_page_to_frame_ratio;
    } else if (FLAGS_index_type == kIndexTypeUpLSMT || 
@@ -253,17 +256,20 @@ int main(int argc, char** argv)
    leanstore::storage::btree::BTreeLL* btree2_ptr = nullptr;
    leanstore::storage::hashing::LinearHashTable* ht_ptr = nullptr;
    leanstore::storage::hashing::LinearHashTable* ht2_ptr = nullptr;
+   leanstore::storage::heap::HeapFile* hf_ptr = nullptr;
    db.getCRManager().scheduleJobSync(0, [&](){
       if (FLAGS_recover) {
          btree_ptr = &db.retrieveBTreeLL("btree", true);
          btree2_ptr = &db.retrieveBTreeLL("btree_cold");
          ht_ptr = &db.retrieveHashTable("ht", true);
          ht2_ptr = &db.retrieveHashTable("ht_cold");
+         hf_ptr = &db.retrieveHeapFile("hf");
       } else {
          btree_ptr = &db.registerBTreeLL("btree", true);
          btree2_ptr = &db.registerBTreeLL("btree_cold");
          ht_ptr = &db.registerHashTable("ht", true);
          ht2_ptr = &db.registerHashTable("ht_cold");
+         hf_ptr = &db.registerHeapFile("hf");
       }
    });
    
@@ -271,10 +277,16 @@ int main(int argc, char** argv)
       adapter.reset(new HashVSAdapter<YCSBKey, YCSBPayload>(*ht2_ptr, ht2_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexTypeBTree) {
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, btree2_ptr->dt_id));
+   } else if (FLAGS_index_type == kIndexTypeHeap) {
+      adapter.reset(new HeapFileAdapter<YCSBKey, YCSBPayload>(*hf_ptr, hf_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexType2BTree) {
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2Hash) {
-      adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload>(*ht_ptr, *ht2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+      if (FLAGS_ycsb_2hash_use_different_hash) {
+         adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload, leanstore::utils::XXH, leanstore::utils::FNV>(*ht_ptr, *ht2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+      } else {
+         adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload>(*ht_ptr, *ht2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+      }
    } else if (FLAGS_index_type == kIndexTypeC2BTree) {
       adapter.reset(new ConcurrentTwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeIM2BTree) {
@@ -434,6 +446,16 @@ int main(int argc, char** argv)
    //adapter->evict_all();
    // if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeLSMT)
    {
+      if (FLAGS_index_type == kIndexTypeHeap) {
+         int count = 0;
+         auto scan_processor = [&](const YCSBKey & key, const YCSBPayload & payload) {
+            ++count;
+            return false;
+         };
+
+         table.scan(0, scan_processor, -1);
+         assert(count == ycsb_tuple_count);
+      }
       cout << "Warming up" << endl;
       auto t_start = std::chrono::high_resolution_clock::now();
       int i = 0;

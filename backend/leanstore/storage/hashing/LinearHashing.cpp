@@ -182,6 +182,7 @@ void LinearHashTable::create(DTID dtid) {
       p_guard->bucketPtrs[b % kDirNodeBucketPtrCount] = target_x_guard.swip();
       p_guard.incrementGSN();
    }
+   register_hash_function(leanstore::utils::XXH::hash);
 }
 
 static inline u64 power2(int i) {
@@ -191,7 +192,7 @@ static inline u64 power2(int i) {
 }
 
 u64 LinearHashTable::hash(const u8 *key, u16 key_length, int i) {
-    u64 h = leanstore::utils::FNV::hash(key, key_length);
+    u64 h = hash_func(key, key_length);
     return h % (power2(i) * N);
 }
 
@@ -619,8 +620,8 @@ OP_RESULT LinearHashTable::remove(u8* key, u16 key_length) {
 }
 
 double LinearHashTable::current_load_factor() {
-   return data_stored.load() / (sp.load_buddy_bucket() * sizeof(LinearHashingNode) + 0.0001);
-   //return data_stored.load() / (data_pages.load() * sizeof(LinearHashingNode) + 0.00001);
+   //return data_stored.load() / (sp.load_buddy_bucket() * sizeof(LinearHashingNode) + 0.0001);
+   return data_stored.load() / (data_pages.load() * sizeof(LinearHashingNode) + 0.00001);
 }
 
 void LinearHashTable::merge_chain(u64 bucket, BufferFrame* dirNode) {
