@@ -624,7 +624,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       eviction_bounding_time = eviction_bounding_n = 0;
    }
 
-   std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btree, std::size_t & pages) {
+   static std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btree, std::size_t & pages) {
       constexpr std::size_t scan_buffer_cap = 64;
       size_t scan_buffer_len = 0;
       Key keys[scan_buffer_cap];

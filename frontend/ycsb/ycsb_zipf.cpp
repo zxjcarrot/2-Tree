@@ -26,6 +26,7 @@
 #include "anti-caching/AntiCacheBTree.hpp"
 #include "hash/HashAdapter.hpp"
 #include "heap/HeapFileAdapter.hpp"
+#include "heap/IndexedHeapAdapter.hpp"
 //#include "rocksdb_adapter.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
@@ -76,6 +77,7 @@ const std::string kIndexTypeBTree = "BTree";
 const std::string kIndexTypeHash = "Hash";
 const std::string kIndexTypeLSMT = "LSMT";
 const std::string kIndexTypeHeap = "Heap";
+const std::string kIndexTypeIHeap = "IHeap";
 
 const std::string kIndexTypeAntiCache = "AntiCache";
 const std::string kIndexTypeAntiCacheB = "AntiCacheB";
@@ -198,7 +200,7 @@ int main(int argc, char** argv)
    double effective_page_to_frame_ratio = sizeof(leanstore::storage::BufferFrame::Page) / (sizeof(leanstore::storage::BufferFrame) + 0.0);
    double top_tree_size_gib = 0;
    s64 hot_pages_limit = std::numeric_limits<s64>::max();
-   if (FLAGS_index_type == kIndexTypeHeap || FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
+   if (FLAGS_index_type == kIndexTypeHeap || FLAGS_index_type == kIndexTypeIHeap || FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
       hot_pages_limit = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * 1024 * 1024 * 1024 / sizeof(leanstore::storage::BufferFrame);
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * effective_page_to_frame_ratio;
    } else if (FLAGS_index_type == kIndexTypeUpLSMT || 
@@ -279,6 +281,8 @@ int main(int argc, char** argv)
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, btree2_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexTypeHeap) {
       adapter.reset(new HeapFileAdapter<YCSBKey, YCSBPayload>(*hf_ptr, hf_ptr->dt_id));
+   } else if (FLAGS_index_type == kIndexTypeIHeap) {
+      adapter.reset(new IndexedHeapAdapter<YCSBKey, YCSBPayload>(*hf_ptr, *btree2_ptr));
    } else if (FLAGS_index_type == kIndexType2BTree) {
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2Hash) {
@@ -520,18 +524,26 @@ int main(int argc, char** argv)
                table.insert(key, payload);
             } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio) {
                C_WLOCK(idx);
-               correct_payloads[idx]++;
-               YCSBPayload payload(correct_payloads[idx]);
-               if (FLAGS_update_or_put == 0) {
-                  table.update(key, payload);
-               } else {
-                  table.put(key, payload);
+               if (key_deleted[idx] == false) {
+                  correct_payloads[idx]++;
+                  YCSBPayload payload(correct_payloads[idx]);
+                  if (FLAGS_update_or_put == 0) {
+                     table.update(key, payload);
+                  } else {
+                     table.put(key, payload);
+                  }
                }
                C_WUNLOCK(idx);
             } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_delete_ratio) {
                C_WLOCK(idx);
-               key_deleted[idx] = true;
-               table.remove(key);
+               if (key_deleted[idx] == false) {
+                  bool res = table.remove(key);
+                  // if (res == false) {
+                  //    table.remove(key);
+                  // }
+                  assert(res == true);
+                  key_deleted[idx] = true;
+               }
                C_WUNLOCK(idx);
             } else { // x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_read_ratio + FLAGS_ycsb_delete_ratio
                C_RLOCK(idx);
@@ -541,6 +553,9 @@ int main(int argc, char** argv)
                   if (key_deleted[idx]) {
                      assert(res == false);
                   } else {
+                     // if (res == false) {
+                     //    auto res2 = table.lookup(key, result);
+                     // }
                      assert(res);
                      auto correct_payload_byte = correct_payloads[idx];
                      YCSBPayload correct_result(correct_payload_byte);

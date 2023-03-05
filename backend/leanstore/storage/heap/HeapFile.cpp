@@ -45,9 +45,10 @@ bool HeapPage::canInsert(u16 payload_len)
 // -------------------------------------------------------------------------------------
 bool HeapPage::removeSlot(u16 slotId)
 {
-   space_used -= getPayloadLength(slotId);
-   memmove(slot + slotId, slot + slotId + 1, sizeof(Slot) * (count - slotId - 1));
-   count--;
+   //space_used -= getPayloadLength(slotId);
+   //memmove(slot + slotId, slot + slotId + 1, sizeof(Slot) * (count - slotId - 1));
+   //count--;
+   slot[slotId].status = SlotStatus::REMOVED;
    assert(count >= 0);
    return true;
 }
@@ -59,15 +60,6 @@ bool HeapPage::update(u16 slotId, u8* payload, u16 payload_length) {
     return true;
 }
 
-void HeapPage::compactify()
-{
-   u16 should = freeSpaceAfterCompaction();
-   static_cast<void>(should);
-   HeapPage tmp(0);
-   copyKeyValueRange(&tmp, 0, 0, count);
-   memcpy(reinterpret_cast<char*>(this), &tmp, sizeof(HeapPage));
-   assert(freeSpace() == should);  // TODO: why should ??
-}
 
 void HeapPage::storeKeyValue(u16 slotId, const u8* payload, const u16 payload_len)
 {
@@ -79,50 +71,33 @@ void HeapPage::storeKeyValue(u16 slotId, const u8* payload, const u16 payload_le
    data_offset -= space;
    space_used += space;
    slot[slotId].offset = data_offset;
+   slot[slotId].status = SlotStatus::OCCUPIED;
    // -------------------------------------------------------------------------------------
    memcpy(getPayload(slotId), payload, payload_len);
    assert(ptr() + data_offset >= reinterpret_cast<u8*>(slot + count));
 }
-// ATTENTION: dstSlot then srcSlot !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-void HeapPage::copyKeyValueRange(HeapPage* dst, u16 dstSlot, u16 srcSlot, u16 count)
-{
-    // Fast path
-    memcpy(dst->slot + dstSlot, slot + srcSlot, sizeof(Slot) * count);
-    DEBUG_BLOCK()
-    {
-        u32 total_space_used = 0;
-        for (u16 i = 0; i < this->count; i++) {
-        total_space_used += getPayloadLength(i);
-        }
-        assert(total_space_used == this->space_used);
-    }
-    for (u16 i = 0; i < count; i++) {
-        u32 kv_size = getPayloadLength(srcSlot + i);
-        dst->data_offset -= kv_size;
-        dst->space_used += kv_size;
-        dst->slot[dstSlot + i].offset = dst->data_offset;
-        DEBUG_BLOCK()
-        {
-        [[maybe_unused]] s64 off_by = reinterpret_cast<u8*>(dst->slot + dstSlot + count) - (dst->ptr() + dst->data_offset);
-        assert(off_by <= 0);
-        }
-        memcpy(dst->ptr() + dst->data_offset, ptr() + slot[srcSlot + i].offset, kv_size);
-    }
-   dst->count += count;
-   assert((dst->ptr() + dst->data_offset) >= reinterpret_cast<u8*>(dst->slot + dst->count));
-}
 
 s32 HeapPage::insert(const u8* payload, u16 payload_len) {
-   DEBUG_BLOCK()
-   {
-      assert(canInsert(payload_len));
+   assert(EFFECTIVE_PAGE_SIZE - data_offset == space_used);
+   if (spaceNeeded(payload_len) <= freeSpaceWithoutRemovedTuples()) {
+      s32 slotId = count;
+      storeKeyValue(slotId, payload, payload_len);
+      count++;
+      assert(EFFECTIVE_PAGE_SIZE - data_offset == space_used);
+      return slotId;
+   } else {
+      // find a removed slot
+      for (u32 i = 0; i < count; ++i) {
+         if (slot[i].status == SlotStatus::REMOVED &&
+             payload_len == slot[i].payload_len) { // Note, this is a hack. All our benchmarks use tuples of the same size
+            memcpy(getPayload(i), payload, payload_len); // overwrite 
+            slot[i].status = SlotStatus::OCCUPIED;
+            return i;
+         }
+      }
+      // Could not find any space
+      return -1;
    }
-   prepareInsert(payload_len);
-   s32 slotId = count;
-   //memmove(slot + slotId + 1, slot + slotId, sizeof(Slot) * (count - slotId));
-   storeKeyValue(slotId, payload, payload_len);
-   count++;
-   return slotId;
 }
 void HeapFile::create(DTID dtid) {
    this->dt_id = dtid;
@@ -137,7 +112,7 @@ void HeapFile::create(DTID dtid) {
       target_x_guard.incrementGSN();
       assert(p_guard->dataPagePointers[p % kDirNodeEntryCount].ptr.raw() == 0);
       p_guard->dataPagePointers[p % kDirNodeEntryCount].reserved = 0;
-      p_guard->dataPagePointers[p % kDirNodeEntryCount].freeSpace = target_x_guard->freeSpaceAfterCompaction();
+      p_guard->dataPagePointers[p % kDirNodeEntryCount].freeSpace = target_x_guard->freeSpace();
       p_guard->dataPagePointers[p % kDirNodeEntryCount].ptr = target_x_guard.swip();
       p_guard->node_count++;
       p_guard.incrementGSN();
@@ -153,7 +128,7 @@ static inline u64 power2(int i) {
 }
 
 
-OP_RESULT HeapFile::lookup(HeapTupleId id, std::function<void(u8*, u16)> payload_callback) {
+OP_RESULT HeapFile::lookup(HeapTupleId id, std::function<void(const u8*, u16)> payload_callback) {
    volatile u32 mask = 1;
 
    while (true) {
@@ -171,13 +146,15 @@ OP_RESULT HeapFile::lookup(HeapTupleId id, std::function<void(u8*, u16)> payload
             jumpmu_return OP_RESULT::NOT_FOUND;
          }
          HybridPageGuard<HeapPage> target_guard(p_guard, heap_page_node, LATCH_FALLBACK_MODE::SPIN);
-         p_guard.unlock();
-         if (id.slot_id() >= target_guard->count) {
+         if (id.slot_id() >= target_guard->count || target_guard->slotStatus(id.slot_id()) != SlotStatus::OCCUPIED) {
+            target_guard.recheck();
+            p_guard.recheck();
             jumpmu_return OP_RESULT::NOT_FOUND;
          }
          s32 slot_in_node = id.slot_id();
          payload_callback(target_guard->getPayload(slot_in_node), target_guard->getPayloadLength(slot_in_node));
          target_guard.recheck();
+         p_guard.recheck();
          jumpmu_return OP_RESULT::OK;
       }
       jumpmuCatch()
@@ -208,7 +185,8 @@ OP_RESULT HeapFile::lookupForUpdate(HeapTupleId id, std::function<bool(u8*, u16)
          }
          HybridPageGuard<HeapPage> target_guard(p_guard, heap_page_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
          target_guard.toExclusive();
-         if (id.slot_id() >= target_guard->count) {
+         if (id.slot_id() >= target_guard->count || target_guard->slotStatus(id.slot_id()) != SlotStatus::OCCUPIED) {
+            p_guard.recheck();
             jumpmu_return OP_RESULT::NOT_FOUND;
          }
          s32 slot_in_node = id.slot_id();
@@ -224,7 +202,6 @@ OP_RESULT HeapFile::lookupForUpdate(HeapTupleId id, std::function<bool(u8*, u16)
       }
    }
 }
-
 
 u64 HeapFile::countPages() {
    u64 count = 0;
@@ -270,6 +247,9 @@ OP_RESULT HeapFile::scan(std::function<bool(const u8*, u16, HeapTupleId)> callba
             p_guard.recheck();
             u64 count = target_s_guard->count;
             for (std::size_t i = 0; i < count; ++i) {
+               if (target_s_guard->slotStatus(i) != SlotStatus::OCCUPIED) {
+                  continue;
+               }
                HeapTupleId tuple_id = HeapTupleId::MakeTupleId(pid, i);
                bool should_continue = callback(target_s_guard->getPayload(i), target_s_guard->getPayloadLength(i), tuple_id);
                if (should_continue == false) {
@@ -303,15 +283,15 @@ OP_RESULT HeapFile::insert(HeapTupleId & ouput_tuple_id, u8* value, u16 value_le
          assert(heap_page_node.bf != nullptr);
          HybridPageGuard<HeapPage> target_x_guard(p_guard, heap_page_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
          target_x_guard.toExclusive();
-         if (target_x_guard->canInsert(value_length)) {
-            auto slot_id = target_x_guard->insert(value, value_length);
+         s32 slot_id = target_x_guard->insert(value, value_length);
+         if (slot_id != -1) {
             target_x_guard.incrementGSN();
             ouput_tuple_id = HeapTupleId::MakeTupleId(page_id, slot_id);
             data_stored.fetch_add(value_length);
             not_enough_space = false;
             jumpmu_return OP_RESULT::OK;
          } else {
-            free_space = target_x_guard->freeSpaceAfterCompaction();
+            free_space = target_x_guard->freeSpace();
             not_enough_space = true;
          }
       }
@@ -329,21 +309,25 @@ OP_RESULT HeapFile::insert(HeapTupleId & ouput_tuple_id, u8* value, u16 value_le
 u64 HeapFile::countEntries() {
    u64 count = 0;
    auto pages = table->numSlots();
-   for (u64 b = 0; b < pages; ++b) {
-      BufferFrame* dirNode = table->getDirNode(b);
+   for (u32 pid = 0; pid < pages; ++pid) {
+      BufferFrame* dirNode = table->getDirNode(pid);
 
       while (true) {
          u64 sum = 0;
          jumpmuTry()
          {
             HybridPageGuard<HeapDirectoryNode> p_guard(dirNode);
-            Swip<HeapPage> & heap_page_node = p_guard->dataPagePointers[b % kDirNodeEntryCount].ptr;
+            Swip<HeapPage> & heap_page_node = p_guard->dataPagePointers[pid % kDirNodeEntryCount].ptr;
             if (heap_page_node.bf == nullptr) {
                jumpmu_break;
             }
             HybridPageGuard<HeapPage> target_s_guard(p_guard, heap_page_node, LATCH_FALLBACK_MODE::SPIN);
             p_guard.recheck();
-            sum += target_s_guard->count;
+            for (std::size_t i = 0; i < target_s_guard->count; ++i) {
+               if (target_s_guard->slotStatus(i) == SlotStatus::OCCUPIED) {
+                  sum++;
+               }
+            }
             count += sum;
             jumpmu_break;
          }
@@ -363,6 +347,7 @@ OP_RESULT HeapFile::remove(HeapTupleId id) {
       BufferFrame * dirNode = table->getDirNode(page_id);
       u32 free_space = 0;
       bool deleted = false;
+      bool jumpped = false;
       jumpmuTry()
       {
          HybridPageGuard<HeapDirectoryNode> p_guard(dirNode);
@@ -370,22 +355,30 @@ OP_RESULT HeapFile::remove(HeapTupleId id) {
          assert(heap_page_node.bf != nullptr);
          HybridPageGuard<HeapPage> target_x_guard(p_guard, heap_page_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
          target_x_guard.toExclusive();
-         if (target_x_guard->count > id.slot_id()) {
+         if (target_x_guard->count > id.slot_id() && target_x_guard->slotStatus(id.slot_id()) == SlotStatus::OCCUPIED) {
             data_stored.fetch_sub(target_x_guard->getPayloadLength(id.slot_id()));
             target_x_guard->removeSlot(id.slot_id());
             target_x_guard.incrementGSN();
-            free_space = target_x_guard->freeSpaceAfterCompaction();
+            free_space = target_x_guard->freeSpace();
             deleted = true;
          }
       }
       jumpmuCatch() 
       {
          WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
+         jumpped = true;
       }
 
-      if (deleted && (free_space / EFFECTIVE_PAGE_SIZE + 0.0) >= kFreeSpaceThreshold 
+      if (!jumpped) {
+         if (deleted && (free_space / EFFECTIVE_PAGE_SIZE + 0.0) >= kFreeSpaceThreshold 
                   && (free_space / EFFECTIVE_PAGE_SIZE + 0.0) <= kFreeSpaceThreshold + 0.01) {
-         update_free_space_in_dir_node(page_id, free_space, false);
+            update_free_space_in_dir_node(page_id, free_space, false);
+         }
+         if (deleted) {
+            return OP_RESULT::OK;
+         } else {
+            return OP_RESULT::NOT_FOUND;
+         }
       }
    }
 }
@@ -501,7 +494,7 @@ void HeapFile::add_heap_pages(u32 n_pages) {
                target_x_guard.init(pid);
                target_x_guard.incrementGSN();
                p_guard->dataPagePointers[p_guard->node_count].reserved = 0;
-               p_guard->dataPagePointers[p_guard->node_count].freeSpace = target_x_guard->freeSpaceAfterCompaction();
+               p_guard->dataPagePointers[p_guard->node_count].freeSpace = target_x_guard->freeSpace();
                p_guard->dataPagePointers[p_guard->node_count].ptr = target_x_guard.swip();
                p_guard->node_count++;
                pages_with_free_space.push_back(pid);
@@ -607,6 +600,209 @@ DTRegistry::DTMeta HeapFile::getMeta() {
                                     .serialize = HeapFile::serialize,
                                     .deserialize = HeapFile::deserialize};
    return ht_meta;
+}
+
+
+OP_RESULT IndexedHeapFile::remove(u8* key, u16 key_length) {
+   LockGuardProxy g(&lock_table, unfold(*(u64*)key));
+   while(!g.write_lock());
+   HeapTupleId tuple_id;
+   bool found = false;
+   auto btree_lookup_result = btree_index.lookup(key, key_length, [&](const u8 * payload, u16 payload_length){
+      assert(payload_length == sizeof(HeapTupleId));
+      found = true;
+      tuple_id = *reinterpret_cast<const HeapTupleId*>(payload);
+   });
+
+   if (btree_lookup_result == leanstore::storage::btree::OP_RESULT::OK) {
+      assert(found == true);
+      auto res = heap_file.remove(tuple_id);
+      assert(res == OP_RESULT::OK);
+      btree_lookup_result = btree_index.remove(key, key_length);
+      assert(btree_lookup_result == leanstore::storage::btree::OP_RESULT::OK);
+      return OP_RESULT::OK;
+   }
+
+   return OP_RESULT::NOT_FOUND;
+}
+
+OP_RESULT IndexedHeapFile::upsert(u8* key, u16 key_length, u8* value, u16 value_length) {
+   LockGuardProxy g(&lock_table, unfold(*(u64*)key));
+   while(!g.write_lock());
+   bool exists = false;
+   auto res = doLookupForUpdate(key, key_length, [&](u8 * tuple, u16 tuple_length){
+      assert(tuple_length == key_length + value_length);
+      exists = true;
+      memcpy(tuple, key, key_length);
+      memcpy(tuple + key_length, value, value_length);
+      return true;
+   });
+   if (res == OP_RESULT::OK) {
+      assert(exists == true);
+      return OP_RESULT::OK;
+   }
+   assert(OP_RESULT::NOT_FOUND);
+   return doInsert(key, key_length, value, value_length);
+}
+
+
+OP_RESULT IndexedHeapFile::doInsert(u8* key, u16 key_length, u8* value, u16 value_length) {
+   HeapTupleId tuple_id;
+   u8 buffer[value_length + key_length];
+   memcpy(buffer, key, key_length);
+   memcpy(buffer + key_length, value, value_length);
+   
+   OP_RESULT res = heap_file.insert(tuple_id, buffer, key_length + value_length);
+   assert(res == OP_RESULT::OK);
+   leanstore::storage::btree::OP_RESULT btree_res = btree_index.insert(key, key_length, (u8*)&tuple_id, sizeof(tuple_id));
+   assert(btree_res == leanstore::storage::btree::OP_RESULT::OK);
+   return OP_RESULT::OK;
+}
+
+OP_RESULT IndexedHeapFile::insert(u8* key, u16 key_length, u8* value, u16 value_length) {
+   LockGuardProxy g(&lock_table, unfold(*(u64*)key));
+   while(!g.write_lock());
+   return doInsert(key, key_length, value, value_length);
+}
+
+OP_RESULT IndexedHeapFile::doLookupForUpdate(u8* key, u16 key_length, function<bool(u8*, u16)> payload_callback) {
+   bool found = false;
+   bool found_in_heap = false;
+   HeapTupleId tuple_id;
+   auto btree_lookup_result = btree_index.lookup(key, key_length, [&](const u8 * payload, u16 payload_length){
+      assert(payload_length == sizeof(HeapTupleId));
+      found = true;
+      tuple_id = *reinterpret_cast<const HeapTupleId*>(payload);
+   });
+   
+   if (btree_lookup_result == leanstore::storage::btree::OP_RESULT::OK) {
+      auto res = heap_file.lookupForUpdate(tuple_id, [&](u8 * tuple, u16 tuple_length){
+         found_in_heap = true;
+         auto value_length = tuple_length - key_length;
+         return payload_callback(tuple + key_length, value_length);
+      });
+      if (found_in_heap) {
+         assert(res == OP_RESULT::OK);
+         return OP_RESULT::OK;
+      } else {
+         return OP_RESULT::NOT_FOUND;
+      }
+      
+   } else {
+      assert(btree_lookup_result == leanstore::storage::btree::OP_RESULT::NOT_FOUND);
+      return OP_RESULT::NOT_FOUND;
+   }
+}
+
+OP_RESULT IndexedHeapFile::lookupForUpdate(u8* key, u16 key_length, function<bool(u8*, u16)> payload_callback) {
+   LockGuardProxy g(&lock_table, unfold(*(u64*)key));
+   while(!g.write_lock());
+   return doLookupForUpdate(key, key_length, payload_callback);
+}
+
+
+OP_RESULT IndexedHeapFile::lookup(u8* key, u16 key_length, function<void(const u8*, u16)> payload_callback) {
+   while (true) {
+      LockGuardProxy g(&lock_table, unfold(*(u64*)key));
+      if(!g.read_lock()){
+         continue;
+      }
+      bool found_in_heap = false;
+      auto btree_lookup_result = btree_index.lookup(key, key_length, [&](const u8 * payload, u16 payload_length){
+         assert(payload_length == sizeof(HeapTupleId));
+         HeapTupleId tuple_id = *reinterpret_cast<const HeapTupleId*>(payload);
+         heap_file.lookup(tuple_id, [&](const u8 * tuple, u16 tuple_length){
+            found_in_heap = true;
+            auto value_length = tuple_length - key_length;
+            payload_callback(tuple + key_length, value_length);
+         });
+      });
+
+      if (!g.validate()) {
+         continue;
+      }
+      if (btree_lookup_result == leanstore::storage::btree::OP_RESULT::NOT_FOUND) {
+         return OP_RESULT::NOT_FOUND;
+      }
+
+      if (found_in_heap) {
+         return OP_RESULT::OK;
+      }
+      return OP_RESULT::NOT_FOUND;
+   }
+}
+
+
+static std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btree, std::size_t & pages) {
+   constexpr std::size_t scan_buffer_cap = 64;
+   size_t scan_buffer_len = 0;
+   typedef u64 Key;
+
+   Key keys[scan_buffer_cap];
+   bool tree_end = false;
+   pages = 0;
+   const char * last_leaf_frame = nullptr;
+   u8 key_bytes[sizeof(Key)];
+   auto fill_scan_buffer = [&](Key startk) {
+      if (scan_buffer_len < scan_buffer_cap && tree_end == false) {
+         btree.scanAsc(key_bytes, fold(key_bytes, startk),
+         [&](const u8 * key, u16 key_length, [[maybe_unused]] const u8 * value, [[maybe_unused]] u16 value_length, const char * leaf_frame) -> bool {
+            auto real_key = unfold(*(Key*)(key));
+            assert(key_length == sizeof(Key));
+            keys[scan_buffer_len] = real_key;
+            scan_buffer_len++;
+            if (last_leaf_frame != leaf_frame) {
+               last_leaf_frame = leaf_frame;
+               ++pages;
+            }
+            if (scan_buffer_len >= scan_buffer_cap) {
+               return false;
+            }
+            return true;
+         }, [](){});
+         if (scan_buffer_len < scan_buffer_cap) {
+            tree_end = true;
+         }
+      }
+   };
+   Key start_key = std::numeric_limits<Key>::min();
+   
+   std::size_t entries = 0;
+   
+   while (true) {
+      fill_scan_buffer(start_key);
+      size_t idx = 0;
+      while (idx < scan_buffer_len) {
+         idx++;
+         entries++;
+      }
+
+      if (idx >= scan_buffer_len && tree_end) {
+         break;
+      }
+      assert(idx > 0);
+      start_key = keys[idx - 1] + 1;
+      scan_buffer_len = 0;
+   }
+   return entries;
+}
+
+u64 IndexedHeapFile::countHeapPages() {
+   return heap_file.countPages();
+}
+u64 IndexedHeapFile::countHeapEntries() {
+   return heap_file.countEntries();
+}
+
+u64 IndexedHeapFile::countIndexPages() {
+   size_t pages = 0;
+   btree_entries(btree_index, pages);
+   return pages;
+}
+
+u64 IndexedHeapFile::countIndexEntries(){
+   size_t pages = 0;
+   return btree_entries(btree_index, pages);
 }
 
 }

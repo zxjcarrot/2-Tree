@@ -2,10 +2,12 @@
 #include "leanstore/Config.hpp"
 #include "leanstore/profiling/counters/WorkerCounters.hpp"
 #include "leanstore/storage/buffer-manager/BufferManager.hpp"
+#include "leanstore/storage/btree/BTreeLL.hpp"
 #include "leanstore/sync-primitives/PageGuard.hpp"
 #include "leanstore/utils/RandomGenerator.hpp"
 #include "leanstore/utils/FNVHash.hpp"
 #include "leanstore/utils/XXHash.hpp"
+#include "LockManager/LockManager.hpp"
 #include <shared_mutex>
 
 // -------------------------------------------------------------------------------------
@@ -125,15 +127,13 @@ struct HeapTupleId {
 
 class HeapFile
 {
-  public:
-  public:
+public:
    ~HeapFile() {}
    // -------------------------------------------------------------------------------------
-   OP_RESULT lookup(HeapTupleId id, std::function<void(u8*, u16)> payload_callback);
+   OP_RESULT lookup(HeapTupleId id, std::function<void(const u8*, u16)> payload_callback);
    OP_RESULT lookupForUpdate(HeapTupleId id, std::function<bool(u8*, u16)> payload_callback);
    OP_RESULT insert(HeapTupleId & ouput_tuple_id, u8* value, u16 value_length);
    OP_RESULT remove(HeapTupleId id);
-   // iterate over all data records in bucket
    OP_RESULT scan(std::function<bool(const u8*, u16, HeapTupleId)> callback);
    // -------------------------------------------------------------------------------------
    u64 countPages();
@@ -165,17 +165,8 @@ class HeapFile
       hash_func = f;
    }
 private:
-   constexpr static double kSplitLoadFactor = 0.8;
    constexpr static u32 N = 64; // number of pages that have space to keep in `pages_with_free_space`
    constexpr static double kFreeSpaceThreshold = 0.1;
-   constexpr static u64 kPowerBits = 8;
-   constexpr static u64 kPowerOffset = 64 - 8;
-   constexpr static u64 kPowerMask = ((1ull << kPowerBits) - 1)  << kPowerOffset;
-   constexpr static u64 kBuddyBucketOffset = 0;;
-   constexpr static u64 kBuddyBucketBits = 64 - kPowerBits;
-   constexpr static u64 kBuddyBucketMask = ((1ull << kBuddyBucketBits) - 1)  << kBuddyBucketOffset;
-   //std::atomic<u64> i_{0};
-   //std::atomic<u64> s_{0};
    std::atomic<u64> data_stored{0};
    std::atomic<s64> data_pages{0};
    MappingTable * table = nullptr;
@@ -189,11 +180,41 @@ public:
 };
 
 
+class IndexedHeapFile
+{
+public:
+   ~IndexedHeapFile() {}
+   IndexedHeapFile(HeapFile & heap_file, leanstore::storage::btree::BTreeLL & btree_index) : heap_file(heap_file), btree_index(btree_index) {}
+   // -------------------------------------------------------------------------------------
+   OP_RESULT lookup(u8* key, u16 key_length, std::function<void(const u8*, u16)> payload_callback);
+   OP_RESULT lookupForUpdate(u8* key, u16 key_length, std::function<bool(u8*, u16)> payload_callback);
+   OP_RESULT insert(u8* key, u16 key_length, u8* value, u16 value_length);
+   OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length);
+   OP_RESULT remove(u8* key, u16 key_length);
+   // -------------------------------------------------------------------------------------
+   u64 countHeapPages();
+   u64 countHeapEntries();
+   u64 countIndexPages();
+   u64 countIndexEntries();
+   u64 indexHeight() { return btree_index.getHeight(); }
+   u64 dataPages() { return data_pages.load(); }
+   u64 dataStored() { return data_stored.load(); }
+private:
+   OP_RESULT doInsert(u8* key, u16 key_length, u8* value, u16 value_length);
+   OP_RESULT doLookupForUpdate(u8* key, u16 key_length, std::function<bool(u8*, u16)> payload_callback);
+   std::atomic<u64> data_stored{0};
+   std::atomic<s64> data_pages{0};
+   MappingTable * table = nullptr;
+
+   HeapFile & heap_file;
+   leanstore::storage::btree::BTreeLL & btree_index;
+   OptimisticLockTable lock_table;
+};
+
 struct HeapPageHeader {
    static const u16 underFullSize = EFFECTIVE_PAGE_SIZE * 0.5;
    static const u16 overfullFullSize = EFFECTIVE_PAGE_SIZE * 0.9;
 
-   SwipType next = nullptr;
    u32 page_id = 0;
    u16 count = 0;  // count number of keys
    u16 space_used = 0;  // does not include the header, but includes fences !!!!!
@@ -206,18 +227,31 @@ struct HeapPageHeader {
 };
 using HeadType = u16;
 // -------------------------------------------------------------------------------------
+enum SlotStatus {
+   FREE     = 0,
+   OCCUPIED = 1,
+   REMOVED  = 2
+   // A slot once allocated will not be freed until GC.
+   // It transitions into either Occupied or Removed status.
+   // An occupied slot states that the tuple is valid.
+   // For a removed slot, the offset and payload_len represent the data of the previous tuple; 
+   // Its space can be reused for a later insertion. 
+};
 struct HeapPage : public HeapPageHeader {
    struct __attribute__((packed)) Slot {
       // Layout:  key wihtout prefix | Payload
       u16 offset;
-      u16 payload_len : 15;
+      u16 payload_len : 14;
+      u16 status: 2;
    };
    static constexpr u64 pure_slots_capacity = (EFFECTIVE_PAGE_SIZE - sizeof(HeapPageHeader)) / (sizeof(Slot));
    static constexpr u64 left_space_to_waste = (EFFECTIVE_PAGE_SIZE - sizeof(HeapPageHeader)) % (sizeof(Slot));
    Slot slot[pure_slots_capacity];
    u8 padding[left_space_to_waste];
 
-   HeapPage(u32 page_id) : HeapPageHeader(page_id) {}
+   HeapPage(u32 page_id) : HeapPageHeader(page_id) {
+      memset(slot, 0, sizeof(slot));
+   }
 
    void clear() {
       this->count = 0;
@@ -225,32 +259,51 @@ struct HeapPage : public HeapPageHeader {
       this->data_offset = static_cast<u16>(EFFECTIVE_PAGE_SIZE);
    }
 
-   u16 freeSpace() { 
-      u64 metadata_used = reinterpret_cast<u8*>(slot + count) - ptr();
-      assert(data_offset >= metadata_used);
-      return data_offset - metadata_used; 
+   u16 freeSpaceWithoutRemovedTuples() { 
+      assert(EFFECTIVE_PAGE_SIZE - data_offset == space_used);
+      return EFFECTIVE_PAGE_SIZE - (reinterpret_cast<u8*>(slot + count) - ptr()) - space_used;
    }
-   u16 freeSpaceAfterCompaction() { return EFFECTIVE_PAGE_SIZE - (reinterpret_cast<u8*>(slot + count) - ptr()) - space_used; }
-   u16 spaceUsedForData() { return (reinterpret_cast<u8*>(slot + count) - ptr()) + space_used; }
+
+   u16 freeSpace() { 
+      assert(EFFECTIVE_PAGE_SIZE - data_offset == space_used);
+      u64 metadata_used = reinterpret_cast<u8*>(slot + count) - ptr();
+      // assert(data_offset >= metadata_used);
+      // return data_offset - metadata_used; 
+      // find the slot that points to the leftmost position wihtin the page.
+      u16 left_most_offset = static_cast<u16>(EFFECTIVE_PAGE_SIZE);
+      s16 left_most_slot = -1;
+      u64 space_for_removed_tuples = 0;
+      for (s16 i = 0; i < count; ++i) {
+         assert(slot[i].status != SlotStatus::FREE);
+         if (left_most_offset > slot[i].offset) {
+            left_most_slot = i;
+            left_most_offset = slot[i].offset;
+         }
+         if (slot[i].status == SlotStatus::REMOVED) {
+            space_for_removed_tuples += slot[i].payload_len;
+         }
+      }
+      assert(left_most_offset >= metadata_used);
+
+      return EFFECTIVE_PAGE_SIZE - metadata_used - space_used + space_for_removed_tuples;
+   }
+
+   //u16 freeSpaceAfterCompaction() { return EFFECTIVE_PAGE_SIZE - (reinterpret_cast<u8*>(slot + count) - ptr()) - space_used; }
+   //u16 spaceUsedForData() { return (reinterpret_cast<u8*>(slot + count) - ptr()) + space_used; }
    // -------------------------------------------------------------------------------------
-   double fillFactorAfterCompaction() { return (1 - (freeSpaceAfterCompaction() * 1.0 / EFFECTIVE_PAGE_SIZE)); }
+   //double fillFactorAfterCompaction() { return (1 - (freeSpaceAfterCompaction() * 1.0 / EFFECTIVE_PAGE_SIZE)); }
    // -------------------------------------------------------------------------------------
-   bool hasEnoughSpaceFor(u32 space_needed) { return (space_needed <= freeSpace() || space_needed <= freeSpaceAfterCompaction()); }
+   bool hasEnoughSpaceFor(u32 space_needed) { return (space_needed <= freeSpace()); }
    // ATTENTION: this method has side effects !
    bool requestSpaceFor(u16 space_needed)
    {
       if (space_needed <= freeSpace())
          return true;
-      if (space_needed <= freeSpaceAfterCompaction()) {
-         compactify();
-         return true;
-      }
       return false;
    }
    // -------------------------------------------------------------------------------------
    inline u16 getPayloadLength(u16 slotId) { return slot[slotId].payload_len; }
    inline u8* getPayload(u16 slotId) { return ptr() + slot[slotId].offset; }
-   inline SwipType & getNextNode() {return this->next; }
    // -------------------------------------------------------------------------------------
    // -------------------------------------------------------------------------------------
    static inline bool cmpKeys(const u8* a, const u8* b, u16 aLength, u16 bLength)
@@ -268,16 +321,13 @@ struct HeapPage : public HeapPageHeader {
    // -------------------------------------------------------------------------------------
    bool update(u16 slot_id, u8* payload, u16 payload_length);
    // -------------------------------------------------------------------------------------
-   void compactify();
+   //void compactify();
    // -------------------------------------------------------------------------------------
    u32 spaceUsedBySlot(u16 slot_id);
+   SlotStatus slotStatus(u16 slot_id) { return (SlotStatus)slot[slot_id].status; }
    // -------------------------------------------------------------------------------------
    // store key/value pair at slotId
    void storeKeyValue(u16 slotId,const u8* payload, u16 payload_len);
-   // ATTENTION: dstSlot then srcSlot !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-   void copyKeyValueRange(HeapPage* dst, u16 dstSlot, u16 srcSlot, u16 count);
-   void copyKeyValue(u16 srcSlot, HeapPage* dst, u16 dstSlot);
-   // -------------------------------------------------------------------------------------
    bool removeSlot(u16 slotId);
 };
 
