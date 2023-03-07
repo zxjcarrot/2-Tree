@@ -186,7 +186,7 @@ struct HeapFileAdapter : StorageInterface<Key, Payload> {
       std::cout << "Heap File # entries (real) " << real_entries << std::endl;
       std::cout << "Heap File # pages " << pages << std::endl;
       std::cout << "Heap File # pages (real) " << real_pages << std::endl;
-      std::cout << "Heap File # pages (fast) " << heap_file.dataPages() << std::endl;
+      std::cout << "Heap File # pages (fast) " << heap_file.getPages() << std::endl;
       std::cout << "Heap File bytes stored " << heap_file.dataStored() << std::endl;
       auto minimal_pages = entries * (sizeof(Key) + sizeof(Payload)) / leanstore::storage::PAGE_SIZE;
       std::cout << "Heap File average fill factor " <<  (minimal_pages + 0.0) / pages << std::endl;

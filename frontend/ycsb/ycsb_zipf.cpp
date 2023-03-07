@@ -27,6 +27,7 @@
 #include "hash/HashAdapter.hpp"
 #include "heap/HeapFileAdapter.hpp"
 #include "heap/IndexedHeapAdapter.hpp"
+#include "twoheap/TwoIHeap.hpp"
 //#include "rocksdb_adapter.hpp"
 // -------------------------------------------------------------------------------------
 #include <gflags/gflags.h>
@@ -83,6 +84,7 @@ const std::string kIndexTypeAntiCache = "AntiCache";
 const std::string kIndexTypeAntiCacheB = "AntiCacheB";
 const std::string kIndexType2BTree = "2BTree";
 const std::string kIndexType2Hash = "2Hash";
+const std::string kIndexType2IHeap = "2IHeap";
 const std::string kIndexTypeC2BTree = "C2BTree";
 const std::string kIndexType2LSMT = "2LSMT";
 const std::string kIndexType2LSMT_CF = "2LSMT-CF";
@@ -200,7 +202,7 @@ int main(int argc, char** argv)
    double effective_page_to_frame_ratio = sizeof(leanstore::storage::BufferFrame::Page) / (sizeof(leanstore::storage::BufferFrame) + 0.0);
    double top_tree_size_gib = 0;
    s64 hot_pages_limit = std::numeric_limits<s64>::max();
-   if (FLAGS_index_type == kIndexTypeHeap || FLAGS_index_type == kIndexTypeIHeap || FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
+   if (FLAGS_index_type == kIndexTypeHeap || FLAGS_index_type == kIndexTypeIHeap || FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexType2IHeap || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
       hot_pages_limit = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * 1024 * 1024 * 1024 / sizeof(leanstore::storage::BufferFrame);
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * effective_page_to_frame_ratio;
    } else if (FLAGS_index_type == kIndexTypeUpLSMT || 
@@ -259,19 +261,22 @@ int main(int argc, char** argv)
    leanstore::storage::hashing::LinearHashTable* ht_ptr = nullptr;
    leanstore::storage::hashing::LinearHashTable* ht2_ptr = nullptr;
    leanstore::storage::heap::HeapFile* hf_ptr = nullptr;
+   leanstore::storage::heap::HeapFile* hf2_ptr = nullptr;
    db.getCRManager().scheduleJobSync(0, [&](){
       if (FLAGS_recover) {
          btree_ptr = &db.retrieveBTreeLL("btree", true);
          btree2_ptr = &db.retrieveBTreeLL("btree_cold");
          ht_ptr = &db.retrieveHashTable("ht", true);
          ht2_ptr = &db.retrieveHashTable("ht_cold");
-         hf_ptr = &db.retrieveHeapFile("hf");
+         hf_ptr = &db.retrieveHeapFile("hf", true);
+         hf2_ptr = &db.retrieveHeapFile("hf_cold");
       } else {
          btree_ptr = &db.registerBTreeLL("btree", true);
          btree2_ptr = &db.registerBTreeLL("btree_cold");
          ht_ptr = &db.registerHashTable("ht", true);
          ht2_ptr = &db.registerHashTable("ht_cold");
-         hf_ptr = &db.registerHeapFile("hf");
+         hf_ptr = &db.registerHeapFile("hf", true);
+         hf2_ptr = &db.registerHeapFile("hf_cold");
       }
    });
    
@@ -282,7 +287,9 @@ int main(int argc, char** argv)
    } else if (FLAGS_index_type == kIndexTypeHeap) {
       adapter.reset(new HeapFileAdapter<YCSBKey, YCSBPayload>(*hf_ptr, hf_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexTypeIHeap) {
-      adapter.reset(new IndexedHeapAdapter<YCSBKey, YCSBPayload>(*hf_ptr, *btree2_ptr));
+      adapter.reset(new IndexedHeapAdapter<YCSBKey, YCSBPayload>(*hf2_ptr, *btree2_ptr));
+   } else if (FLAGS_index_type == kIndexType2IHeap) {
+      adapter.reset(new TwoIHeapAdapter<YCSBKey, YCSBPayload>(*hf_ptr, *btree_ptr, *hf2_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2BTree) {
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2Hash) {

@@ -48,6 +48,7 @@ bool HeapPage::removeSlot(u16 slotId)
    //space_used -= getPayloadLength(slotId);
    //memmove(slot + slotId, slot + slotId + 1, sizeof(Slot) * (count - slotId - 1));
    //count--;
+   assert(slotId < count);
    slot[slotId].status = SlotStatus::REMOVED;
    assert(count >= 0);
    return true;
@@ -65,6 +66,7 @@ void HeapPage::storeKeyValue(u16 slotId, const u8* payload, const u16 payload_le
 {
    // -------------------------------------------------------------------------------------
    // Fingerprint
+   assert(slot[slotId].status == SlotStatus::FREE);
    slot[slotId].payload_len = payload_len;
    // Value
    const u16 space = payload_len;
@@ -87,9 +89,9 @@ s32 HeapPage::insert(const u8* payload, u16 payload_len) {
       return slotId;
    } else {
       // find a removed slot
-      for (u32 i = 0; i < count; ++i) {
-         if (slot[i].status == SlotStatus::REMOVED &&
-             payload_len == slot[i].payload_len) { // Note, this is a hack. All our benchmarks use tuples of the same size
+      for (s32 i = 0; i < count; ++i) {
+         if (slot[i].status == SlotStatus::REMOVED) { 
+            assert(payload_len == slot[i].payload_len); // Note, this is a hack. All our benchmarks use tuples of the same size
             memcpy(getPayload(i), payload, payload_len); // overwrite 
             slot[i].status = SlotStatus::OCCUPIED;
             return i;
@@ -116,6 +118,7 @@ void HeapFile::create(DTID dtid) {
       p_guard->dataPagePointers[p % kDirNodeEntryCount].ptr = target_x_guard.swip();
       p_guard->node_count++;
       p_guard.incrementGSN();
+      this->data_pages++;
       std::unique_lock<std::shared_mutex> g(this->mtx);
       pages_with_free_space.push_back(p);
    }
@@ -230,6 +233,41 @@ u64 HeapFile::countPages() {
    return count;   
 }
 
+OP_RESULT HeapFile::scanPage(u32 pid, std::function<bool(const u8*, u16, HeapTupleId)> callback) {
+   BufferFrame* dirNode = table->getDirNode(pid);
+   while (true) {
+      jumpmuTry()
+      {
+         HybridPageGuard<HeapDirectoryNode> p_guard(dirNode);
+         Swip<HeapPage> & heap_page_node = p_guard->dataPagePointers[pid % kDirNodeEntryCount].ptr;
+         if (heap_page_node.bf == nullptr) {
+            jumpmu_break;
+         }
+         HybridPageGuard<HeapPage> target_s_guard(p_guard, heap_page_node, LATCH_FALLBACK_MODE::SHARED);
+         target_s_guard.toShared();
+         p_guard.recheck();
+         u64 count = target_s_guard->count;
+         for (std::size_t i = 0; i < count; ++i) {
+            if (target_s_guard->slotStatus(i) != SlotStatus::OCCUPIED) {
+               continue;
+            }
+            HeapTupleId tuple_id = HeapTupleId::MakeTupleId(pid, i);
+            bool should_continue = callback(target_s_guard->getPayload(i), target_s_guard->getPayloadLength(i), tuple_id);
+            if (should_continue == false) {
+               target_s_guard.recheck();
+               jumpmu_return OP_RESULT::OK;
+            }
+         }
+         jumpmu_break;
+      }
+      jumpmuCatch() 
+      {
+         WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
+      }
+   }
+
+   return OP_RESULT::OK;
+}
 OP_RESULT HeapFile::scan(std::function<bool(const u8*, u16, HeapTupleId)> callback) {
    auto pages = table->numSlots();
    for (u32 pid = 0; pid < pages; ++pid) {
@@ -276,6 +314,7 @@ OP_RESULT HeapFile::insert(HeapTupleId & ouput_tuple_id, u8* value, u16 value_le
       BufferFrame * dirNode = table->getDirNode(page_id);
       bool not_enough_space = false;
       u32 free_space = 0;
+      bool jumped = false;
       jumpmuTry()
       {
          HybridPageGuard<HeapDirectoryNode> p_guard(dirNode);
@@ -289,7 +328,6 @@ OP_RESULT HeapFile::insert(HeapTupleId & ouput_tuple_id, u8* value, u16 value_le
             ouput_tuple_id = HeapTupleId::MakeTupleId(page_id, slot_id);
             data_stored.fetch_add(value_length);
             not_enough_space = false;
-            jumpmu_return OP_RESULT::OK;
          } else {
             free_space = target_x_guard->freeSpace();
             not_enough_space = true;
@@ -297,11 +335,15 @@ OP_RESULT HeapFile::insert(HeapTupleId & ouput_tuple_id, u8* value, u16 value_le
       }
       jumpmuCatch() 
       {
+         jumped = true;
          WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
       }
-
-      if (not_enough_space) {
-         update_free_space_in_dir_node(page_id, free_space, true);
+      if (!jumped) {
+         if (not_enough_space) {
+            update_free_space_in_dir_node(page_id, free_space, true);
+         } else {
+            return OP_RESULT::OK;
+         }
       }
    }
 }
@@ -344,6 +386,7 @@ u64 HeapFile::countEntries() {
 OP_RESULT HeapFile::remove(HeapTupleId id) {
    while (true) {
       u32 page_id = id.heap_page_id();
+      u32 slot_id = id.slot_id();
       BufferFrame * dirNode = table->getDirNode(page_id);
       u32 free_space = 0;
       bool deleted = false;
@@ -355,9 +398,9 @@ OP_RESULT HeapFile::remove(HeapTupleId id) {
          assert(heap_page_node.bf != nullptr);
          HybridPageGuard<HeapPage> target_x_guard(p_guard, heap_page_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
          target_x_guard.toExclusive();
-         if (target_x_guard->count > id.slot_id() && target_x_guard->slotStatus(id.slot_id()) == SlotStatus::OCCUPIED) {
-            data_stored.fetch_sub(target_x_guard->getPayloadLength(id.slot_id()));
-            target_x_guard->removeSlot(id.slot_id());
+         if (target_x_guard->count > slot_id && target_x_guard->slotStatus(slot_id) == SlotStatus::OCCUPIED) {
+            data_stored.fetch_sub(target_x_guard->getPayloadLength(slot_id));
+            target_x_guard->removeSlot(slot_id);
             target_x_guard.incrementGSN();
             free_space = target_x_guard->freeSpace();
             deleted = true;
@@ -370,8 +413,8 @@ OP_RESULT HeapFile::remove(HeapTupleId id) {
       }
 
       if (!jumpped) {
-         if (deleted && (free_space / EFFECTIVE_PAGE_SIZE + 0.0) >= kFreeSpaceThreshold 
-                  && (free_space / EFFECTIVE_PAGE_SIZE + 0.0) <= kFreeSpaceThreshold + 0.01) {
+         if (deleted && (free_space / (EFFECTIVE_PAGE_SIZE + 0.0)) >= kFreeSpaceThreshold 
+                  && (free_space / (EFFECTIVE_PAGE_SIZE + 0.0)) <= kFreeSpaceThreshold + 0.03) {
             update_free_space_in_dir_node(page_id, free_space, false);
          }
          if (deleted) {
@@ -384,8 +427,7 @@ OP_RESULT HeapFile::remove(HeapTupleId id) {
 }
 
 double HeapFile::current_load_factor() {
-   //return data_stored.load() / (sp.load_buddy_bucket() * sizeof(LinearHashingNode) + 0.0001);
-   return data_stored.load() / (data_pages.load() * sizeof(HeapPage) + 0.0);
+   return data_stored.load() / (getPages() * EFFECTIVE_PAGE_SIZE + 0.0);
 }
 
 class DeferCode {
@@ -445,34 +487,39 @@ void HeapFile::find_pages_with_free_space() {
    // collect data pages that have space by scanning the directory pages
    // If could not find enough (N) such pages, let's add a few new pages using `add_heap_pages`.
    std::vector<u64> pages_that_have_space;
-   for (u64 d = next_dir_node_to_scan; d < table->numDirNodes(); ++d) {
-      BufferFrame* dirNode = table->getDirNode(d);
+   static constexpr int kScanStep = N;
+   for (u64 pid = next_page_to_scan; pid < table->numSlots();) {
+      BufferFrame* dirNode = table->getDirNode(pid);
+      int dirNodeStartPageIdx = (pid / kDirNodeEntryCount) * kDirNodeEntryCount;
+      int start_idx_within_node = pid % kDirNodeEntryCount;
+      int end_idx_within_node = std::min(start_idx_within_node + kScanStep, kDirNodeEntryCount);
       while(true) {
          jumpmuTry() {
             pages_that_have_space.clear();
             HybridPageGuard<HeapDirectoryNode> p_guard(dirNode);
-            for (size_t i = 0; i < kDirNodeEntryCount; ++i) {
+            for (int i = start_idx_within_node; i < end_idx_within_node; ++i) {
                if (p_guard->dataPagePointers[i].ptr.raw() &&
-                  ((p_guard->dataPagePointers[i].freeSpace) / EFFECTIVE_PAGE_SIZE + 0.0) >= kFreeSpaceThreshold) {
-                  pages_that_have_space.push_back(d * kDirNodeEntryCount + i);
+                  (p_guard->dataPagePointers[i].freeSpace / (EFFECTIVE_PAGE_SIZE + 0.0)) >= kFreeSpaceThreshold) {
+                  pages_that_have_space.push_back(dirNodeStartPageIdx + i);
                }
             }
             p_guard.recheck();
             pages_with_free_space.insert(pages_with_free_space.end(), pages_that_have_space.begin(), pages_that_have_space.end());
-            next_dir_node_to_scan = (next_dir_node_to_scan + 1) % table->numDirNodes();
             jumpmu_break;
          } jumpmuCatch()
          {
             WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
          }
       }
-      
+      assert(end_idx_within_node - start_idx_within_node >= 1);
+      pid += end_idx_within_node - start_idx_within_node;
+      next_page_to_scan = pid % table->numSlots();  
       if (pages_with_free_space.size() >= N) {
          break;
       }
    }
 
-   if (pages_with_free_space.size() < N) {
+   if (pages_with_free_space.size() < N && is_heap_growable() == true) {
       add_heap_pages(N - pages_with_free_space.size());
    }
 }
@@ -499,6 +546,7 @@ void HeapFile::add_heap_pages(u32 n_pages) {
                p_guard->node_count++;
                pages_with_free_space.push_back(pid);
                p_guard.incrementGSN();
+               this->data_pages++;
                jumpmu_break;
             } else {
                num_dir_nodes++;
@@ -602,6 +650,15 @@ DTRegistry::DTMeta HeapFile::getMeta() {
    return ht_meta;
 }
 
+OP_RESULT IndexedHeapFile::scanHeapPage(u16 key_length, u32 page_id, std::function<bool(const u8*, u16, const u8*, u16)> callback) {
+   return heap_file.scanPage(page_id, [&](const u8* tuple, u16 tuple_length, HeapTupleId tid){
+      assert(tuple_length >= key_length);
+      const u8 * key = tuple;
+      const u8 * value = tuple + key_length;
+      u16 value_length = tuple_length - key_length;
+      return callback(key, key_length, value, value_length);
+   });
+}
 
 OP_RESULT IndexedHeapFile::remove(u8* key, u16 key_length) {
    LockGuardProxy g(&lock_table, unfold(*(u64*)key));
@@ -790,6 +847,7 @@ static std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btre
 u64 IndexedHeapFile::countHeapPages() {
    return heap_file.countPages();
 }
+
 u64 IndexedHeapFile::countHeapEntries() {
    return heap_file.countEntries();
 }

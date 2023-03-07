@@ -135,11 +135,13 @@ public:
    OP_RESULT insert(HeapTupleId & ouput_tuple_id, u8* value, u16 value_length);
    OP_RESULT remove(HeapTupleId id);
    OP_RESULT scan(std::function<bool(const u8*, u16, HeapTupleId)> callback);
+   OP_RESULT scanPage(u32 page_id, std::function<bool(const u8*, u16, HeapTupleId)> callback);
    // -------------------------------------------------------------------------------------
    u64 countPages();
    u64 countEntries();
-   u64 dataPages() { return data_pages.load(); }
-   u64 dataStored() { return data_stored.load(); }
+   u64 getHeapPages() { return data_pages; }
+   u64 getPages() { return data_pages.load() + table->numDirNodes(); }
+   u64 userDataStored() { return data_stored.load(); }
    // -------------------------------------------------------------------------------------
    static void iterateChildrenSwips(void*, BufferFrame& bf, std::function<bool(Swip<BufferFrame>&)> callback);
    static struct ParentSwipHandler findParent(void * ht_object, BufferFrame& to_find);
@@ -164,16 +166,21 @@ public:
    void register_hash_function(std::function<u64(const u8*, u16)> f) {
       hash_func = f;
    }
+   void disable_heap_growth() { heap_growable.store(false); }
+   bool is_heap_growable() { return heap_growable;}
+
+   u64 dataStored() { return data_stored.load(); }
 private:
-   constexpr static u32 N = 64; // number of pages that have space to keep in `pages_with_free_space`
-   constexpr static double kFreeSpaceThreshold = 0.1;
+   constexpr static u32 N = 32; // number of pages that have space to keep in `pages_with_free_space`
+   constexpr static double kFreeSpaceThreshold = 0.05;
    std::atomic<u64> data_stored{0};
    std::atomic<s64> data_pages{0};
    MappingTable * table = nullptr;
 
    std::shared_mutex mtx;
    std::vector<u64> pages_with_free_space;
-   u64 next_dir_node_to_scan = 0;
+   u64 next_page_to_scan = 0;
+   std::atomic<bool> heap_growable {true};
 public:
    DTID dt_id;
    bool hot_partition = false;
@@ -191,7 +198,9 @@ public:
    OP_RESULT insert(u8* key, u16 key_length, u8* value, u16 value_length);
    OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length);
    OP_RESULT remove(u8* key, u16 key_length);
+   OP_RESULT scanHeapPage(u16 key_length, u32 page_id, std::function<bool(const u8*, u16, const u8*, u16)> callback);
    // -------------------------------------------------------------------------------------
+   u64 getHeapPages() { return heap_file.getHeapPages(); }
    u64 countHeapPages();
    u64 countHeapEntries();
    u64 countIndexPages();
@@ -199,6 +208,9 @@ public:
    u64 indexHeight() { return btree_index.getHeight(); }
    u64 dataPages() { return data_pages.load(); }
    u64 dataStored() { return data_stored.load(); }
+   void disable_heap_growth() { heap_file.disable_heap_growth(); }
+   bool is_heap_growable() {return heap_file.is_heap_growable(); }
+   double utilization() { return heap_file.current_load_factor(); }
 private:
    OP_RESULT doInsert(u8* key, u16 key_length, u8* value, u16 value_length);
    OP_RESULT doLookupForUpdate(u8* key, u16 key_length, std::function<bool(u8*, u16)> payload_callback);
@@ -241,7 +253,7 @@ struct HeapPage : public HeapPageHeader {
    struct __attribute__((packed)) Slot {
       // Layout:  key wihtout prefix | Payload
       u16 offset;
-      u16 payload_len : 14;
+      u16 payload_len: 14;
       u16 status: 2;
    };
    static constexpr u64 pure_slots_capacity = (EFFECTIVE_PAGE_SIZE - sizeof(HeapPageHeader)) / (sizeof(Slot));
@@ -280,11 +292,12 @@ struct HeapPage : public HeapPageHeader {
             left_most_offset = slot[i].offset;
          }
          if (slot[i].status == SlotStatus::REMOVED) {
+            assert(slot[i].payload_len);
             space_for_removed_tuples += slot[i].payload_len;
          }
       }
       assert(left_most_offset >= metadata_used);
-
+      assert(EFFECTIVE_PAGE_SIZE >= metadata_used + space_used);
       return EFFECTIVE_PAGE_SIZE - metadata_used - space_used + space_for_removed_tuples;
    }
 
