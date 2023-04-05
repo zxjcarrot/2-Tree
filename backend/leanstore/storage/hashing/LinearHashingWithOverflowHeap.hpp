@@ -7,6 +7,8 @@
 #include "leanstore/utils/FNVHash.hpp"
 #include "leanstore/utils/XXHash.hpp"
 #include <shared_mutex>
+#include "LinearHashing.hpp"
+#include "leanstore/storage/heap/HeapFile.hpp"
 
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
@@ -20,74 +22,14 @@ namespace storage
 namespace hashing
 {
 
-enum class OP_RESULT : u8 { OK = 0, NOT_FOUND = 1, DUPLICATE = 2, ABORT_TX = 3, NOT_ENOUGH_SPACE = 4, OTHER = 5 };
-
-class LinearHashingNode;
-using SwipType=Swip<LinearHashingNode>;
+class LinearHashingWithOverflowHeapNode;
 // -------------------------------------------------------------------------------------
 
-static constexpr int kDirNodeBucketPtrCount = EFFECTIVE_PAGE_SIZE / sizeof(u64) / 4;
-struct DirectoryNode {
-   SwipType bucketPtrs[kDirNodeBucketPtrCount];
-   u8 padding[EFFECTIVE_PAGE_SIZE - sizeof(bucketPtrs)];
-   DirectoryNode() {
-      memset(bucketPtrs, 0, sizeof(bucketPtrs));
-   }
-};
 
-// Map logical bucket ids to pages allocated from buffer manager
-class MappingTable {
-public:
-   
-   u64 numSlots() {
-      return idx.load() * kDirNodeBucketPtrCount;
-   }
-
-   BufferFrame* getDirNode(u64 bucket_id) {
-      while (bucket_id < numSlots()) {
-         if (dirNodes[bucket_id / kDirNodeBucketPtrCount] == nullptr) {
-            continue;
-         }
-         return dirNodes[bucket_id / kDirNodeBucketPtrCount];
-      }
-      while (bucket_id >= numSlots()) {
-         while (true) {
-            jumpmuTry() 
-            {
-               auto write_guard_h = leanstore::storage::HybridPageGuard<DirectoryNode>(dt_id, true, true);
-               auto write_guard = ExclusivePageGuard<DirectoryNode>(std::move(write_guard_h));
-               write_guard.init();
-               auto bf = write_guard.bf();
-               bf->header.keep_in_memory = true;
-               bf->page.hot_data = true;
-               int j = idx.fetch_add(1);
-               dirNodes[j] = (bf);
-               jumpmu_break;
-            } 
-            jumpmuCatch() 
-            {
-               WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
-            }
-         }
-      }
-      return dirNodes[bucket_id / kDirNodeBucketPtrCount];
-   }
-
-   MappingTable(DTID dt_id) : dt_id(dt_id) {
-      memset(dirNodes, 0, sizeof(dirNodes));
-   }
-private:
-   std::mutex lock;
-   static constexpr int kArraySize = 8192;
-   std::atomic<u64> idx {0};
-   BufferFrame* dirNodes[kArraySize]; // keep_in_memory = true
-   DTID dt_id;
-};
-
-class LinearHashTable
+class LinearHashTableWithOverflowHeap
 {
   public:
-   ~LinearHashTable() {}
+   ~LinearHashTableWithOverflowHeap() {}
    // -------------------------------------------------------------------------------------
    OP_RESULT lookup(u8* key, u16 key_length, std::function<void(const u8*, u16)> payload_callback, bool & mark_dirty);
    OP_RESULT lookupForUpdate(u8* key, u16 key_length, std::function<bool(u8*, u16)> payload_callback);
@@ -97,7 +39,10 @@ class LinearHashTable
    // virtual OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length) override;
    //OP_RESULT updateSameSize(u8* key, u16 key_length, function<void(u8* value, u16 value_size)>, WALUpdateGenerator = {{}, {}, 0}) override;
    OP_RESULT remove(u8* key, u16 key_length);
-   u64 countBucketNumEntries(u64 bucket);
+   
+   OP_RESULT iterate(u64 bucket, size_t start_record_count,
+                     std::function<bool(const u8*, u16, const u8*, u16, bool)> callback,
+                     std::function<void()> restart_iterate_setup_context);
    // iterate over all data records in bucket
    OP_RESULT iterate(u64 bucket, 
                      std::function<bool(const u8*, u16, const u8*, u16)> callback,
@@ -109,15 +54,6 @@ class LinearHashTable
    u64 dataStored() { return data_stored.load(); }
    u64 countBuckets() { return sp.load_buddy_bucket(); }
    u64 powerMultiplier()  { return sp.load_power(); }
-   struct stat {
-      u64 num_entries_primary_page;
-      u64 num_entries_overflow_page;
-      u64 num_primary_pages;
-      u64 num_overflow_pages;
-      u64 space_used_primary_pages;
-      u64 space_used_overflow_pages;
-   };
-   stat get_stat();
    // -------------------------------------------------------------------------------------
    static void iterateChildrenSwips(void*, BufferFrame& bf, std::function<bool(Swip<BufferFrame>&)> callback);
    static struct ParentSwipHandler findParent(void * ht_object, BufferFrame& to_find);
@@ -133,7 +69,7 @@ class LinearHashTable
    u64 hash(const u8 *key, u16 key_length, int i);
    void split();
    void merge_chain(u64 bucket, BufferFrame* dirNode);
-   void create(DTID dtid);
+   void create(DTID dtid, leanstore::storage::heap::HeapFile * heap_file);
    double current_load_factor();
 
    std::function<u64(const u8*, u16)> hash_func;
@@ -148,9 +84,8 @@ class LinearHashTable
    u64 get_split_right_length() { return split_right_length.load(); }
    u64 get_split_chain_length_bytes() { return split_length_bytes.load(); }
    u64 get_overflow_pages_added() { return overflow_pages_added.load(); }
-   u64 get_merge_chains() { return merge_chains.load(); }
 private:
-   constexpr static double kSplitLoadFactor = 1.6;
+   constexpr static double kSplitLoadFactor = 1;
    constexpr static u32 N = 128;
    constexpr static u64 kPowerBits = 8;
    constexpr static u64 kPowerOffset = 64 - 8;
@@ -205,54 +140,143 @@ private:
    std::atomic<u64> split_right_length{0};
    std::atomic<u64> split_length_bytes{0};
    std::atomic<u64> overflow_pages_added{0};
-   std::atomic<u64> merge_chains{0};
    //std::atomic<u64> s_buddy{N}; // invariant: s + N * 2^i = s_buddy.
    struct split_pointer sp;
    std::shared_mutex split_mtx;
    MappingTable * table = nullptr;
+   leanstore::storage::heap::HeapFile * heap_file;
 public:
    DTID dt_id;
    bool hot_partition = false;
 };
+static const u16 kOverflowPageSize = EFFECTIVE_PAGE_SIZE / 8;
 
-
-struct LinearHashingNodeHeader {
+struct LinearHashingWithOverflowHeapNodeHeader {
    static const u16 underFullSize = EFFECTIVE_PAGE_SIZE * 0.5;
    static const u16 overfullFullSize = EFFECTIVE_PAGE_SIZE * 0.9;
-
-   SwipType overflow = nullptr;
-
-   bool is_overflow = true;
+   static const u16 kOverflowSlots = 16;
+   heap::HeapTupleId overflows[kOverflowSlots];
    u64 bucket = 0;
+   u16 num_overflow_pages = 0;
    u16 count = 0;  // count number of keys
    u16 space_used = 0;  // does not include the header, but includes fences !!!!!
    u16 data_offset = static_cast<u16>(EFFECTIVE_PAGE_SIZE);
 
-   LinearHashingNodeHeader(u64 bucket, bool is_overflow) : is_overflow(is_overflow), bucket(bucket) {}
-   ~LinearHashingNodeHeader() {}
+   LinearHashingWithOverflowHeapNodeHeader(u64 bucket) : bucket(bucket) {}
+   ~LinearHashingWithOverflowHeapNodeHeader() {}
 
    inline u8* ptr() { return reinterpret_cast<u8*>(this); }
-   inline bool isOverflow() { return !is_overflow; }
 };
 using HeadType = u16;
 // -------------------------------------------------------------------------------------
-struct LinearHashingNode : public LinearHashingNodeHeader {
-   struct __attribute__((packed)) Slot {
-      // Layout:  key wihtout prefix | Payload
-      u16 offset;
-      u16 key_len;
-      u16 payload_len : 15;
-      union {
-         HeadType fingerprint;
-         u8 head_bytes[2];
-      };
+struct __attribute__((packed)) Slot {
+   // Layout:  key wihtout prefix | Payload
+   u16 offset;
+   u16 key_len;
+   u16 payload_len : 15;
+   union {
+      HeadType fingerprint;
+      u8 head_bytes[2];
    };
-   static constexpr u64 pure_slots_capacity = (EFFECTIVE_PAGE_SIZE - sizeof(LinearHashingNodeHeader)) / (sizeof(Slot));
-   static constexpr u64 left_space_to_waste = (EFFECTIVE_PAGE_SIZE - sizeof(LinearHashingNodeHeader)) % (sizeof(Slot));
+};
+struct LinearHashingOverflowPage {
+   u16 count = 0;  // count number of keys
+   u16 space_used = 0;  // does not include the header, but includes fences !!!!!
+   u16 data_offset = static_cast<u16>(kOverflowPageSize);
+
+   static constexpr u64 pure_slots_capacity = (kOverflowPageSize - sizeof(u16) * 3) / (sizeof(Slot));
+   static constexpr u64 left_space_to_waste = (kOverflowPageSize - sizeof(u16) * 3) % (sizeof(Slot));
    Slot slot[pure_slots_capacity];
    u8 padding[left_space_to_waste];
 
-   LinearHashingNode(bool is_overflow, u64 bucket) : LinearHashingNodeHeader(bucket, is_overflow) {}
+   LinearHashingOverflowPage() {}
+   ~LinearHashingOverflowPage() {}
+
+   inline u8* ptr() { return reinterpret_cast<u8*>(this); }
+
+   void clear() {
+      this->count = 0;
+      this->space_used = 0;
+      this->data_offset = static_cast<u16>(EFFECTIVE_PAGE_SIZE);
+   }
+
+   u16 freeSpace() { 
+      u64 metadata_used = reinterpret_cast<u8*>(slot + count) - ptr();
+      assert(data_offset >= metadata_used);
+      return data_offset - metadata_used; 
+   }
+   u16 freeSpaceAfterCompaction() { return kOverflowPageSize - (reinterpret_cast<u8*>(slot + count) - ptr()) - space_used; }
+   u16 spaceUsedForData() { return (reinterpret_cast<u8*>(slot + count) - ptr()) + space_used; }
+   // -------------------------------------------------------------------------------------
+   double fillFactorAfterCompaction() { return (1 - (freeSpaceAfterCompaction() * 1.0 / EFFECTIVE_PAGE_SIZE)); }
+   // -------------------------------------------------------------------------------------
+   bool hasEnoughSpaceFor(u32 space_needed) { return (space_needed <= freeSpace() || space_needed <= freeSpaceAfterCompaction()); }
+   // ATTENTION: this method has side effects !
+   bool requestSpaceFor(u16 space_needed)
+   {
+      if (space_needed <= freeSpace())
+         return true;
+      if (space_needed <= freeSpaceAfterCompaction()) {
+         compactify();
+         return true;
+      }
+      return false;
+   }
+   // -------------------------------------------------------------------------------------
+   inline u8* getKey(u16 slotId) { return ptr() + slot[slotId].offset; }
+   inline u16 getKeyLen(u16 slotId) { return slot[slotId].key_len; }
+   inline u16 getPayloadLength(u16 slotId) { return slot[slotId].payload_len; }
+   inline u8* getPayload(u16 slotId) { return ptr() + slot[slotId].offset + slot[slotId].key_len; }
+   // -------------------------------------------------------------------------------------
+   inline void copyFullKey(u16 slotId, u8* out)
+   {
+      memcpy(out, getKey(slotId), getKeyLen(slotId));
+   }
+   // -------------------------------------------------------------------------------------
+   static inline bool cmpKeys(const u8* a, const u8* b, u16 aLength, u16 bLength)
+   {
+      if (aLength != bLength) 
+        return false;
+      return memcmp(a, b, aLength) == 0;
+   }
+
+   static inline HeadType fingerprint(const u8* key, u16& keyLength)
+   {
+      return leanstore::utils::XXH::hash(key, keyLength);
+   }
+   // -------------------------------------------------------------------------------------
+   s32 find(const u8 * key, u16 key_len);
+   s32 insert(const u8* key, u16 key_len, const u8* payload, u16 payload_len);
+   static u16 spaceNeeded(u16 keyLength, u16 payload_len, u16 prefixLength);
+   u16 spaceNeeded(u16 key_length, u16 payload_len);
+   bool canInsert(u16 key_length, u16 payload_len);
+   bool prepareInsert(u16 keyLength, u16 payload_len);
+   // -------------------------------------------------------------------------------------
+   bool update(u16 slot_id, u8* key, u16 keyLength, u8* payload, u16 payload_length);
+   // -------------------------------------------------------------------------------------
+   void compactify();
+   // -------------------------------------------------------------------------------------
+   // merge right node into this node
+   u32 spaceUsedBySlot(u16 slot_id);
+   // -------------------------------------------------------------------------------------
+   // store key/value pair at slotId
+   void storeKeyValue(u16 slotId, const u8* key, u16 key_len, const u8* payload, u16 payload_len);
+   // ATTENTION: dstSlot then srcSlot !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   void copyKeyValueRange(LinearHashingOverflowPage* dst, u16 dstSlot, u16 srcSlot, u16 count);
+   void copyKeyValue(u16 srcSlot, LinearHashingOverflowPage* dst, u16 dstSlot);
+   // -------------------------------------------------------------------------------------
+   // Not synchronized or todo section
+   bool removeSlot(u16 slotId);
+   bool remove(const u8* key, const u16 keyLength);
+};
+
+struct LinearHashingWithOverflowHeapNode : public LinearHashingWithOverflowHeapNodeHeader {
+   static constexpr u64 pure_slots_capacity = (EFFECTIVE_PAGE_SIZE - sizeof(LinearHashingWithOverflowHeapNodeHeader)) / (sizeof(Slot));
+   static constexpr u64 left_space_to_waste = (EFFECTIVE_PAGE_SIZE - sizeof(LinearHashingWithOverflowHeapNodeHeader)) % (sizeof(Slot));
+   Slot slot[pure_slots_capacity];
+   u8 padding[left_space_to_waste];
+
+   LinearHashingWithOverflowHeapNode(u64 bucket) : LinearHashingWithOverflowHeapNodeHeader(bucket) {}
 
    void clear() {
       this->count = 0;
@@ -288,7 +312,6 @@ struct LinearHashingNode : public LinearHashingNodeHeader {
    inline u16 getKeyLen(u16 slotId) { return slot[slotId].key_len; }
    inline u16 getPayloadLength(u16 slotId) { return slot[slotId].payload_len; }
    inline u8* getPayload(u16 slotId) { return ptr() + slot[slotId].offset + slot[slotId].key_len; }
-   inline SwipType & getOverflowNode() {return this->overflow; }
    // -------------------------------------------------------------------------------------
    inline void copyFullKey(u16 slotId, u8* out)
    {
@@ -304,11 +327,8 @@ struct LinearHashingNode : public LinearHashingNodeHeader {
 
    static inline HeadType fingerprint(const u8* key, u16& keyLength)
    {
-      u64 h = leanstore::utils::XXH::hash(key, keyLength);
-      u32 fold = (h >> 32) ^ (h & 0xffffffff);
-      return (fold >> 16) ^ (h & 0xffff);
+      return leanstore::utils::XXH::hash(key, keyLength);
    }
-
    // -------------------------------------------------------------------------------------
    s32 find(const u8 * key, u16 key_len);
    s32 insert(const u8* key, u16 key_len, const u8* payload, u16 payload_len);
@@ -327,8 +347,8 @@ struct LinearHashingNode : public LinearHashingNodeHeader {
    // store key/value pair at slotId
    void storeKeyValue(u16 slotId, const u8* key, u16 key_len, const u8* payload, u16 payload_len);
    // ATTENTION: dstSlot then srcSlot !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-   void copyKeyValueRange(LinearHashingNode* dst, u16 dstSlot, u16 srcSlot, u16 count);
-   void copyKeyValue(u16 srcSlot, LinearHashingNode* dst, u16 dstSlot);
+   void copyKeyValueRange(LinearHashingWithOverflowHeapNode* dst, u16 dstSlot, u16 srcSlot, u16 count);
+   void copyKeyValue(u16 srcSlot, LinearHashingWithOverflowHeapNode* dst, u16 dstSlot);
    // -------------------------------------------------------------------------------------
    // Not synchronized or todo section
    bool removeSlot(u16 slotId);
@@ -336,7 +356,8 @@ struct LinearHashingNode : public LinearHashingNodeHeader {
 };
 
 // -------------------------------------------------------------------------------------
-static_assert(sizeof(LinearHashingNode) == EFFECTIVE_PAGE_SIZE, "LinearHashingNode must be equal to one page");
+static_assert(sizeof(LinearHashingWithOverflowHeapNode) == EFFECTIVE_PAGE_SIZE, "LinearHashingWithOverflowHeapNode must be equal to one page");
+static_assert(sizeof(LinearHashingOverflowPage) == kOverflowPageSize, "LinearHashingOverflowPage must be equal to one page");
 }  // namespace hashing
 }  // namespace storage
 }  // namespace leanstore

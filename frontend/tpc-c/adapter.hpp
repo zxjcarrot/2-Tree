@@ -11,16 +11,43 @@
 #include <string>
 
 using namespace leanstore;
+
+template<class Record>
+struct Adapter {
+   typedef typename Record::Key KeyType;
+
+   typedef std::function<bool(const KeyType &, const Record &)> ScanFunc;
+   virtual void scanDesc(const KeyType & key, const ScanFunc& fn, std::function<void()> undo) = 0;
+   virtual void scan(const KeyType& key, const ScanFunc& fn, std::function<void()> undo);
+
+   virtual void insert(const KeyType& rec_key, const Record& record) = 0;
+
+   typedef std::function<void(const Record &)> LookupFunc;
+   virtual void lookup1(const KeyType & key, const LookupFunc& fn) = 0;
+
+   typedef std::function<void(Record &)> UpdateFunc;
+   virtual void update1(const KeyType& key, const UpdateFunc& fn, storage::btree::WALUpdateGenerator wal_update_generator) = 0;
+
+   virtual bool erase(const KeyType& key) = 0;
+
+   virtual uint64_t count() = 0;
+};
 template <class Record>
-struct LeanStoreAdapter {
+struct LeanStoreBTreeAdapter: public Adapter<Record> {
+
+   using typename Adapter<Record>::KeyType;
+   using typename Adapter<Record>::ScanFunc;
+   using typename Adapter<Record>::LookupFunc;
+   using typename Adapter<Record>::UpdateFunc;
+
    storage::btree::BTreeInterface* btree;
    std::map<std::string, Record> map;
    string name;
-   LeanStoreAdapter()
+   LeanStoreBTreeAdapter()
    {
       // hack
    }
-   LeanStoreAdapter(LeanStore& db, string name) : name(name)
+   LeanStoreBTreeAdapter(LeanStore& db, string name) : name(name)
    {
       if (FLAGS_recover) {
          btree = &db.retrieveBTreeLL(name);
@@ -31,8 +58,8 @@ struct LeanStoreAdapter {
    // -------------------------------------------------------------------------------------
    void printTreeHeight() { cout << name << " height = " << btree->getHeight() << endl; }
    // -------------------------------------------------------------------------------------
-   template <class Fn>
-   void scanDesc(const typename Record::Key& key, const Fn& fn, std::function<void()> undo)
+   
+   void scanDesc(const KeyType& key, const ScanFunc& fn, std::function<void()> undo) override
    {
       u8 folded_key[Record::maxFoldLength()];
       u16 folded_key_len = Record::foldRecord(folded_key, key);
@@ -42,7 +69,7 @@ struct LeanStoreAdapter {
              if (key_length != folded_key_len) {
                 return false;
              }
-             typename Record::Key typed_key;
+             KeyType typed_key;
              Record::unfoldRecord(key, typed_key);
              const Record& typed_payload = *reinterpret_cast<const Record*>(payload);
              return fn(typed_key, typed_payload);
@@ -50,7 +77,7 @@ struct LeanStoreAdapter {
           undo);
    }
    // -------------------------------------------------------------------------------------
-   void insert(const typename Record::Key& rec_key, const Record& record)
+   void insert(const KeyType& rec_key, const Record& record) override
    {
       u8 folded_key[Record::maxFoldLength()];
       u16 folded_key_len = Record::foldRecord(folded_key, rec_key);
@@ -61,8 +88,8 @@ struct LeanStoreAdapter {
       }
    }
 
-   template <class Fn>
-   void lookup1(const typename Record::Key& key, const Fn& fn)
+   
+   void lookup1(const KeyType& key, const LookupFunc& fn) override
    {
       u8 folded_key[Record::maxFoldLength()];
       u16 folded_key_len = Record::foldRecord(folded_key, key);
@@ -75,8 +102,8 @@ struct LeanStoreAdapter {
       ensure(res == btree::OP_RESULT::OK);
    }
 
-   template <class Fn>
-   void update1(const typename Record::Key& key, const Fn& fn, storage::btree::WALUpdateGenerator wal_update_generator)
+   
+   void update1(const KeyType& key, const UpdateFunc& fn, storage::btree::WALUpdateGenerator wal_update_generator) override
    {
       u8 folded_key[Record::maxFoldLength()];
       u16 folded_key_len = Record::foldRecord(folded_key, key);
@@ -95,7 +122,7 @@ struct LeanStoreAdapter {
       }
    }
 
-   bool erase(const typename Record::Key& key)
+   bool erase(const KeyType& key) override
    {
       u8 folded_key[Record::maxFoldLength()];
       u16 folded_key_len = Record::foldRecord(folded_key, key);
@@ -106,8 +133,8 @@ struct LeanStoreAdapter {
       return (res == btree::OP_RESULT::OK);
    }
    // -------------------------------------------------------------------------------------
-   template <class Fn>
-   void scan(const typename Record::Key& key, const Fn& fn, std::function<void()> undo)
+   
+   void scan(const KeyType& key, const ScanFunc& fn, std::function<void()> undo) override
    {
       u8 folded_key[Record::maxFoldLength()];
       u16 folded_key_len = Record::foldRecord(folded_key, key);
@@ -118,29 +145,12 @@ struct LeanStoreAdapter {
                 return false;
              }
              static_cast<void>(payload_length);
-             typename Record::Key typed_key;
+             KeyType typed_key;
              Record::unfoldRecord(key, typed_key);
              const Record& typed_payload = *reinterpret_cast<const Record*>(payload);
              return fn(typed_key, typed_payload);
           },
           undo);
    }
-   // -------------------------------------------------------------------------------------
-   template <class Field>
-   auto lookupField(const typename Record::Key& key, Field Record::*f)
-   {
-      u8 folded_key[Record::maxFoldLength()];
-      u16 folded_key_len = Record::foldRecord(folded_key, key);
-      Field local_f;
-      const auto res = btree->lookup(folded_key, folded_key_len, [&](const u8* payload, u16 payload_length) {
-         static_cast<void>(payload_length);
-         assert(payload_length == sizeof(Record));
-         Record& typed_payload = *const_cast<Record*>(reinterpret_cast<const Record*>(payload));
-         local_f = (typed_payload).*f;
-      });
-      ensure(res == btree::OP_RESULT::OK);
-      return local_f;
-   }
-
-   uint64_t count() { return btree->countEntries(); }
+   uint64_t count() override { return btree->countEntries(); }
 };

@@ -30,17 +30,17 @@ DEFINE_bool(tpcc_remove, true, "");
 using namespace std;
 using namespace leanstore;
 // -------------------------------------------------------------------------------------
-LeanStoreAdapter<warehouse_t> warehouse;
-LeanStoreAdapter<district_t> district;
-LeanStoreAdapter<customer_t> customer;
-LeanStoreAdapter<customer_wdl_t> customerwdl;
-LeanStoreAdapter<history_t> history;
-LeanStoreAdapter<neworder_t> neworder;
-LeanStoreAdapter<order_t> order;
-LeanStoreAdapter<order_wdc_t> order_wdc;
-LeanStoreAdapter<orderline_t> orderline;
-LeanStoreAdapter<item_t> item;
-LeanStoreAdapter<stock_t> stock;
+Adapter<warehouse_t> * warehouse;
+Adapter<district_t> * district;
+Adapter<customer_t> * customer;
+Adapter<customer_wdl_t> * customerwdl;
+Adapter<history_t> * history;
+Adapter<neworder_t> * neworder;
+Adapter<order_t> * order;
+Adapter<order_wdc_t> * order_wdc;
+Adapter<orderline_t> * orderline;
+Adapter<item_t> * item;
+Adapter<stock_t> * stock;
 // -------------------------------------------------------------------------------------
 // yeah, dirty include...
 #include "tpcc_workload.hpp"
@@ -62,17 +62,17 @@ int main(int argc, char** argv)
    // -------------------------------------------------------------------------------------
    warehouseCount = FLAGS_tpcc_warehouse_count;
    crm.scheduleJobSync(0, [&]() {
-      warehouse = LeanStoreAdapter<warehouse_t>(db, "warehouse");
-      district = LeanStoreAdapter<district_t>(db, "district");
-      customer = LeanStoreAdapter<customer_t>(db, "customer");
-      customerwdl = LeanStoreAdapter<customer_wdl_t>(db, "customerwdl");
-      history = LeanStoreAdapter<history_t>(db, "history");
-      neworder = LeanStoreAdapter<neworder_t>(db, "neworder");
-      order = LeanStoreAdapter<order_t>(db, "order");
-      order_wdc = LeanStoreAdapter<order_wdc_t>(db, "order_wdc");
-      orderline = LeanStoreAdapter<orderline_t>(db, "orderline");
-      item = LeanStoreAdapter<item_t>(db, "item");
-      stock = LeanStoreAdapter<stock_t>(db, "stock");
+      warehouse = new LeanStoreBTreeAdapter<warehouse_t>(db, "warehouse");
+      district = new LeanStoreBTreeAdapter<district_t>(db, "district");
+      customer = new LeanStoreBTreeAdapter<customer_t>(db, "customer");
+      customerwdl = new LeanStoreBTreeAdapter<customer_wdl_t>(db, "customerwdl");
+      history = new LeanStoreBTreeAdapter<history_t>(db, "history");
+      neworder = new LeanStoreBTreeAdapter<neworder_t>(db, "neworder");
+      order = new LeanStoreBTreeAdapter<order_t>(db, "order");
+      order_wdc = new LeanStoreBTreeAdapter<order_wdc_t>(db, "order_wdc");
+      orderline = new LeanStoreBTreeAdapter<orderline_t>(db, "orderline");
+      item = new LeanStoreBTreeAdapter<item_t>(db, "item");
+      stock = new LeanStoreBTreeAdapter<stock_t>(db, "stock");
    });
    // -------------------------------------------------------------------------------------
    db.registerConfigEntry("tpcc_warehouse_count", FLAGS_tpcc_warehouse_count);
@@ -112,7 +112,7 @@ int main(int argc, char** argv)
    // -------------------------------------------------------------------------------------
    double gib = (db.getBufferManager().consumedPages() * EFFECTIVE_PAGE_SIZE / 1024.0 / 1024.0 / 1024.0);
    cout << "data loaded - consumed space in GiB = " << gib << endl;
-   crm.scheduleJobSync(0, [&]() { cout << "Warehouse pages = " << warehouse.btree->countPages() << endl; });
+   //crm.scheduleJobSync(0, [&]() { cout << "Warehouse pages = " << warehouse.btree->countPages() << endl; });
    // -------------------------------------------------------------------------------------
    atomic<u64> keep_running = true;
    atomic<u64> running_threads_counter = 0;

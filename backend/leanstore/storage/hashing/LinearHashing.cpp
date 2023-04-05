@@ -92,6 +92,7 @@ void LinearHashingNode::compactify()
    static_cast<void>(should);
    LinearHashingNode tmp(is_overflow, bucket);
    copyKeyValueRange(&tmp, 0, 0, count);
+   tmp.overflow = this->overflow;
    memcpy(reinterpret_cast<char*>(this), &tmp, sizeof(LinearHashingNode));
    assert(freeSpace() == should);  // TODO: why should ??
 }
@@ -132,7 +133,9 @@ void LinearHashingNode::copyKeyValueRange(LinearHashingNode* dst, u16 dstSlot, u
         dst->data_offset -= kv_size;
         dst->space_used += kv_size;
         dst->slot[dstSlot + i].offset = dst->data_offset;
-        dst->slot[dstSlot + i].fingerprint = this->slot[i].fingerprint;
+        dst->slot[dstSlot + i].fingerprint = this->slot[srcSlot + i].fingerprint;
+        dst->slot[dstSlot + i].key_len = getKeyLen(srcSlot + i);
+        dst->slot[dstSlot + i].payload_len = getPayloadLength(srcSlot + i);
         DEBUG_BLOCK()
         {
         [[maybe_unused]] s64 off_by = reinterpret_cast<u8*>(dst->slot + dstSlot + count) - (dst->ptr() + dst->data_offset);
@@ -152,7 +155,8 @@ s32 LinearHashingNode::insert(const u8* key, u16 key_len, const u8* payload, u16
       static_cast<void>(exact_pos);
       assert(exact_pos == -1);  // assert for duplicates
    }
-   prepareInsert(key_len, payload_len);
+   bool res = prepareInsert(key_len, payload_len);
+   assert(res);
    s32 slotId = count;
    //memmove(slot + slotId + 1, slot + slotId, sizeof(Slot) * (count - slotId));
    storeKeyValue(slotId, key, key_len, payload, payload_len);
@@ -224,7 +228,7 @@ OP_RESULT LinearHashTable::lookup(u8* key, u16 key_length, function<void(const u
             jumpmu::jump(); // Split is still ongoing, retry
          }
          HybridPageGuard<LinearHashingNode> target_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::SPIN);
-         p_guard.unlock();
+         p_guard.recheck();
          s32 slot_in_node = target_guard->find(key, key_length);
          if (slot_in_node != -1) {
             payload_callback(target_guard->getPayload(slot_in_node), target_guard->getPayloadLength(slot_in_node));
@@ -409,15 +413,13 @@ OP_RESULT LinearHashTable::iterate(u64 bucket,
          if (hash_node.bf == nullptr) {
             jumpmu_break;
          }
-         HybridPageGuard<LinearHashingNode> target_s_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::SHARED);
-         target_s_guard.toShared();
-         p_guard.recheck();
+         HybridPageGuard<LinearHashingNode> target_s_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::EXCLUSIVE);
+         target_s_guard.toExclusive();
          u64 count = target_s_guard->count;
          for (std::size_t i = 0; i < count; ++i) {
             bool should_continue = callback(target_s_guard->getKey(i), target_s_guard->getKeyLen(i),
                      target_s_guard->getPayload(i), target_s_guard->getPayloadLength(i));
             if (should_continue == false) {
-               target_s_guard.recheck();
                jumpmu_return OP_RESULT::OK;
             }
          }
@@ -426,9 +428,9 @@ OP_RESULT LinearHashTable::iterate(u64 bucket,
             while (true) {
                Swip<LinearHashingNode>& c_swip = target_s_guard->overflow;
                pp_guard = std::move(target_s_guard);
-               target_s_guard = std::move(HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::SHARED));
-               pp_guard.toShared();
-               target_s_guard.toShared();
+               target_s_guard = std::move(HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::EXCLUSIVE));
+               pp_guard.toExclusive();
+               target_s_guard.toExclusive();
                count = target_s_guard->count;
                for (std::size_t i = 0; i < count; ++i) {
                   bool should_continue = callback(target_s_guard->getKey(i), target_s_guard->getKeyLen(i),
@@ -452,6 +454,46 @@ OP_RESULT LinearHashTable::iterate(u64 bucket,
    }
 
    return OP_RESULT::OK;
+}
+
+u64 LinearHashTable::countBucketNumEntries(u64 bucket) {
+   u64 count = 0;
+   BufferFrame* dirNode = table->getDirNode(bucket);
+
+   while (true) {
+      u64 sum = 0;
+      jumpmuTry()
+      {
+         HybridPageGuard<DirectoryNode> p_guard(dirNode);
+         Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[bucket % kDirNodeBucketPtrCount];
+         if (hash_node.bf == nullptr) {
+            jumpmu_break;
+         }
+         HybridPageGuard<LinearHashingNode> target_s_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::SPIN);
+         p_guard.recheck();
+         sum += target_s_guard->count;
+         if (target_s_guard->overflow.raw()) {
+            HybridPageGuard<LinearHashingNode> pp_guard;
+            while (true) {
+               Swip<LinearHashingNode>& c_swip = target_s_guard->overflow;
+               pp_guard = std::move(target_s_guard);
+               target_s_guard = std::move(HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::SPIN));
+               sum += target_s_guard->count;
+               pp_guard.recheck();
+               if (target_s_guard->overflow.raw() == 0) {
+                  break;
+               }
+            }
+         }
+         count += sum;
+         jumpmu_break;
+      }
+      jumpmuCatch() 
+      {
+         WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
+      }
+   }
+   return count;   
 }
 
 u64 LinearHashTable::countEntries() {
@@ -496,6 +538,78 @@ u64 LinearHashTable::countEntries() {
    }
 
    return count;   
+}
+
+
+LinearHashTable::stat LinearHashTable::get_stat() {
+   u64 entry_count_primary_pages = 0;
+   u64 entry_count_overflow_pages = 0;
+   u64 space_used_in_primary_pages = 0;
+   u64 space_used_in_overflow_pages = 0;
+   u64 primary_page_count = 0;
+   u64 overflow_page_count = 0;
+   auto buddy_bucket = sp.load_buddy_bucket();
+   for (u64 b = 0; b < buddy_bucket; ++b) {
+      BufferFrame* dirNode = table->getDirNode(b);
+
+      while (true) {
+         u64 sum_primary_pages = 0;
+         u64 sum_overflow_pages = 0;
+         u64 sum_entries_primary_page = 0;
+         u64 sum_entries_overflow_page = 0;
+         u64 sum_space_used_primary_page = 0;
+         u64 sum_space_used_overflow_pages = 0;
+         jumpmuTry()
+         {
+            HybridPageGuard<DirectoryNode> p_guard(dirNode);
+            Swip<LinearHashingNode> & hash_node = p_guard->bucketPtrs[b % kDirNodeBucketPtrCount];
+            if (hash_node.bf == nullptr) {
+               jumpmu_break;
+            }
+            HybridPageGuard<LinearHashingNode> target_s_guard(p_guard, hash_node, LATCH_FALLBACK_MODE::SPIN);
+            p_guard.recheck();
+            sum_primary_pages += 1;
+            sum_space_used_primary_page += target_s_guard->spaceUsedForData();
+            sum_entries_primary_page += target_s_guard->count;
+            if (target_s_guard->overflow.raw()) {
+               HybridPageGuard<LinearHashingNode> pp_guard;
+               while (true) {
+                  Swip<LinearHashingNode>& c_swip = target_s_guard->overflow;
+                  pp_guard = std::move(target_s_guard);
+                  target_s_guard = std::move(HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::SPIN));
+                  sum_overflow_pages += 1;
+                  sum_space_used_overflow_pages += target_s_guard->spaceUsedForData();
+                  sum_entries_overflow_page += target_s_guard->count;
+                  pp_guard.recheck();
+                  if (target_s_guard->overflow.raw() == 0) {
+                     break;
+                  }
+               }
+            }
+            primary_page_count += sum_primary_pages;
+            overflow_page_count += sum_overflow_pages;
+            space_used_in_primary_pages += sum_space_used_primary_page;
+            space_used_in_overflow_pages += sum_space_used_overflow_pages;
+            entry_count_primary_pages += sum_entries_primary_page;
+            entry_count_overflow_pages += sum_entries_overflow_page;
+            jumpmu_break;
+         }
+         jumpmuCatch() 
+         {
+            WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
+         }
+      }
+   }
+   
+   stat s;
+   s.num_entries_primary_page = entry_count_primary_pages;
+   s.num_entries_overflow_page = entry_count_overflow_pages;
+   s.num_overflow_pages = overflow_page_count;
+   s.num_primary_pages = primary_page_count;
+   s.space_used_primary_pages = space_used_in_primary_pages;
+   s.space_used_overflow_pages = space_used_in_overflow_pages;
+
+   return s;
 }
 
 OP_RESULT LinearHashTable::remove(u8* key, u16 key_length) {
@@ -550,13 +664,17 @@ OP_RESULT LinearHashTable::remove(u8* key, u16 key_length) {
          if (target_x_guard->freeSpaceAfterCompaction() > LinearHashingNode::underFullSize) {
             try_merge = true;
          }
+         auto cnt = target_x_guard->count;
          s32 slot_in_node = target_x_guard->find(key, key_length);
          if (slot_in_node != -1) {
+            p_guard.recheck();
+            
             data_stored.fetch_sub(target_x_guard->getKeyLen(slot_in_node) + target_x_guard->getPayloadLength(slot_in_node));
             bool res = target_x_guard->removeSlot(slot_in_node);
             target_x_guard.incrementGSN();
             assert(res);
             ret = OP_RESULT::OK; 
+            assert(cnt - 1 == target_x_guard->count);
             jumpmu_break;
          } else if (target_x_guard->overflow.raw() == 0) {
             try_merge = false;
@@ -571,17 +689,20 @@ OP_RESULT LinearHashTable::remove(u8* key, u16 key_length) {
                pp_guard = std::move(target_x_guard);
                target_x_guard = std::move(HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::EXCLUSIVE));
                target_x_guard.toExclusive();
-               p_guard.recheck();
+               pp_guard.recheck();
                if (target_x_guard->freeSpaceAfterCompaction() > LinearHashingNode::underFullSize) {
                   try_merge = true;
                }
+               auto cnt = target_x_guard->count;
                s32 slot_in_node = target_x_guard->find(key, key_length);
                if (slot_in_node != -1) {
+                  pp_guard.recheck();
                   data_stored.fetch_sub(target_x_guard->getKeyLen(slot_in_node) + target_x_guard->getPayloadLength(slot_in_node));
                   bool res = target_x_guard->removeSlot(slot_in_node);
                   target_x_guard.incrementGSN();
                   assert(res);
                   ret = OP_RESULT::OK; 
+                  assert(cnt - 1 == target_x_guard->count);
                   break;
                }
                if (target_x_guard->overflow.raw() == 0) {
@@ -620,12 +741,12 @@ OP_RESULT LinearHashTable::remove(u8* key, u16 key_length) {
 }
 
 double LinearHashTable::current_load_factor() {
-   //return data_stored.load() / (sp.load_buddy_bucket() * sizeof(LinearHashingNode) + 0.0001);
-   return data_stored.load() / (data_pages.load() * sizeof(LinearHashingNode) + 0.00001);
+   return data_stored.load() / (sp.load_buddy_bucket() * sizeof(LinearHashingNode) + 0.0);
+   //return data_stored.load() / (data_pages.load() * sizeof(LinearHashingNode) + 0.0);
 }
 
 void LinearHashTable::merge_chain(u64 bucket, BufferFrame* dirNode) {
-   assert(this->hot_partition);
+   //assert(this->hot_partition);
    volatile u32 mask = 1;
    jumpmuTry()
    {
@@ -655,8 +776,12 @@ void LinearHashTable::merge_chain(u64 bucket, BufferFrame* dirNode) {
                target_x_guard.incrementGSN();
                
                // release the page back to the storage manager
+               if (this->hot_partition) {
+                  assert(target_x_guard.bf->page.hot_data);
+               }
                target_x_guard.reclaim();
                this->data_pages--;
+               this->merge_chains++;
                assert(this->data_pages >= 0);
                break;
             }
@@ -686,7 +811,8 @@ public:
 OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_length) {
    volatile u32 mask = 1;
    OP_RESULT ret = OP_RESULT::OK;
-
+   bool overflown = false;
+   uint32_t chain_length = 0;
    while (true) {
       jumpmuTry()
       {
@@ -729,6 +855,7 @@ OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_
                jumpmu::jump();
             }
          }
+         chain_length = 1;
          s32 slot_in_node = target_x_guard->find(key, key_length);
          if (slot_in_node != -1) {
             data_stored.fetch_sub(target_x_guard->getKeyLen(slot_in_node) + target_x_guard->getPayloadLength(slot_in_node));
@@ -752,6 +879,7 @@ OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_
             bool jump_break_out = false;
             while (true) {
                Swip<LinearHashingNode>& c_swip = target_x_guard->overflow;
+               chain_length++;
                pp_guard = std::move(target_x_guard);
                target_x_guard = std::move(HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::EXCLUSIVE));
                pp_guard.toExclusive();
@@ -782,7 +910,7 @@ OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_
                jumpmu_break;
             }
          }
-          
+         chain_length++;
          // add an overflow node and trigger split
          HybridPageGuard<LinearHashingNode> node(dt_id, true, this->hot_partition);
          assert(target_x_guard->overflow.raw() == 0);
@@ -799,6 +927,7 @@ OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_
          ret = OP_RESULT::OK; 
          this->data_pages++;
          assert(this->data_pages >= 0);
+         overflown = true;
          jumpmu_break;
       }
       jumpmuCatch()
@@ -813,14 +942,18 @@ OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_
    if (current_load_factor() > kSplitLoadFactor) {
       split();
    }
+   // if (overflown) {
+   //    split();
+   // }
    
    return OP_RESULT::OK;
 }
 
 OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_length) {
    volatile u32 mask = 1;
-   OP_RESULT ret = OP_RESULT::OK;
-
+   OP_RESULT ret = OP_RESULT::NOT_ENOUGH_SPACE;
+   bool overflown = false;
+   uint32_t chain_length = 0;
    while (true) {
       jumpmuTry()
       {
@@ -863,47 +996,78 @@ OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_
             }
          }
 
-         s32 slot_in_node = target_x_guard->find(key, key_length);
-         if (slot_in_node != -1) {
-            ret = OP_RESULT::DUPLICATE;
+         chain_length = 1;
+         auto cnt = target_x_guard->count;
+         if (target_x_guard->canInsert(key_length, value_length)) {
+            p_guard.recheck();
+            auto sid = target_x_guard->insert(key, key_length, value, value_length);   
+            assert(sid != -1);
+            target_x_guard.incrementGSN();
+            assert(cnt + 1 == target_x_guard->count);
+            data_stored.fetch_add(key_length + value_length);
+            assert(target_x_guard->find(key, key_length) != -1);
+            ret = OP_RESULT::OK;
             jumpmu_break;
-         } else if (target_x_guard->overflow.raw() == 0) {
-            if (target_x_guard->canInsert(key_length, value_length)) {
-               p_guard.recheck();
-               target_x_guard->insert(key, key_length, value, value_length);   
-               target_x_guard.incrementGSN();
-               data_stored.fetch_add(key_length + value_length);
-               ret = OP_RESULT::OK;
-               jumpmu_break;
-            }
          }
+         // s32 slot_in_node = target_x_guard->find(key, key_length);
+         // if (slot_in_node != -1) {
+         //    ret = OP_RESULT::DUPLICATE;
+         //    jumpmu_break;
+         // } else if (target_x_guard->overflow.raw() == 0) {
+         //    if (target_x_guard->canInsert(key_length, value_length)) {
+         //       //p_guard.recheck();
+         //       auto sid = target_x_guard->insert(key, key_length, value, value_length);   
+         //       assert(sid != -1);
+         //       target_x_guard.incrementGSN();
+         //       data_stored.fetch_add(key_length + value_length);
+         //       ret = OP_RESULT::OK;
+         //       jumpmu_break;
+         //    }
+         // }
 
          if (target_x_guard->overflow.raw()) {
             HybridPageGuard<LinearHashingNode> pp_guard;
             bool jump_break_out = false;
             while (true) {
                Swip<LinearHashingNode>& c_swip = target_x_guard->overflow;
+               chain_length++;
                pp_guard = std::move(target_x_guard);
                target_x_guard = std::move(HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::EXCLUSIVE));
                target_x_guard.toExclusive();
 
-               s32 slot_in_node = target_x_guard->find(key, key_length);
-               if (slot_in_node != -1) {
-                  ret = OP_RESULT::DUPLICATE;
+               auto cnt = target_x_guard->count;
+               if (target_x_guard->canInsert(key_length, value_length)) {
+                  pp_guard.recheck();
+                  auto sid = target_x_guard->insert(key, key_length, value, value_length);
+                  assert(sid != -1);
+                  target_x_guard.incrementGSN();
+                  data_stored.fetch_add(key_length + value_length);
+                  assert(cnt + 1 == target_x_guard->count);
+                  ret = OP_RESULT::OK;
                   jump_break_out = true;
                   break;
                }
                if (target_x_guard->overflow.raw() == 0) {
-                  if (target_x_guard->canInsert(key_length, value_length)) {
-                     pp_guard.recheck();
-                     target_x_guard->insert(key, key_length, value, value_length);
-                     target_x_guard.incrementGSN();
-                     data_stored.fetch_add(key_length + value_length);
-                     ret = OP_RESULT::OK;
-                     jump_break_out = true;
-                  }
                   break;
                }
+
+               // s32 slot_in_node = target_x_guard->find(key, key_length);
+               // if (slot_in_node != -1) {
+               //    ret = OP_RESULT::DUPLICATE;
+               //    jump_break_out = true;
+               //    break;
+               // }
+               // if (target_x_guard->overflow.raw() == 0) {
+               //    if (target_x_guard->canInsert(key_length, value_length)) {
+               //       pp_guard.recheck();
+               //       target_x_guard->insert(key, key_length, value, value_length);
+               //       target_x_guard.incrementGSN();
+               //       data_stored.fetch_add(key_length + value_length);
+               //       ret = OP_RESULT::OK;
+               //       jump_break_out = true;
+               //    }
+               //    break;
+               // }
             }
             if (jump_break_out) {
                jumpmu_break;
@@ -922,6 +1086,9 @@ OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_
          target_x_guard.incrementGSN();
          ret = OP_RESULT::OK;
          this->data_pages++;
+         this->overflow_pages_added++;
+         chain_length++;
+         overflown = true;
          assert(this->data_pages >= 0);
          jumpmu_break;
       }
@@ -935,6 +1102,10 @@ OP_RESULT LinearHashTable::insert(u8* key, u16 key_length, u8* value, u16 value_
    if (current_load_factor() > kSplitLoadFactor) {
       split();
    }
+
+   // if (overflown) {
+   //    split();
+   // }
    return ret;
 }
 
@@ -985,20 +1156,29 @@ OP_RESULT LinearHashTable::insert_might_fail(u8* key, u16 key_length, u8* value,
             }
          }
 
-         s32 slot_in_node = target_x_guard->find(key, key_length);
-         if (slot_in_node != -1) {
-            ret = OP_RESULT::DUPLICATE;
+         if (target_x_guard->canInsert(key_length, value_length)) {
+            p_guard.recheck();
+            target_x_guard->insert(key, key_length, value, value_length);   
+            target_x_guard.incrementGSN();
+            data_stored.fetch_add(key_length + value_length);
+            ret = OP_RESULT::OK;
             jumpmu_break;
-         } else if (target_x_guard->overflow.raw() == 0) {
-            if (target_x_guard->canInsert(key_length, value_length)) {
-               p_guard.recheck();
-               target_x_guard->insert(key, key_length, value, value_length);   
-               target_x_guard.incrementGSN();
-               data_stored.fetch_add(key_length + value_length);
-               ret = OP_RESULT::OK;
-               jumpmu_break;
-            }
          }
+
+         // s32 slot_in_node = target_x_guard->find(key, key_length);
+         // if (slot_in_node != -1) {
+         //    ret = OP_RESULT::DUPLICATE;
+         //    jumpmu_break;
+         // } else if (target_x_guard->overflow.raw() == 0) {
+         //    if (target_x_guard->canInsert(key_length, value_length)) {
+         //       p_guard.recheck();
+         //       target_x_guard->insert(key, key_length, value, value_length);   
+         //       target_x_guard.incrementGSN();
+         //       data_stored.fetch_add(key_length + value_length);
+         //       ret = OP_RESULT::OK;
+         //       jumpmu_break;
+         //    }
+         // }
 
          if (target_x_guard->overflow.raw()) {
             HybridPageGuard<LinearHashingNode> pp_guard;
@@ -1009,23 +1189,35 @@ OP_RESULT LinearHashTable::insert_might_fail(u8* key, u16 key_length, u8* value,
                target_x_guard = std::move(HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::EXCLUSIVE));
                target_x_guard.toExclusive();
 
-               s32 slot_in_node = target_x_guard->find(key, key_length);
-               if (slot_in_node != -1) {
-                  ret = OP_RESULT::DUPLICATE;
+               if (target_x_guard->canInsert(key_length, value_length)) {
+                  pp_guard.recheck();
+                  target_x_guard->insert(key, key_length, value, value_length);
+                  target_x_guard.incrementGSN();
+                  data_stored.fetch_add(key_length + value_length);
+                  ret = OP_RESULT::OK;
                   jump_break_out = true;
                   break;
                }
                if (target_x_guard->overflow.raw() == 0) {
-                  if (target_x_guard->canInsert(key_length, value_length)) {
-                     pp_guard.recheck();
-                     target_x_guard->insert(key, key_length, value, value_length);
-                     target_x_guard.incrementGSN();
-                     data_stored.fetch_add(key_length + value_length);
-                     ret = OP_RESULT::OK;
-                     jump_break_out = true;
-                  }
                   break;
                }
+               // s32 slot_in_node = target_x_guard->find(key, key_length);
+               // if (slot_in_node != -1) {
+               //    ret = OP_RESULT::DUPLICATE;
+               //    jump_break_out = true;
+               //    break;
+               // }
+               // if (target_x_guard->overflow.raw() == 0) {
+               //    if (target_x_guard->canInsert(key_length, value_length)) {
+               //       pp_guard.recheck();
+               //       target_x_guard->insert(key, key_length, value, value_length);
+               //       target_x_guard.incrementGSN();
+               //       data_stored.fetch_add(key_length + value_length);
+               //       ret = OP_RESULT::OK;
+               //       jump_break_out = true;
+               //    }
+               //    break;
+               // }
             }
             if (jump_break_out) {
                jumpmu_break;
@@ -1104,9 +1296,11 @@ void LinearHashTable::split() {
          split_bucket_x_guards[split_bucket_x_guard_used_idx++] = std::move(target_x_guard);
          
          int original_chain_length = 0;
+         size_t bytes_in_original_chain = 0;
          // obtain x locks on all the pages of this bucket
          while (true) {
             Swip<LinearHashingNode>& overflow_swip = split_bucket_x_guards[split_bucket_x_guard_used_idx - 1]->overflow;
+            bytes_in_original_chain += split_bucket_x_guards[split_bucket_x_guard_used_idx - 1]->spaceUsedForData();
             if (overflow_swip.raw() == 0) {
                break;
             }
@@ -1148,6 +1342,11 @@ void LinearHashTable::split() {
          }
          assert(split_bucket_tmp.size() <= split_bucket_x_guard_used_idx);
 
+         this->split_length += original_chain_length;
+         this->splits++;
+         this->split_left_length += split_bucket_tmp.size();
+         this->split_right_length += buddy_bucket_tmp.size();
+         this->split_length_bytes += bytes_in_original_chain;
          for (std::size_t i = 0; i < split_bucket_tmp.size(); ++i) {
             HybridPageGuard<LinearHashingNode> & x_guard = split_bucket_x_guards[i];
             bool old_overflow = x_guard->is_overflow;
@@ -1248,6 +1447,9 @@ void LinearHashTable::split() {
                if (split_bucket_x_guards[j].bf == x_guard.bf) {
                   assert(false);
                }
+            }
+            if (this->hot_partition) {
+               assert(x_guard.bf->page.hot_data);
             }
             x_guard.reclaim();
             this->data_pages--;

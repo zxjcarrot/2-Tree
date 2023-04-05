@@ -106,21 +106,22 @@ private:
 };
 
 struct HeapTupleId {
-   u64 data;
-   static constexpr u64 kSlotIdMask = 0xffffffff;
-   HeapTupleId(u64 d = 0): data(d) {}
+   u32 data;
+   static constexpr u64 kPageIdOffset = 10;
+   static constexpr u64 kSlotIdMask = 0x3ff;
+   HeapTupleId(u32 d = 0): data(d) {}
 
-   operator u64()const { return data; }
+   operator u32()const { return data; }
 
-   static HeapTupleId MakeTupleId(u32 heap_page_id, u32 slot_id) {
-      return HeapTupleId((((u64)heap_page_id) << 32) | slot_id);
+   static HeapTupleId MakeTupleId(u32 heap_page_id, u16 slot_id) {
+      return HeapTupleId((((u64)heap_page_id) << kPageIdOffset) | slot_id);
    }
 
    u32 heap_page_id() {
-      return data >> 32;
+      return data >> kPageIdOffset;
    }
 
-   u32 slot_id() {
+   u16 slot_id() {
       return data & kSlotIdMask;
    }
 };
@@ -132,7 +133,7 @@ public:
    // -------------------------------------------------------------------------------------
    OP_RESULT lookup(HeapTupleId id, std::function<void(const u8*, u16)> payload_callback);
    OP_RESULT lookupForUpdate(HeapTupleId id, std::function<bool(u8*, u16)> payload_callback);
-   OP_RESULT insert(HeapTupleId & ouput_tuple_id, u8* value, u16 value_length);
+   OP_RESULT insert(HeapTupleId & ouput_tuple_id, const u8* value, u16 value_length);
    OP_RESULT remove(HeapTupleId id);
    OP_RESULT scan(std::function<bool(const u8*, u16, HeapTupleId)> callback);
    OP_RESULT scanPage(u32 page_id, std::function<bool(const u8*, u16, HeapTupleId)> callback);
@@ -170,9 +171,12 @@ public:
    bool is_heap_growable() { return heap_growable;}
 
    u64 dataStored() { return data_stored.load(); }
+
+   void setFreeSpaceThreshold(double threshold) { free_space_threshold = threshold; }
+   double getFreeSpaceThreshold() { return free_space_threshold; }
 private:
    constexpr static u32 N = 32; // number of pages that have space to keep in `pages_with_free_space`
-   constexpr static double kFreeSpaceThreshold = 0.05;
+   double free_space_threshold = 0.05;
    std::atomic<u64> data_stored{0};
    std::atomic<s64> data_pages{0};
    MappingTable * table = nullptr;
@@ -181,6 +185,8 @@ private:
    std::vector<u64> pages_with_free_space;
    u64 next_page_to_scan = 0;
    std::atomic<bool> heap_growable {true};
+   static thread_local int this_thread_idx;
+   PadInt pages_that_might_have_space[1024];
 public:
    DTID dt_id;
    bool hot_partition = false;
@@ -199,6 +205,7 @@ public:
    OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length);
    OP_RESULT remove(u8* key, u16 key_length);
    OP_RESULT scanHeapPage(u16 key_length, u32 page_id, std::function<bool(const u8*, u16, const u8*, u16)> callback);
+   OP_RESULT scanAsc(u8* key, u16 key_length, std::function<bool(const u8*, u16, const u8*, u16)> callback);
    // -------------------------------------------------------------------------------------
    u64 getHeapPages() { return heap_file.getHeapPages(); }
    u64 countHeapPages();
@@ -211,6 +218,7 @@ public:
    void disable_heap_growth() { heap_file.disable_heap_growth(); }
    bool is_heap_growable() {return heap_file.is_heap_growable(); }
    double utilization() { return heap_file.current_load_factor(); }
+   leanstore::storage::btree::BTreeLL & get_index() { return btree_index; };
 private:
    OP_RESULT doInsert(u8* key, u16 key_length, u8* value, u16 value_length);
    OP_RESULT doLookupForUpdate(u8* key, u16 key_length, std::function<bool(u8*, u16)> payload_callback);

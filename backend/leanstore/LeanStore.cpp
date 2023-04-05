@@ -74,6 +74,7 @@ LeanStore::LeanStore()
    DTRegistry::global_dt_registry.registerDatastructureType(0, storage::btree::BTreeLL::getMeta());
    DTRegistry::global_dt_registry.registerDatastructureType(1, storage::hashing::LinearHashTable::getMeta());
    DTRegistry::global_dt_registry.registerDatastructureType(2, storage::heap::HeapFile::getMeta());
+   DTRegistry::global_dt_registry.registerDatastructureType(3, storage::hashing::LinearHashTableWithOverflowHeap::getMeta());
    // -------------------------------------------------------------------------------------
    if (FLAGS_recover) {
       deserializeState();
@@ -269,6 +270,15 @@ storage::hashing::LinearHashTable& LeanStore::registerHashTable(string name, boo
    DTID dtid = DTRegistry::global_dt_registry.registerDatastructureInstance(1, reinterpret_cast<void*>(&ht), name);
    ht.hot_partition = hot_partition;
    ht.create(dtid);
+   return ht;
+}
+// -------------------------------------------------------------------------------------
+storage::hashing::LinearHashTableWithOverflowHeap& LeanStore::registerHashTableWOH(string name, storage::heap::HeapFile& hf, bool hot_partition) {
+   assert(htwohs.find(name) == htwohs.end());
+   auto& ht = htwohs[name];
+   DTID dtid = DTRegistry::global_dt_registry.registerDatastructureInstance(3, reinterpret_cast<void*>(&ht), name);
+   ht.hot_partition = hot_partition;
+   ht.create(dtid, &hf);
    return ht;
 }
 // -------------------------------------------------------------------------------------

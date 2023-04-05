@@ -2,6 +2,7 @@
 #include "interface/StorageInterface.hpp"
 #include "leanstore/BTreeAdapter.hpp"
 #include "leanstore/storage/hashing/LinearHashing.hpp"
+#include "leanstore/storage/hashing/LinearHashingWithOverflowHeap.hpp"
 #include "leanstore/Config.hpp"
 #include "leanstore/LeanStore.hpp"
 #include "leanstore/profiling/counters/WorkerCounters.hpp"
@@ -36,12 +37,14 @@
 #include <iostream>
 #include <shared_mutex>
 #include <set>
+#include <ctime>
 // -------------------------------------------------------------------------------------
 DEFINE_uint32(ycsb_read_ratio, 100, "");
 DEFINE_uint32(ycsb_update_ratio, 0, "");
 DEFINE_uint32(ycsb_blind_write_ratio, 0, "");
 DEFINE_uint32(ycsb_scan_ratio, 0, "");
 DEFINE_uint32(ycsb_delete_ratio, 0, "");
+DEFINE_uint32(ycsb_insert_ratio, 0, "");
 DEFINE_uint32(ycsb_scan_length, 100, "");
 DEFINE_uint64(ycsb_tuple_count, 0, "");
 DEFINE_uint64(ycsb_keyspace_count, 500000000, "");
@@ -60,6 +63,9 @@ DEFINE_uint32(update_or_put, 0, "");
 DEFINE_uint32(cache_lazy_migration, 100, "lazy upward migration sampling rate(%)");
 DEFINE_bool(ycsb_scan, false, "");
 DEFINE_bool(ycsb_tx, true, "");
+DEFINE_bool(ycsb_2heap_eviction_index_scan, true, "");
+DEFINE_uint64(ycsb_2hash_eviction_record_count, 1, "");
+DEFINE_bool(ycsb_2hash_eviction_by_record, false, "");
 DEFINE_bool(ycsb_count_unique_lookup_keys, true, "");
 DEFINE_bool(ycsb_2hash_use_different_hash, false, "whether to use different hash functions for two hash tables");
 
@@ -76,6 +82,7 @@ const std::string kRequestDistributionHotspotZipfian = "hotspot_zipfian";
 
 const std::string kIndexTypeBTree = "BTree";
 const std::string kIndexTypeHash = "Hash";
+const std::string kIndexTypeHashWOH = "HashWOH";
 const std::string kIndexTypeLSMT = "LSMT";
 const std::string kIndexTypeHeap = "Heap";
 const std::string kIndexTypeIHeap = "IHeap";
@@ -108,6 +115,19 @@ double calculateMTPS(chrono::high_resolution_clock::time_point begin, chrono::hi
 {
    double tps = ((factor * 1.0 / (chrono::duration_cast<chrono::microseconds>(end - begin).count() / 1000000.0)));
    return (tps / 1000000.0);
+}
+
+std::string getCurrentDateTime() {
+   std::time_t now = std::time(nullptr);
+    
+    // convert to local time
+    std::tm *local_time = std::localtime(&now);
+    
+    // format the time string
+    char time_str[20];
+    std::strftime(time_str, sizeof(time_str), "%Y/%m/%d %H:%M:%S", local_time);
+    
+    return time_str;
 }
 
 void zipf_keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
@@ -202,7 +222,7 @@ int main(int argc, char** argv)
    double effective_page_to_frame_ratio = sizeof(leanstore::storage::BufferFrame::Page) / (sizeof(leanstore::storage::BufferFrame) + 0.0);
    double top_tree_size_gib = 0;
    s64 hot_pages_limit = std::numeric_limits<s64>::max();
-   if (FLAGS_index_type == kIndexTypeHeap || FLAGS_index_type == kIndexTypeIHeap || FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexType2IHeap || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
+   if (FLAGS_index_type == kIndexTypeHeap || FLAGS_index_type == kIndexTypeIHeap || FLAGS_index_type == kIndexTypeBTree || FLAGS_index_type == kIndexTypeHash || FLAGS_index_type == kIndexTypeHashWOH  || FLAGS_index_type == kIndexTypeSTXBTree ||  FLAGS_index_type == kIndexType2BTree || FLAGS_index_type == kIndexType2Hash || FLAGS_index_type == kIndexType2IHeap || FLAGS_index_type == kIndexTypeC2BTree || FLAGS_index_type == kIndexType2LSMT_CF) {
       hot_pages_limit = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * 1024 * 1024 * 1024 / sizeof(leanstore::storage::BufferFrame);
       top_tree_size_gib = FLAGS_dram_gib * FLAGS_top_component_dram_ratio * effective_page_to_frame_ratio;
    } else if (FLAGS_index_type == kIndexTypeUpLSMT || 
@@ -221,7 +241,7 @@ int main(int argc, char** argv)
       assert(false);
       exit(1);
    }
-
+   cout << "Date and Time of the run: " << getCurrentDateTime() << std::endl;
    cout << "hot_pages_limit " << hot_pages_limit << std::endl;
    cout << "effective_page_to_frame_ratio " << effective_page_to_frame_ratio << std::endl;
    cout << "index type " << FLAGS_index_type << std::endl; 
@@ -260,6 +280,7 @@ int main(int argc, char** argv)
    leanstore::storage::btree::BTreeLL* btree2_ptr = nullptr;
    leanstore::storage::hashing::LinearHashTable* ht_ptr = nullptr;
    leanstore::storage::hashing::LinearHashTable* ht2_ptr = nullptr;
+   leanstore::storage::hashing::LinearHashTableWithOverflowHeap* htoh2_ptr = nullptr;
    leanstore::storage::heap::HeapFile* hf_ptr = nullptr;
    leanstore::storage::heap::HeapFile* hf2_ptr = nullptr;
    db.getCRManager().scheduleJobSync(0, [&](){
@@ -270,6 +291,7 @@ int main(int argc, char** argv)
          ht2_ptr = &db.retrieveHashTable("ht_cold");
          hf_ptr = &db.retrieveHeapFile("hf", true);
          hf2_ptr = &db.retrieveHeapFile("hf_cold");
+         htoh2_ptr = &db.retrieveHashTableWOH("htoh_cold");
       } else {
          btree_ptr = &db.registerBTreeLL("btree", true);
          btree2_ptr = &db.registerBTreeLL("btree_cold");
@@ -277,11 +299,15 @@ int main(int argc, char** argv)
          ht2_ptr = &db.registerHashTable("ht_cold");
          hf_ptr = &db.registerHeapFile("hf", true);
          hf2_ptr = &db.registerHeapFile("hf_cold");
+         auto heap_file_for_hashing = &db.registerHeapFile("hf_for_ht_cold");
+         htoh2_ptr = &db.registerHashTableWOH("htoh_cold", *heap_file_for_hashing);
       }
    });
    
    if (FLAGS_index_type == kIndexTypeHash) {
       adapter.reset(new HashVSAdapter<YCSBKey, YCSBPayload>(*ht2_ptr, ht2_ptr->dt_id));
+   } else if (FLAGS_index_type == kIndexTypeHashWOH) {
+      adapter.reset(new HashWOHVSAdapter<YCSBKey, YCSBPayload>(*htoh2_ptr, htoh2_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexTypeBTree) {
       adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, btree2_ptr->dt_id));
    } else if (FLAGS_index_type == kIndexTypeHeap) {
@@ -289,14 +315,14 @@ int main(int argc, char** argv)
    } else if (FLAGS_index_type == kIndexTypeIHeap) {
       adapter.reset(new IndexedHeapAdapter<YCSBKey, YCSBPayload>(*hf2_ptr, *btree2_ptr));
    } else if (FLAGS_index_type == kIndexType2IHeap) {
-      adapter.reset(new TwoIHeapAdapter<YCSBKey, YCSBPayload>(*hf_ptr, *btree_ptr, *hf2_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+      adapter.reset(new TwoIHeapAdapter<YCSBKey, YCSBPayload>(*hf_ptr, *btree_ptr, *hf2_ptr, *btree2_ptr, FLAGS_ycsb_2heap_eviction_index_scan, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2BTree) {
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2Hash) {
       if (FLAGS_ycsb_2hash_use_different_hash) {
-         adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload, leanstore::utils::XXH, leanstore::utils::FNV>(*ht_ptr, *ht2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+         adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload, leanstore::utils::FNV, leanstore::utils::XXH>(*ht_ptr, *ht2_ptr, FLAGS_ycsb_2hash_eviction_record_count, FLAGS_ycsb_2hash_eviction_by_record, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
       } else {
-         adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload>(*ht_ptr, *ht2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+         adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload>(*ht_ptr, *ht2_ptr, FLAGS_ycsb_2hash_eviction_record_count, FLAGS_ycsb_2hash_eviction_by_record, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
       }
    } else if (FLAGS_index_type == kIndexTypeC2BTree) {
       adapter.reset(new ConcurrentTwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
@@ -470,15 +496,20 @@ int main(int argc, char** argv)
       cout << "Warming up" << endl;
       auto t_start = std::chrono::high_resolution_clock::now();
       int i = 0;
-      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 30000) {
+      while (std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()- t_start).count() < 20000) {
          auto key_idx = random_generator->rand() % ycsb_tuple_count;
          YCSBKey key = keys[key_idx] % FLAGS_ycsb_keyspace_count;
          C_RLOCK(key_idx);
          YCSBPayload correct_result(correct_payloads[key_idx]);
          assert(key < ycsb_tuple_count);
          YCSBPayload result;
-         table.lookup(key, result);
+         bool res = table.lookup(key, result);
+         assert(res);
+         if (result != correct_result) {
+            table.lookup(key, result);
+         }
          C_RUNLOCK(key_idx);
+         
          assert(result == correct_result);
          WorkerCounters::myCounters().tx++;
          ++i;
@@ -539,6 +570,7 @@ int main(int argc, char** argv)
                   } else {
                      table.put(key, payload);
                   }
+                  //assert(table.lookup(key, result));
                }
                C_WUNLOCK(idx);
             } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_delete_ratio) {
@@ -550,6 +582,17 @@ int main(int argc, char** argv)
                   // }
                   assert(res == true);
                   key_deleted[idx] = true;
+                  //assert(table.lookup(key, result) == false);
+               }
+               C_WUNLOCK(idx);
+            } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_delete_ratio + FLAGS_ycsb_insert_ratio) {
+               C_WLOCK(idx);
+               if (key_deleted[idx] == true) {
+                  YCSBPayload payload((u8)key);
+                  correct_payloads[idx] = (u8)key;
+                  table.insert(key, payload);
+                  key_deleted[idx] = false;
+                  //assert(table.lookup(key, result));
                }
                C_WUNLOCK(idx);
             } else { // x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_read_ratio + FLAGS_ycsb_delete_ratio
@@ -560,9 +603,9 @@ int main(int argc, char** argv)
                   if (key_deleted[idx]) {
                      assert(res == false);
                   } else {
-                     // if (res == false) {
-                     //    auto res2 = table.lookup(key, result);
-                     // }
+                     if (res == false) {
+                        auto res2 = table.lookup(key, result);
+                     }
                      assert(res);
                      auto correct_payload_byte = correct_payloads[idx];
                      YCSBPayload correct_result(correct_payload_byte);
@@ -584,8 +627,8 @@ int main(int argc, char** argv)
    {
       // Shutdown threads
       sleep(FLAGS_run_for_seconds * 0.8);
-      cout << "Clearing IO stats after reaching steady state" << endl;
-      table.clear_io_stats();
+      // cout << "Clearing IO stats after reaching steady state" << endl;
+      // table.clear_io_stats();
       sleep(FLAGS_run_for_seconds * 0.2);
       keep_running = false;
       while (running_threads_counter) {

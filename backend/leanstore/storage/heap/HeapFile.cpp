@@ -17,6 +17,9 @@ namespace storage
 namespace heap
 {
 
+static std::atomic<int> thread_id{0};
+thread_local int HeapFile::this_thread_idx = thread_id.fetch_add(1);
+
 bool HeapPage::prepareInsert(u16 payload_len)
 {
    const u16 space_needed = spaceNeeded(payload_len);
@@ -121,6 +124,9 @@ void HeapFile::create(DTID dtid) {
       this->data_pages++;
       std::unique_lock<std::shared_mutex> g(this->mtx);
       pages_with_free_space.push_back(p);
+   }
+   for (int i = 0; i < 1024; ++i) {
+      pages_that_might_have_space[i].data = std::numeric_limits<u64>::max();
    }
 }
 
@@ -308,7 +314,7 @@ OP_RESULT HeapFile::scan(std::function<bool(const u8*, u16, HeapTupleId)> callba
 }
 
 
-OP_RESULT HeapFile::insert(HeapTupleId & ouput_tuple_id, u8* value, u16 value_length) {
+OP_RESULT HeapFile::insert(HeapTupleId & ouput_tuple_id, const u8* value, u16 value_length) {
    while (true) {
       u32 page_id = get_page_with_space(value_length);
       BufferFrame * dirNode = table->getDirNode(page_id);
@@ -413,8 +419,8 @@ OP_RESULT HeapFile::remove(HeapTupleId id) {
       }
 
       if (!jumpped) {
-         if (deleted && (free_space / (EFFECTIVE_PAGE_SIZE + 0.0)) >= kFreeSpaceThreshold 
-                  && (free_space / (EFFECTIVE_PAGE_SIZE + 0.0)) <= kFreeSpaceThreshold + 0.03) {
+         if (deleted && (free_space / (EFFECTIVE_PAGE_SIZE + 0.0)) >= getFreeSpaceThreshold() 
+                  && (free_space / (EFFECTIVE_PAGE_SIZE + 0.0)) <= getFreeSpaceThreshold() + 0.2) {
             update_free_space_in_dir_node(page_id, free_space, false);
          }
          if (deleted) {
@@ -443,11 +449,15 @@ public:
 
 u32 HeapFile::get_page_with_space(u32 space_required) {
    again:
+   if (pages_that_might_have_space[this_thread_idx].data != std::numeric_limits<u64>::max()) {
+      return pages_that_might_have_space[this_thread_idx].data;
+   }
    mtx.lock_shared();
    if (pages_with_free_space.empty()) {
       mtx.unlock_shared();
    } else {
       u32 pid = pages_with_free_space[utils::RandomGenerator::getRand<u64>(0, pages_with_free_space.size())];
+      pages_that_might_have_space[this_thread_idx].data = pid;
       mtx.unlock_shared();
       return pid;
    }
@@ -479,6 +489,7 @@ void HeapFile::update_free_space_in_dir_node(u32 page_id, u32 free_space, bool r
       pages_with_free_space.erase(std::remove(pages_with_free_space.begin(), pages_with_free_space.end(), page_id), 
                                  pages_with_free_space.end());
       mtx.unlock();
+      pages_that_might_have_space[this_thread_idx].data = std::numeric_limits<u64>::max();
    }
 }
 
@@ -487,7 +498,7 @@ void HeapFile::find_pages_with_free_space() {
    // collect data pages that have space by scanning the directory pages
    // If could not find enough (N) such pages, let's add a few new pages using `add_heap_pages`.
    std::vector<u64> pages_that_have_space;
-   static constexpr int kScanStep = N;
+   static constexpr int kScanStep = N * 10;
    for (u64 pid = next_page_to_scan; pid < table->numSlots();) {
       BufferFrame* dirNode = table->getDirNode(pid);
       int dirNodeStartPageIdx = (pid / kDirNodeEntryCount) * kDirNodeEntryCount;
@@ -499,7 +510,7 @@ void HeapFile::find_pages_with_free_space() {
             HybridPageGuard<HeapDirectoryNode> p_guard(dirNode);
             for (int i = start_idx_within_node; i < end_idx_within_node; ++i) {
                if (p_guard->dataPagePointers[i].ptr.raw() &&
-                  (p_guard->dataPagePointers[i].freeSpace / (EFFECTIVE_PAGE_SIZE + 0.0)) >= kFreeSpaceThreshold) {
+                  (p_guard->dataPagePointers[i].freeSpace / (EFFECTIVE_PAGE_SIZE + 0.0)) >= getFreeSpaceThreshold()) {
                   pages_that_have_space.push_back(dirNodeStartPageIdx + i);
                }
             }
@@ -637,7 +648,7 @@ void HeapFile::checkpoint(void*, BufferFrame& bf, u8* dest)
 }
 
 DTRegistry::DTMeta HeapFile::getMeta() {
-   DTRegistry::DTMeta ht_meta = {.iterate_children = HeapFile::iterateChildrenSwips,
+   DTRegistry::DTMeta hf_meta = {.iterate_children = HeapFile::iterateChildrenSwips,
                                     .find_parent = HeapFile::findParent,
                                     .is_btree_leaf = HeapFile::isBTreeLeaf,
                                     .check_space_utilization = HeapFile::checkSpaceUtilization,
@@ -647,7 +658,7 @@ DTRegistry::DTMeta HeapFile::getMeta() {
                                     .todo = HeapFile::todo,
                                     .serialize = HeapFile::serialize,
                                     .deserialize = HeapFile::deserialize};
-   return ht_meta;
+   return hf_meta;
 }
 
 OP_RESULT IndexedHeapFile::scanHeapPage(u16 key_length, u32 page_id, std::function<bool(const u8*, u16, const u8*, u16)> callback) {
@@ -658,6 +669,25 @@ OP_RESULT IndexedHeapFile::scanHeapPage(u16 key_length, u32 page_id, std::functi
       u16 value_length = tuple_length - key_length;
       return callback(key, key_length, value, value_length);
    });
+}
+
+OP_RESULT IndexedHeapFile::scanAsc(u8* key, u16 key_length, std::function<bool(const u8*, u16, const u8*, u16)> callback) {
+   HeapTupleId tuple_id;
+   btree_index.scanAsc(key, key_length,
+            [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+               assert(value_length == sizeof(HeapTupleId));
+               tuple_id = *reinterpret_cast<const HeapTupleId*>(value);
+               bool continue_scan = false;
+               bool res = heap_file.lookup(tuple_id, [&](const u8 * tuple, u16 tuple_length){
+                  const u8* key_ptr = tuple;
+                  const u8* value_ptr = tuple + key_length;
+                  auto value_length = tuple_length - key_length;
+                  continue_scan = callback(key_ptr, key_length, value_ptr, value_length);
+               }) == OP_RESULT::OK;
+               assert(res);
+               return continue_scan;
+            },[](){});
+   return OP_RESULT::OK;
 }
 
 OP_RESULT IndexedHeapFile::remove(u8* key, u16 key_length) {
@@ -673,10 +703,10 @@ OP_RESULT IndexedHeapFile::remove(u8* key, u16 key_length) {
 
    if (btree_lookup_result == leanstore::storage::btree::OP_RESULT::OK) {
       assert(found == true);
-      auto res = heap_file.remove(tuple_id);
-      assert(res == OP_RESULT::OK);
       btree_lookup_result = btree_index.remove(key, key_length);
       assert(btree_lookup_result == leanstore::storage::btree::OP_RESULT::OK);
+      auto res = heap_file.remove(tuple_id);
+      assert(res == OP_RESULT::OK);
       return OP_RESULT::OK;
    }
 
@@ -688,17 +718,16 @@ OP_RESULT IndexedHeapFile::upsert(u8* key, u16 key_length, u8* value, u16 value_
    while(!g.write_lock());
    bool exists = false;
    auto res = doLookupForUpdate(key, key_length, [&](u8 * tuple, u16 tuple_length){
-      assert(tuple_length == key_length + value_length);
+      assert(tuple_length == value_length);
       exists = true;
-      memcpy(tuple, key, key_length);
-      memcpy(tuple + key_length, value, value_length);
+      memcpy(tuple, value, value_length);
       return true;
    });
    if (res == OP_RESULT::OK) {
       assert(exists == true);
       return OP_RESULT::OK;
    }
-   assert(OP_RESULT::NOT_FOUND);
+   assert(res == OP_RESULT::NOT_FOUND);
    return doInsert(key, key_length, value, value_length);
 }
 

@@ -59,17 +59,17 @@ struct Varchar {
    }
 };
 
-unsigned fold(uint8_t* writer, const Integer& x)
-{
-   *reinterpret_cast<uint32_t*>(writer) = __builtin_bswap32(x ^ (1ul << 31));
-   return sizeof(x);
-}
+// unsigned fold(uint8_t* writer, const Integer& x)
+// {
+//    *reinterpret_cast<uint32_t*>(writer) = __builtin_bswap32(x ^ (1ul << 31));
+//    return sizeof(x);
+// }
 
-unsigned fold(uint8_t* writer, const Timestamp& x)
-{
-   *reinterpret_cast<uint64_t*>(writer) = __builtin_bswap64(x ^ (1ull << 63));
-   return sizeof(x);
-}
+// unsigned fold(uint8_t* writer, const Timestamp& x)
+// {
+//    *reinterpret_cast<uint64_t*>(writer) = __builtin_bswap64(x ^ (1ull << 63));
+//    return sizeof(x);
+// }
 
 template <int len>
 unsigned fold(uint8_t* writer, const Varchar<len>& x)

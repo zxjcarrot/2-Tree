@@ -17,9 +17,9 @@ target_include_directories(ycsb_zipf PRIVATE ${SHARED_INCLUDE_DIRECTORY} ${CMAKE
 # target_include_directories(btreeolc_test PRIVATE ${SHARED_INCLUDE_DIRECTORY} ${CMAKE_DL_LIBS})
 
 
-# add_executable(tpcc tpc-c/tpcc.cpp)
-# target_link_libraries(tpcc leanstore Threads::Threads)
-# target_include_directories(tpcc PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+add_executable(tpcc tpc-c/tpcc.cpp)
+target_link_libraries(tpcc leanstore Threads::Threads tcmalloc)
+target_include_directories(tpcc PRIVATE ${SHARED_INCLUDE_DIRECTORY})
 
 # # https://source.wiredtiger.com/10.0.0/build-posix.html
 # add_executable(wiredtiger_tpcc tpc-c/wiredtiger_tpcc.cpp)

@@ -92,6 +92,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
 
    u64 lazy_migration_threshold = 10;
    bool lazy_migration = false;
+   bool eviction_using_index_scan = false;
    struct alignas(1) TaggedPayload {
       Payload payload;
       unsigned char bits = 0;
@@ -108,28 +109,14 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
    Key clock_hand = 0;
    constexpr static u64 PartitionBitPosition = 63;
    constexpr static u64 PartitionBitMask = 0x8000000000000000;
-   Key tag_with_hot_bit(Key key) {
-      return key;
-   }
-   
-   bool is_in_hot_partition(Key key) {
-      return (key & PartitionBitMask) == 0;
-   }
-
-   Key tag_with_cold_bit(Key key) {
-      return key;
-   }
-
-   Key strip_off_partition_bit(Key key) {
-      return key;
-   }
 
    TwoIHeapAdapter(leanstore::storage::heap::HeapFile& hot_heap_file, leanstore::storage::btree::BTreeLL& hot_btree_index,
-            leanstore::storage::heap::HeapFile& cold_heap_file, leanstore::storage::btree::BTreeLL& cold_btree_index, 
+            leanstore::storage::heap::HeapFile& cold_heap_file, leanstore::storage::btree::BTreeLL& cold_btree_index,
+            bool eviction_using_index_scan, 
             double hot_partition_size_gb, bool inclusive = false, int lazy_migration_sampling_rate = 100) : 
             hot_iheap(hot_heap_file, hot_btree_index), cold_iheap(cold_heap_file, cold_btree_index), 
             hot_partition_capacity_bytes(hot_partition_size_gb * 1024ULL * 1024ULL * 1024ULL), 
-            inclusive(inclusive), lazy_migration(lazy_migration_sampling_rate < 100) {
+            inclusive(inclusive), lazy_migration(lazy_migration_sampling_rate < 100), eviction_using_index_scan(eviction_using_index_scan) {
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
       }
@@ -139,21 +126,18 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
 
    bool cache_under_pressure() {
       if (!hot_iheap.is_heap_growable()) {
-         return hot_iheap.utilization() >= 0.9;
+         return hot_iheap.utilization() >= 0.85;
       }
       if (buf_mgr->hot_pages.load() * leanstore::storage::PAGE_SIZE >= hot_partition_capacity_bytes) {
          if (hot_iheap.is_heap_growable()) {
             hot_iheap.disable_heap_growth();
          }
-         return hot_iheap.utilization() >= 0.9;
+         return hot_iheap.utilization() >= 0.85;
       } else {
          return false;
       }
    }
 
-   bool cache_under_pressure_soft() {
-      return buf_mgr->hot_pages.load() * leanstore::storage::PAGE_SIZE >=  hot_partition_capacity_bytes * 0.9; 
-   }
 
    void clear_stats() override {
       heap_buffer_miss = heap_buffer_hit = 0;
@@ -174,11 +158,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       }
    }
 
-   static constexpr u16 kClockWalkSteps = 10;
-   alignas(64) std::atomic<u64> eviction_round_ref_counter[2];
-   alignas(64) std::atomic<u64> eviction_round{0};
-   alignas(64) std::mutex eviction_mutex;
-   void evict_a_bunch(int steps_to_walk = kClockWalkSteps) {
+   void evict_a_bunch_from_heap(int steps_to_walk = kClockWalkSteps) {
       u64 this_eviction_round;
       u32 start_page;
       u32 end_page;
@@ -263,19 +243,19 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
                   TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
                   evict_payloads[i] = *tp;
                   }) == leanstore::storage::heap::OP_RESULT::OK;
-               assert(res);
+               if (!res) {
+                  continue;
+               }
             }
             evicted_count++;
             auto tagged_payload = evict_payloads[i];
-            assert(is_in_hot_partition(key));
             if (inclusive) {
                if (tagged_payload.modified()) {
-                  upsert_cold_partition(strip_off_partition_bit(key), tagged_payload.payload); // Cold partition
+                  upsert_cold_partition(key, tagged_payload.payload); // Cold partition
                }
             } else { // exclusive, put it back in the on-disk B-Tree
-               insert_cold_partition(strip_off_partition_bit(key), tagged_payload.payload); // Cold partition
+               insert_cold_partition(key, tagged_payload.payload); // Cold partition
             }
-            assert(is_in_hot_partition(key));
             auto op_res = hot_iheap.remove(key_bytes, fold(key_bytes, key));
             hot_partition_item_count--;
             assert(op_res == leanstore::storage::heap::OP_RESULT::OK);
@@ -291,6 +271,145 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       eviction_round_ref_counter[this_eviction_round % 2]--;
    }
 
+   void evict_a_bunch_from_index(int steps_to_walk = kClockWalkSteps) {
+      [[maybe_unused]] u16 steps = 5; // number of index nodes to scan
+      Key start_key;
+      Key end_key;
+      u64 this_eviction_round;
+      u8 key_bytes[sizeof(Key)];
+      auto io_reads_old = WorkerCounters::myCounters().io_reads.load();
+      {
+         std::lock_guard<std::mutex> g(eviction_mutex);
+         start_key = clock_hand;
+         end_key = start_key;
+         this_eviction_round = eviction_round.load();
+         bool rewind = false;
+         bool triggered = false;
+         
+         if (eviction_round_ref_counter[1 - (this_eviction_round % 2)] != 0) {
+            return; // There are evictors working in the previous round, retry later
+         }
+         ScopedTimer t([&](uint64_t ts){
+            eviction_bounding_time += ts;
+            eviction_bounding_n++;
+         });
+
+         hot_iheap.get_index().findLeafNeighbouringNodeBoundary(key_bytes, fold(key_bytes, start_key), steps,
+            [&](const u8 * k, const u16 key_length, bool end) {
+               assert(key_length == sizeof(Key));
+               auto real_key = unfold(*(Key*)(k));
+               end_key = real_key;
+               rewind = end == true;
+               triggered = true;
+            });
+
+         if (triggered == false) {
+            return;
+         }
+         // Bump the ref count so that evictors in the next round won't start 
+         // until all of the evictors in this round finish
+         eviction_round_ref_counter[this_eviction_round % 2]++;
+         if (rewind == true) {
+            clock_hand = 0;
+            eviction_round++; // end of the range scan, switch to the next round
+         } else {
+            clock_hand = end_key + 1;
+         }
+      }
+      
+      std::vector<Key> evict_keys;
+      evict_keys.reserve(512);
+      std::vector<u64> evict_keys_lock_versions;
+      evict_keys_lock_versions.reserve(512);
+      std::vector<TaggedPayload> evict_payloads;
+      evict_payloads.reserve(512);
+      Key evict_key;
+      bool victim_found = false;
+      
+      hot_iheap.scanAsc(key_bytes, fold(key_bytes, start_key),
+      [&](const u8 * key, u16 key_length, const u8 * value, u16 value_length) -> bool {
+
+         auto real_key = unfold(*(Key*)(key));
+         if (real_key > end_key) {
+            return false;
+         }
+         assert(key_length == sizeof(Key));
+         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(value));
+         assert(value_length == sizeof(TaggedPayload));
+         if (tp->referenced() == true) {
+            tp->clear_referenced();
+         } else {
+            LockGuardProxy g(&lock_table, real_key);
+            if (g.read_lock()) { // Skip evicting records that are write-locked
+               evict_key = real_key;
+               victim_found = true;
+               evict_keys.emplace_back(real_key);
+               evict_payloads.emplace_back(*tp);
+               evict_keys_lock_versions.emplace_back(g.get_version());
+            }
+         }
+         return true; // continue scan
+      });
+
+      if (victim_found) {
+         std::size_t evicted_count = 0;
+         for (size_t i = 0; i< evict_keys.size(); ++i) {
+            auto key = evict_keys[i];
+            LockGuardProxy write_guard(&lock_table, key);
+            if (write_guard.write_lock() == false) { // Skip eviction if it is undergoing migration or modification
+               continue;
+            }
+            auto key_lock_version_from_scan = evict_keys_lock_versions[i];
+            if (write_guard.more_than_one_writer_since(key_lock_version_from_scan)) {
+               //continue;
+               // There has been other writes to this key in the hot tree between the scan and the write locking above
+               // Need to update the payload content by re-reading it from the hot tree
+               auto res = hot_iheap.lookup(key_bytes, fold(key_bytes, key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+                  TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
+                  evict_payloads[i] = *tp;
+                  }) == leanstore::storage::heap::OP_RESULT::OK;
+               if (!res) {
+                  continue;
+               }
+            }
+            auto tagged_payload = &evict_payloads[i];
+            if (inclusive) {
+               if (tagged_payload->modified()) {
+                  upsert_cold_partition(key, tagged_payload->payload); // Cold partition
+                  ++downward_migrations;
+               }
+            } else { // exclusive, put it back in the on-disk B-Tree
+               insert_cold_partition(key, tagged_payload->payload); // Cold partition
+               ++downward_migrations;
+            }
+
+            auto op_res = hot_iheap.remove(key_bytes, fold(key_bytes, key));
+            hot_partition_item_count--;
+            assert(op_res == leanstore::storage::heap::OP_RESULT::OK);
+            hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
+            evicted_count++;
+         }
+
+         auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
+         assert(io_reads_new >= io_reads_old);
+         eviction_io_reads += io_reads_new - io_reads_old;
+         eviction_items += evicted_count;
+      }
+
+      eviction_round_ref_counter[this_eviction_round % 2]--;
+   }
+
+   static constexpr u16 kClockWalkSteps = 10;
+   alignas(64) std::atomic<u64> eviction_round_ref_counter[2];
+   alignas(64) std::atomic<u64> eviction_round{0};
+   alignas(64) std::mutex eviction_mutex;
+   void evict_a_bunch(int steps_to_walk = kClockWalkSteps) {
+      if (eviction_using_index_scan) {
+         evict_a_bunch_from_index(steps_to_walk);
+      } else {
+         evict_a_bunch_from_heap(steps_to_walk);
+      }
+   }
 
    void evict_till_safe() {
       while (cache_under_pressure()) {
@@ -314,18 +433,8 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       }
    }
 
-   bool admit_element_might_fail(Key k, Payload & v, bool dirty = false, bool referenced = true) {
-      admit_element(k, v, dirty, referenced);
-      return true;
-      // if (insert_hot_partition_might_fail(strip_off_partition_bit(k), v, dirty, referenced)) {
-      //    hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
-      //    return true;
-      // }
-      // return false;
-   }
-
    void admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
-      insert_hot_partition(strip_off_partition_bit(k), v, dirty, referenced);
+      insert_hot_partition(k, v, dirty, referenced);
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
    }
    
@@ -358,33 +467,6 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       }
    }
 
-
-   bool lookup_internal(Key k, Payload& v)
-   {
-      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
-      ++total_lookups;
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
-      u8 key_bytes[sizeof(Key)];
-      TaggedPayload tp;
-      // try hot partition first
-      auto hot_key = k;
-      
-      auto old_miss = WorkerCounters::myCounters().io_reads.load();
-      auto res = hot_iheap.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
-         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
-         }) ==
-            leanstore::storage::heap::OP_RESULT::OK;
-      auto new_miss = WorkerCounters::myCounters().io_reads.load();
-      assert(new_miss >= old_miss);
-      if (old_miss == new_miss) {
-         heap_buffer_hit++;
-      } else {
-         heap_buffer_miss += new_miss - old_miss;
-      }
-      return res;
-   }
-
    bool lookup_internal(Key k, Payload& v, LockGuardProxy & g)
    {
       leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
@@ -393,7 +475,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       u8 key_bytes[sizeof(Key)];
       TaggedPayload tp;
       // try hot partition first
-      auto hot_key = tag_with_hot_bit(k);
+      auto hot_key = k;
       uint64_t old_miss, new_miss;
       OLD_HIT_STAT_START;
       bool mark_dirty = false;
@@ -407,14 +489,15 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
          }) ==
             leanstore::storage::heap::OP_RESULT::OK;
       OLD_HIT_STAT_END;
-      //hot_iheap_ios += new_miss - old_miss;
+      hot_iheap_ios += new_miss - old_miss;
       if (res) {
-         //++lookups_hit_top;
+         ++lookups_hit_top;
          return res;
       }
 
-      auto cold_key = tag_with_cold_bit(k);
+      auto cold_key = k;
       res = cold_iheap.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused))) { 
+         assert(payload_length == sizeof(Payload));
          Payload *pl =  const_cast<Payload*>(reinterpret_cast<const Payload*>(payload));
          memcpy(&v, pl, sizeof(Payload)); 
          }) ==
@@ -427,15 +510,9 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
             }
             
             // move to hot partition
-            bool res = false;
+            bool res = true;
             OLD_HIT_STAT_START;
-
-            if (utils::RandomGenerator::getRandU64(0, 100) < 4) {
-               admit_element(k, v);
-               res = true;
-            } else {
-               res = admit_element_might_fail(k, v);
-            }
+            admit_element(k, v);
             OLD_HIT_STAT_END;
             hot_iheap_ios += new_miss - old_miss;
             if (res) {
@@ -458,7 +535,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
 
    void upsert_cold_partition(Key k, Payload & v) {
       u8 key_bytes[sizeof(Key)];
-      Key key = tag_with_cold_bit(k);
+      Key key = k;
 
       auto op_res = cold_iheap.upsert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&v), sizeof(Payload));
       assert(op_res == leanstore::storage::heap::OP_RESULT::OK);
@@ -467,7 +544,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
    // hot_or_cold: false => hot partition, true => cold partition
    void insert_hot_partition(Key k, Payload & v, bool modified = false, bool referenced = true) {
       u8 key_bytes[sizeof(Key)];
-      Key key = tag_with_hot_bit(k);
+      Key key = k;
       hot_partition_item_count++;
       TaggedPayload tp;
       if (referenced == false) {
@@ -491,7 +568,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
 
    void insert_cold_partition(Key k, Payload & v) {
       u8 key_bytes[sizeof(Key)];
-      Key key = tag_with_cold_bit(k);
+      Key key = k;
       auto op_res = cold_iheap.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(&v), sizeof(Payload));
       assert(op_res == leanstore::storage::heap::OP_RESULT::OK);
    }
@@ -519,9 +596,10 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
-      auto hot_key = tag_with_hot_bit(k);
+      auto hot_key = k;
       HIT_STAT_START;
       auto op_res = hot_iheap.lookupForUpdate(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
+         assert(sizeof(TaggedPayload) == payload_length);
          TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
          tp->set_referenced();
          tp->set_modified();
@@ -536,9 +614,10 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       }
 
       Payload old_v;
-      auto cold_key = tag_with_cold_bit(k);
+      auto cold_key = k;
       //OLD_HIT_STAT_START;
       auto res __attribute__((unused)) = cold_iheap.lookup(key_bytes, fold(key_bytes, cold_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+         assert(payload_length == sizeof(Payload));
          Payload *pl =  const_cast<Payload*>(reinterpret_cast<const Payload*>(payload));
          memcpy(&old_v, pl, sizeof(Payload)); 
          }) ==
@@ -548,14 +627,9 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
 
       if (should_migrate()) {
          // move to hot partition
-         bool res = false;
+         bool res = true;
          OLD_HIT_STAT_START;
-         if (cache_under_pressure_soft()) {
-            res = admit_element_might_fail(k, v);
-         } else {
-            admit_element(k, v);
-            res = true;
-         }
+         admit_element(k, v);
          OLD_HIT_STAT_END;
          if (res) {
             ++upward_migrations;
@@ -585,7 +659,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       while (g.write_lock() == false);
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
-      auto hot_key = tag_with_hot_bit(k);
+      auto hot_key = k;
       HIT_STAT_START;
       auto op_res = hot_iheap.lookupForUpdate(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
          TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
@@ -603,7 +677,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       admit_element(k, v, true);
 
       if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
-         auto cold_key = tag_with_cold_bit(k);
+         auto cold_key = k;
          //OLD_HIT_STAT_START;
          // remove from the cold partition
          auto op_res __attribute__((unused)) = cold_iheap.remove(key_bytes, fold(key_bytes, cold_key));
