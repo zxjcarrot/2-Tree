@@ -28,7 +28,7 @@ class HeapPage;
 using SwipType=Swip<HeapPage>;
 // -------------------------------------------------------------------------------------
 
-static constexpr int kDirNodeEntryCount = EFFECTIVE_PAGE_SIZE / (sizeof(u64) * 2) - 10;
+static constexpr int kDirNodeEntryCount = EFFECTIVE_PAGE_SIZE / (sizeof(u64) * 2 * 4) - 10;
 
 struct HeapDirectoryNode {
    struct Pointer{
@@ -175,7 +175,7 @@ public:
    void setFreeSpaceThreshold(double threshold) { free_space_threshold = threshold; }
    double getFreeSpaceThreshold() { return free_space_threshold; }
 private:
-   constexpr static u32 N = 32; // number of pages that have space to keep in `pages_with_free_space`
+   constexpr static u32 N = 128; // number of pages that have space to keep in `pages_with_free_space`
    double free_space_threshold = 0.05;
    std::atomic<u64> data_stored{0};
    std::atomic<s64> data_pages{0};

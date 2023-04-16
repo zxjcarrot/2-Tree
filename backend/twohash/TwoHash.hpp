@@ -45,7 +45,7 @@ auto old_miss = WorkerCounters::myCounters().io_reads.load();
          ht_buffer_miss += new_miss - old_miss; \
       }
 
-template <typename Key, typename Payload, typename Hasher1=leanstore::utils::FNV, typename Hasher2=leanstore::utils::FNV>
+template <typename Key, typename Payload, typename Hasher1=leanstore::utils::XXH, typename Hasher2=leanstore::utils::XXH>
 struct TwoHashAdapter : StorageInterface<Key, Payload> {
    leanstore::storage::hashing::LinearHashTable & hot_hash_table;
    leanstore::storage::hashing::LinearHashTable & cold_hash_table;
@@ -668,7 +668,7 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       if (inclusive) {
          admit_element(k, v, true, false);
       } else {
-         admit_element(k, v);
+         admit_element(k, v, true, false);
       }
    }
 

@@ -1,4 +1,5 @@
 #include "Units.hpp"
+#include "RecordSize.h"
 #include "interface/StorageInterface.hpp"
 #include "leanstore/BTreeAdapter.hpp"
 #include "leanstore/storage/hashing/LinearHashing.hpp"
@@ -108,7 +109,7 @@ using namespace leanstore;
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 using YCSBKey = u64;
-using YCSBPayload = BytesPayload<120>;
+using YCSBPayload = BytesPayload<RECORD_SIZE>;
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 double calculateMTPS(chrono::high_resolution_clock::time_point begin, chrono::high_resolution_clock::time_point end, u64 factor)
@@ -241,13 +242,15 @@ int main(int argc, char** argv)
       assert(false);
       exit(1);
    }
+   cout << "record_size: " << ((RECORD_SIZE) + sizeof(YCSBKey)) << std::endl;
    cout << "Date and Time of the run: " << getCurrentDateTime() << std::endl;
+   cout << "lazy migration sampling rate " << FLAGS_cache_lazy_migration << "%" << std::endl;
    cout << "hot_pages_limit " << hot_pages_limit << std::endl;
    cout << "effective_page_to_frame_ratio " << effective_page_to_frame_ratio << std::endl;
    cout << "index type " << FLAGS_index_type << std::endl; 
    cout << "request distribution " << FLAGS_ycsb_request_dist << std::endl;
    cout << "dram_gib " << FLAGS_dram_gib << std::endl;
-   cout << "top_tree_size_gib " << top_tree_size_gib << std::endl;
+   cout << "top_component_size_gib " << top_tree_size_gib << std::endl;
    cout << "wal=" << FLAGS_wal << std::endl;
    cout << "zipf_factor=" << FLAGS_zipf_factor << std::endl;
    cout << "ycsb_read_ratio=" << FLAGS_ycsb_read_ratio << std::endl;
@@ -320,7 +323,7 @@ int main(int argc, char** argv)
       adapter.reset(new TwoBTreeAdapter<YCSBKey, YCSBPayload>(*btree_ptr, *btree2_ptr, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2Hash) {
       if (FLAGS_ycsb_2hash_use_different_hash) {
-         adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload, leanstore::utils::FNV, leanstore::utils::XXH>(*ht_ptr, *ht2_ptr, FLAGS_ycsb_2hash_eviction_record_count, FLAGS_ycsb_2hash_eviction_by_record, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
+         adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload, leanstore::utils::XXH, leanstore::utils::FNV>(*ht_ptr, *ht2_ptr, FLAGS_ycsb_2hash_eviction_record_count, FLAGS_ycsb_2hash_eviction_by_record, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
       } else {
          adapter.reset(new TwoHashAdapter<YCSBKey, YCSBPayload>(*ht_ptr, *ht2_ptr, FLAGS_ycsb_2hash_eviction_record_count, FLAGS_ycsb_2hash_eviction_by_record, top_tree_size_gib, FLAGS_inclusive_cache, FLAGS_cache_lazy_migration));
       }

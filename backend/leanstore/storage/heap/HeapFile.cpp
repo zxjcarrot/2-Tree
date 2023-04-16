@@ -453,7 +453,7 @@ u32 HeapFile::get_page_with_space(u32 space_required) {
       return pages_that_might_have_space[this_thread_idx].data;
    }
    mtx.lock_shared();
-   if (pages_with_free_space.empty()) {
+   if (pages_with_free_space.empty() || pages_with_free_space.size() < 16) {
       mtx.unlock_shared();
    } else {
       u32 pid = pages_with_free_space[utils::RandomGenerator::getRand<u64>(0, pages_with_free_space.size())];
@@ -463,7 +463,7 @@ u32 HeapFile::get_page_with_space(u32 space_required) {
    }
 
    mtx.lock();
-   if (pages_with_free_space.empty()) {
+   if (pages_with_free_space.empty() || pages_with_free_space.size() < 16) {
       find_pages_with_free_space();
    }
    mtx.unlock();

@@ -563,15 +563,19 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    u64 lazy_migration_threshold = 10;
    bool lazy_migration = false;
+   constexpr static unsigned char kDeletedBits = 4;
    struct alignas(1) TaggedPayload {
-      Payload payload;
       unsigned char bits = 0;
+      Payload payload;
       bool modified() const { return bits & 1; }
       void set_modified() { bits |= 1; }
       void clear_modified() { bits &= ~(1u); }
       bool referenced() const { return bits & (2u); }
       void set_referenced() { bits |= (2u); }
       void clear_referenced() { bits &= ~(2u); }
+      bool deleted() { return bits & (4u); }
+      void set_deleted() { bits |= (4u); }
+      void clear_deleted() { bits &= ~(4u); }
    };
    static_assert(sizeof(TaggedPayload) == sizeof(Payload) + 1, "!!!");
    DistributedCounter<> total_lookups = 0;
@@ -852,6 +856,11 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       insert_hot_partition(strip_off_partition_bit(k), v, dirty, referenced);
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
    }
+
+   void admit_delete_mark_element(Key k) {
+      insert_hot_partition_deleted_mark(strip_off_partition_bit(k));
+      hot_partition_size_bytes += sizeof(Key) + sizeof(kDeletedBits);
+   }
    
    bool should_migrate() {
       if (lazy_migration) {
@@ -998,33 +1007,6 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       }
    }
 
-
-   bool lookup_internal(Key k, Payload& v)
-   {
-      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
-      ++total_lookups;
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
-      u8 key_bytes[sizeof(Key)];
-      TaggedPayload tp;
-      // try hot partition first
-      auto hot_key = k;
-      
-      auto old_miss = WorkerCounters::myCounters().io_reads.load();
-      auto res = hot_btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
-         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
-         }) ==
-            OP_RESULT::OK;
-      auto new_miss = WorkerCounters::myCounters().io_reads.load();
-      assert(new_miss >= old_miss);
-      if (old_miss == new_miss) {
-         btree_buffer_hit++;
-      } else {
-         btree_buffer_miss += new_miss - old_miss;
-      }
-      return res;
-   }
-
    bool lookup_internal(Key k, Payload& v, LockGuardProxy & g)
    {
       leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
@@ -1035,19 +1017,28 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       // try hot partition first
       auto hot_key = tag_with_hot_bit(k);
       uint64_t old_miss, new_miss;
+      bool deleted = false;
       OLD_HIT_STAT_START;
       bool mark_dirty = false;
       auto res = hot_btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
-         TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
-         if (tp->referenced() == false) {
-            tp->set_referenced();
-            mark_dirty = utils::RandomGenerator::getRandU64(0, 100) < 10;
+         if (payload_length == 1) {
+            deleted = true;
+            assert(*((unsigned char *) payload) == kDeletedBits);
+         } else {
+            TaggedPayload *tp =  const_cast<TaggedPayload*>(reinterpret_cast<const TaggedPayload*>(payload));
+            if (tp->referenced() == false) {
+               tp->set_referenced();
+               mark_dirty = utils::RandomGenerator::getRandU64(0, 100) < 10;
+            }
+            memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
          }
-         memcpy(&v, tp->payload.value, sizeof(tp->payload)); 
          }, mark_dirty) ==
             OP_RESULT::OK;
       OLD_HIT_STAT_END;
       //hot_tree_ios += new_miss - old_miss;
+      if (deleted) {
+         return false;
+      }
       if (res) {
          //++lookups_hit_top;
          return res;
@@ -1164,6 +1155,16 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       HIT_STAT_END;
    }
 
+   void insert_hot_partition_deleted_mark(Key k) {
+      u8 key_bytes[sizeof(Key)];
+      Key key = tag_with_hot_bit(k);
+      hot_partition_item_count++;
+      HIT_STAT_START;
+      auto op_res = hot_btree.insert(key_bytes, fold(key_bytes, key), reinterpret_cast<u8*>(const_cast<unsigned char *>(&kDeletedBits)), sizeof(kDeletedBits));
+      assert(op_res == OP_RESULT::OK);
+      HIT_STAT_END;
+   }
+
    void insert_cold_partition(Key k, Payload & v) {
       u8 key_bytes[sizeof(Key)];
       Key key = tag_with_cold_bit(k);
@@ -1182,7 +1183,40 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       if (inclusive) {
          admit_element(k, v, true, false);
       } else {
-         admit_element(k, v);
+         admit_element(k, v, true, false);
+      }
+   }
+
+   bool remove([[maybe_unused]] Key k) {
+      LockGuardProxy g(&lock_table, k);
+      while (g.write_lock() == false);
+      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      u8 key_bytes[sizeof(Key)];
+      auto hot_key = tag_with_hot_bit(k);
+      bool deleted = false;
+      HIT_STAT_START;
+      auto op_res = hot_btree.lookup(key_bytes, fold(key_bytes, hot_key), [&](const u8* payload, u16 payload_length __attribute__((unused)) ) { 
+         if (payload_length == 1) {
+            assert(*(unsigned char*)payload == kDeletedBits);
+            deleted = true;
+         }
+         });
+      HIT_STAT_END;
+      if (deleted == true) {
+         return true;
+      } else {
+         if (op_res == OP_RESULT::NOT_FOUND) {
+            admit_delete_mark_element(k);
+         } else if (op_res == OP_RESULT::OK) {
+            op_res = hot_btree.remove(key_bytes, fold(key_bytes, k));
+            hot_partition_item_count--;
+            assert(op_res == OP_RESULT::OK);
+            hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
+            admit_delete_mark_element(k);
+         } else {
+            ensure(false);
+         }
+         return true;
       }
    }
 
@@ -1195,16 +1229,23 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
+      bool deleted = false;
       HIT_STAT_START;
       auto op_res = hot_btree.updateSameSize(key_bytes, fold(key_bytes, hot_key), [&](u8* payload, u16 payload_length __attribute__((unused)) ) {
-         TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
-         tp->set_referenced();
-         tp->set_modified();
-         memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+         if (payload_length == 1) {
+            assert(*(unsigned char*)(payload) == kDeletedBits);
+            deleted = true;
+         } else {
+            TaggedPayload *tp =  reinterpret_cast<TaggedPayload*>(payload);
+            tp->set_referenced();
+            tp->set_modified();
+            memcpy(tp->payload.value, &v, sizeof(tp->payload)); 
+         }
       }, Payload::wal_update_generator);
       HIT_STAT_END;
       hot_tree_ios += new_miss - old_miss;
-      if (op_res == OP_RESULT::OK) {
+
+      if (op_res == OP_RESULT::OK || deleted) {
          ++lookups_hit_top;
          return;
       }

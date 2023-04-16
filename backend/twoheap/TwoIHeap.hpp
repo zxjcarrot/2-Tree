@@ -584,7 +584,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       if (inclusive) {
          admit_element(k, v, true, false);
       } else {
-         admit_element(k, v);
+         admit_element(k, v, true, false);
       }
    }
 
