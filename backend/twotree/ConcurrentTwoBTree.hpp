@@ -529,6 +529,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> hot_partition_size_bytes;
    DistributedCounter<> scan_ops;
    DistributedCounter<> io_reads_scan;
+   alignas(64) std::atomic<uint64_t> bp_dirty_page_flushes_snapshot = 0;
    alignas(64) std::atomic<uint64_t> hot_partition_capacity_bytes;
    // alignas(64) std::size_t hot_partition_size_bytes = 0;
    // alignas(64) std::size_t scan_ops = 0;
@@ -626,6 +627,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       scan_ops = 0;
       io_reads = 0;
       eviction_bounding_time = eviction_bounding_n = 0;
+      bp_dirty_page_flushes_snapshot.store(this->buf_mgr->dirty_page_flushes.load());
    }
 
    static std::size_t btree_entries(leanstore::storage::btree::BTreeInterface& btree, std::size_t & pages) {
@@ -991,6 +993,7 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
 
    void set_buffer_manager(storage::BufferManager * buf_mgr) { 
       this->buf_mgr = buf_mgr;
+      bp_dirty_page_flushes_snapshot.store(this->buf_mgr->dirty_page_flushes.load());
    }
 
    bool lookup(Key k, Payload & v) {
@@ -1336,6 +1339,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
    }
 
    void report([[maybe_unused]] u64 entries, u64 pages) override {
+      assert(this->buf_mgr->dirty_page_flushes >= this->bp_dirty_page_flushes_snapshot);
+      auto io_writes = this->buf_mgr->dirty_page_flushes - this->bp_dirty_page_flushes_snapshot;
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
       std::size_t hot_btree_pages = 0;
@@ -1356,8 +1361,8 @@ struct ConcurrentTwoBTreeAdapter : StorageInterface<Key, Payload> {
       double btree_hit_rate = btree_buffer_hit / (btree_buffer_hit + btree_buffer_miss + 1.0);
       std::cout << "BTree buffer hits/misses " <<  btree_buffer_hit << "/" << btree_buffer_miss << std::endl;
       std::cout << "BTree buffer hit rate " <<  btree_hit_rate << " miss rate " << (1 - btree_hit_rate) << std::endl;
-      std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
-      std::cout << total_lookups<< " lookups, " << io_reads.get() << " ios, " << io_reads / (total_lookups + 0.00) << " ios/lookup, " << lookups_hit_top << " lookup hit top" << " hot_tree_ios " << hot_tree_ios<< " ios/tophit " << hot_tree_ios / (lookups_hit_top + 0.00)  << std::endl;
+      std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << " io_rws/eviction " << (eviction_io_reads + io_writes) / (eviction_items  + 1.0) << std::endl;
+      std::cout << total_lookups<< " lookups, " << io_reads.get() << " i/o reads, " << io_writes << " i/o writes, " << io_reads / (total_lookups + 0.00) << " i/o reads/lookup, "  << (io_reads + io_writes) / (total_lookups + 0.00) << " ios/lookup, " << lookups_hit_top << " lookup hit top" << " hot_tree_ios " << hot_tree_ios<< " ios/tophit " << hot_tree_ios / (lookups_hit_top + 0.00)  << std::endl;
       std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations, "<< failed_upward_migrations << " failed_upward_migrations" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01) << std::endl;
       std::cout << "Average eviction bounding time " << eviction_bounding_time / (eviction_bounding_n + 1) << std::endl;

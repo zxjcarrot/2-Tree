@@ -5,7 +5,7 @@ SLEEP_COUNT=20
 TUPLE_COUNT=100000000
 WORKERS=20
 
-for dram_budget in 3.125 6.25 12.5 25 50
+for dram_budget in 3.125 6.25 12.5 25
 do
 run_time=$RUNTIME
 log_file="1btree_ycsb_zipf_dram_${dram_budget}.log"

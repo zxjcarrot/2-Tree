@@ -327,6 +327,8 @@ OP_RESULT LinearHashTable::lookupForUpdate(u8* key, u16 key_length, std::functio
                Swip<LinearHashingNode>& c_swip = target_guard->overflow;
                pp_guard = std::move(target_guard);
                target_guard = HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::EXCLUSIVE);
+               pp_guard.toExclusive();
+               target_guard.toExclusive();
 
                s32 slot_in_node = target_guard->find(key, key_length);
                if (slot_in_node != -1) {

@@ -68,7 +68,15 @@ struct BTreeVSAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> btree_buffer_hit = 0;
    DistributedCounter<> scan_ops = 0;
    DistributedCounter<> io_reads_scan = 0;
+   alignas(64) std::atomic<uint64_t> bp_dirty_page_flushes_snapshot = 0;
    DTID dt_id;
+   leanstore::storage::BufferManager * buf_mgr = nullptr;
+
+   void set_buffer_manager(storage::BufferManager * buf_mgr) override { 
+      this->buf_mgr = buf_mgr;
+      bp_dirty_page_flushes_snapshot.store(this->buf_mgr->dirty_page_flushes.load());
+   }
+
    BTreeVSAdapter(leanstore::storage::btree::BTreeInterface& btree, DTID dt_id = -1) : btree(btree), dt_id(dt_id) {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
    }
@@ -78,6 +86,7 @@ struct BTreeVSAdapter : StorageInterface<Key, Payload> {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
       io_reads_scan = scan_ops = 0;
       io_reads = 0;
+      bp_dirty_page_flushes_snapshot.store(this->buf_mgr->dirty_page_flushes.load());
    }
 
    bool lookup(Key k, Payload& v) override
@@ -154,6 +163,8 @@ struct BTreeVSAdapter : StorageInterface<Key, Payload> {
    }
 
    void report(u64 entries, u64 pages) override {
+      assert(this->buf_mgr->dirty_page_flushes >= this->bp_dirty_page_flushes_snapshot);
+      auto io_writes = this->buf_mgr->dirty_page_flushes - this->bp_dirty_page_flushes_snapshot;
       assert(io_reads_now >= io_reads_snapshot);
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
@@ -165,7 +176,7 @@ struct BTreeVSAdapter : StorageInterface<Key, Payload> {
       double btree_hit_rate = btree_buffer_hit / (btree_buffer_hit + btree_buffer_miss + 1.0);
       std::cout << "BTree buffer hits/misses " <<  btree_buffer_hit << "/" << btree_buffer_miss << std::endl;
       std::cout << "BTree buffer hit rate " <<  btree_hit_rate << " miss rate " << (1 - btree_hit_rate) << std::endl;
-      std::cout << total_lookups<< " lookups, " << io_reads.get() << " ios, " << io_reads / (total_lookups + 0.00) << " ios/lookup" << std::endl;
+      std::cout << total_lookups<< " lookups, " << io_reads.get() << " i/o reads, " << io_writes << " i/o writes, " << io_reads / (total_lookups + 0.00) << " i/o reads/lookup, " <<  (io_reads + io_writes) / (total_lookups + 0.00) << " ios/lookup" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01);
    }
 };

@@ -1,13 +1,16 @@
 top_component_dram_ratio=0.8
 EXEC=/ssd1/xinjing/2-Tree/build/frontend/ycsb_zipf
-RUNTIME=4000
+RUNTIME=3000
 SLEEP_COUNT=5
 TUPLE_COUNT=100000000
 
 
-for dram_budget in 5 10 20 40
+for dram_budget in 3.125 6.25 12.5 25
 do
 run_time=$RUNTIME
+if (( $(echo "$dram_budget > 12.5" |bc -l) )); then
+    run_time=400
+fi
 log_file="2hash_ycsb_zipf_dram_${dram_budget}_exclusive.log"
 # empty log file
 cat /dev/null > $log_file
@@ -22,9 +25,12 @@ done
 done
 done
 
-for dram_budget in 5 10 20 40
+for dram_budget in 3.125 6.25 12.5 25
 do
 run_time=$RUNTIME
+if (( $(echo "$dram_budget > 12.5" |bc -l) )); then
+    run_time=400
+fi
 log_file="2hash_ycsb_zipf_dram_${dram_budget}_inclusive.log"
 # empty log file
 cat /dev/null > $log_file

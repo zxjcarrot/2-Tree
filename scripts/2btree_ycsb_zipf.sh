@@ -5,11 +5,11 @@ SLEEP_COUNT=20
 TUPLE_COUNT=100000000
 WORKERS=20
 
-for dram_budget in 25 50
+for dram_budget in 3.125 6.25 12.5 25
 do
 run_time=$RUNTIME
 if (( $(echo "$dram_budget > 12.5" |bc -l) )); then
-    run_time=400
+    run_time=800
 fi
 log_file="2btree_ycsb_zipf_dram_${dram_budget}.log"
 # empty log file

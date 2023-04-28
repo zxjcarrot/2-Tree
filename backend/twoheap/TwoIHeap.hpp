@@ -54,7 +54,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
    DTID dt_id;
 
    OptimisticLockTable lock_table;
-   
+   alignas(64) std::atomic<uint64_t> bp_dirty_page_flushes_snapshot = 0;
    DistributedCounter<> hot_partition_size_bytes;
    DistributedCounter<> scan_ops;
    DistributedCounter<> io_reads_scan;
@@ -150,6 +150,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       scan_ops = 0;
       io_reads = 0;
       eviction_bounding_time = eviction_bounding_n = 0;
+      bp_dirty_page_flushes_snapshot.store(this->buf_mgr->dirty_page_flushes.load());
    }
 
    void evict_all() override {
@@ -451,6 +452,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
 
    void set_buffer_manager(storage::BufferManager * buf_mgr) { 
       this->buf_mgr = buf_mgr;
+      bp_dirty_page_flushes_snapshot.store(this->buf_mgr->dirty_page_flushes.load());
    }
 
    bool lookup(Key k, Payload & v) {
@@ -705,6 +707,8 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
    }
 
    void report([[maybe_unused]] u64, u64) override {
+      assert(this->buf_mgr->dirty_page_flushes >= this->bp_dirty_page_flushes_snapshot);
+      auto io_writes = this->buf_mgr->dirty_page_flushes - this->bp_dirty_page_flushes_snapshot;
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::string hot_iheap_stats = iheap_stat("Hot", hot_iheap, sizeof(Key) + sizeof(TaggedPayload), (sizeof(Key) + sizeof(leanstore::storage::heap::HeapTupleId)));
       std::string cold_iheap_stats = iheap_stat("Cold", cold_iheap, sizeof(Key) + sizeof(Payload), (sizeof(Key) + sizeof(leanstore::storage::heap::HeapTupleId)));
@@ -715,6 +719,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       std::cout << "IHeap buffer hits/misses " <<  heap_buffer_hit << "/" << heap_buffer_miss << std::endl;
       std::cout << "IHeap buffer hit rate " <<  iheap_hit_rate << " miss rate " << (1 - iheap_hit_rate) << std::endl;
       std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
+      std::cout << total_lookups<< " lookups, " << io_reads.get() << " i/o reads, " << io_writes << " i/o writes, " << io_reads / (total_lookups + 0.00) << " i/o reads/lookup, "  << (io_reads + io_writes) / (total_lookups + 0.00) << " ios/lookup, " << lookups_hit_top << " lookup hit top" << " hot_iheap_ios " << hot_iheap_ios<< " ios/tophit " << hot_iheap_ios / (lookups_hit_top + 0.00) << " io_rws/eviction " << (eviction_io_reads + io_writes) / (eviction_items  + 1.0)  << std::endl;
       std::cout << total_lookups<< " lookups, " << io_reads.get() << " ios, " << io_reads / (total_lookups + 0.00) << " ios/lookup, " << lookups_hit_top << " lookup hit top" << " hot_iheap_ios " << hot_iheap_ios<< " ios/tophit " << hot_iheap_ios / (lookups_hit_top + 0.00)  << std::endl;
       std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations, "<< failed_upward_migrations << " failed_upward_migrations" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01) << std::endl;

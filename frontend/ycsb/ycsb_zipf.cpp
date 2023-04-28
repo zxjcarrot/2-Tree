@@ -631,7 +631,6 @@ int main(int argc, char** argv)
       // Shutdown threads
       sleep(FLAGS_run_for_seconds * 0.8);
       // cout << "Clearing IO stats after reaching steady state" << endl;
-      // table.clear_io_stats();
       sleep(FLAGS_run_for_seconds * 0.2);
       keep_running = false;
       while (running_threads_counter) {
