@@ -2,11 +2,12 @@
 [2-Tree](https://www.cidrdb.org/cidr2023/papers/p57-zhou.pdf) explores the idea of seprating hot records from cold ones in tree structures so as to improve the main memory utilization of buffer pool. The architecture breaks a single B-tree structure into two and migrates records between them.  The migration protocol ensures hot records are clusterted tightly in the hot tree so that it gets majority of the accesses. This results in increased memory utilization.  The two tree structures logically expose the same interface as a single tree structure. We also generalized 2-Tree to a N-tree using LSM-tree by adding upward data migration to a LSM-tree. 
 ## Cite
 ```
-@article{zhou11two,
-  title={Two is Better Than One: The Case for 2-Tree for Skewed Data Sets},
-  author={Zhou, Xinjing and Yu, Xiangyao and Graefe, Goetz and Stonebraker, Michael},
-  booktitle={CIDR},
-  year={2023}
+@inproceedings{2-tree,
+  author       = {Zhou, Xinjing and Yu, Xiangyao and Graefe, Goetz and Stonebraker, Michael},
+  title        = {Two is Better Than One: The Case for 2-Tree for Skewed Data Sets},
+  booktitle    = {13th Conference on Innovative Data Systems Research, {CIDR} 2023,
+                  Amsterdam, Online Proceedings},
+  year         = {2023}
 }
 ```
 # LeanStore
