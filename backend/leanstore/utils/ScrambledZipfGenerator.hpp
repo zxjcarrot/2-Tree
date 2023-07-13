@@ -20,6 +20,7 @@ class ScrambledZipfGenerator: public Generator
    // [min, max)
    ScrambledZipfGenerator(u64 min, u64 max, double theta) : min(min), max(max), n(max - min), zipf_generator((max - min), theta) {}
    u64 rand() override;
+   u64 rand(u64);
 };
 // -------------------------------------------------------------------------------------
 }  // namespace utils

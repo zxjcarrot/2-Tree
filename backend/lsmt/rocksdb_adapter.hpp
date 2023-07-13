@@ -25,7 +25,9 @@ struct RocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
    bool wal;
    u64 lazy_migration_threshold = 1;
    std::size_t total_lookups = 0;
-   RocksDBAdapter(bool use_row_cache, const std::string & db_dir, double row_cache_memory_budget_gib, double block_cache_memory_budget_gib, bool wal = false, int lazy_migration_sampling_rate = 100): lazy_migration(lazy_migration_sampling_rate < 100), wal(wal) {
+   DistributedCounter<> lookups = 0;
+   DistributedCounter<> level_accessed = 0;
+   RocksDBAdapter(bool use_row_cache, bool populate_block_cache_for_compaction_and_flush, const std::string & db_dir, double row_cache_memory_budget_gib, double block_cache_memory_budget_gib, bool wal = false, int lazy_migration_sampling_rate = 100): lazy_migration(lazy_migration_sampling_rate < 100), wal(wal) {
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
       }
@@ -63,7 +65,13 @@ struct RocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       rocksdb::BlockBasedTableOptions table_options;
       table_options.block_size = 16 * 1024;
       table_options.cache_index_and_filter_blocks = true;
-      table_options.prepopulate_block_cache = rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushOnly;
+      if (populate_block_cache_for_compaction_and_flush) {
+         table_options.prepopulate_block_cache = rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushAndCompaction;
+         std::cout << "RocksDB prepopulate block cache for both memtable flush and compaction" << std::endl;
+      } else {
+         table_options.prepopulate_block_cache = rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushOnly;
+         std::cout << "RocksDB prepopulate block cache for memtable flush only" << std::endl;
+      }
       table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
       table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 5, true);
       
@@ -97,6 +105,7 @@ struct RocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
    }
    bool lookup(Key k, Payload& v) {
       ++total_lookups;
+      ++lookups;
       rocksdb::ReadOptions options;
       u8 key_bytes[sizeof(Key)];
       auto key_len = leanstore::fold(key_bytes, k);
@@ -105,6 +114,9 @@ struct RocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       assert(status == rocksdb::Status::OK());
       assert(sizeof(v) == value.size());
       memcpy(&v, value.data(), value.size());
+      assert(status.GetLastLevel() != -2);
+      auto level = status.GetLastLevel() + 1; // which level satisfied this Get operation 
+      level_accessed += level;
       if (status == rocksdb::Status::OK()) {
          // if (should_migrate()) {
          //    put(k, v);
@@ -192,5 +204,19 @@ struct RocksDBAdapter : public leanstore::StorageInterface<Key, Payload> {
       std::cout << "perf stat " << rocksdb::get_perf_context()->ToString() << std::endl;
       std::cout << "io stat " << rocksdb::get_iostats_context()->ToString() << std::endl;
       std::cout << "Stats "<< options.statistics->ToString() << std::endl;
+   }
+
+   std::vector<std::string> stats_column_names() override { 
+      return {"hit_rate", "avg_lvl"}; 
+   }
+
+   std::vector<std::string> stats_columns() override { 
+      auto hits = options.statistics->getAndResetTickerCount(rocksdb::Tickers::BLOCK_CACHE_DATA_HIT);
+      auto misses = options.statistics->getAndResetTickerCount(rocksdb::Tickers::BLOCK_CACHE_DATA_MISS);
+      auto levels = level_accessed.get();
+      auto gets = lookups.get();
+      level_accessed.store(0);
+      lookups.store(0);
+      return {std::to_string(hits / (0.0 + hits + misses)), std::to_string(levels / (gets + 0.0))};
    }
 };

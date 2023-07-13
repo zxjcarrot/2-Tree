@@ -31,7 +31,9 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
    DistributedCounter<> hot_record_up_migrations = 0;
    DistributedCounter<> hot_up_migrations = 200;
    DistributedCounter<> total_lookups = 0;
-   UpMigrationRocksDBAdapter(const std::string & db_dir,  double block_cache_memory_budget_gib, bool wal = false, int lazy_migration_sampling_rate = 100): lazy_migration(lazy_migration_sampling_rate < 100), wal(wal) {
+   DistributedCounter<> lookups = 0;
+   DistributedCounter<> level_accessed = 0;
+   UpMigrationRocksDBAdapter(const std::string & db_dir, bool populate_block_cache_for_compaction_and_flush, double block_cache_memory_budget_gib, bool wal = false, int lazy_migration_sampling_rate = 100): lazy_migration(lazy_migration_sampling_rate < 100), wal(wal) {
       if (lazy_migration_sampling_rate < 100) {
          lazy_migration_threshold = lazy_migration_sampling_rate;
       }
@@ -58,7 +60,13 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
       rocksdb::BlockBasedTableOptions table_options;
       table_options.block_size = 16 * 1024;
       table_options.cache_index_and_filter_blocks = true;
-      table_options.prepopulate_block_cache = rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushOnly;
+      if (populate_block_cache_for_compaction_and_flush) {
+         table_options.prepopulate_block_cache = rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushAndCompaction;
+         std::cout << "RocksDB prepopulate block cache for both memtable flush and compaction" << std::endl;
+      } else {
+         table_options.prepopulate_block_cache = rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushOnly;
+         std::cout << "RocksDB prepopulate block cache for memtable flush only" << std::endl;
+      }
       table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
       table_options.block_cache = rocksdb::NewLRUCache(block_cache_size, 5, true, 0.9);
       options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
@@ -114,6 +122,7 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
 
    bool lookup_internal(Key k, Payload& v, leanstore::LockGuardProxy & g, bool from_update = false) {
       ++total_lookups;
+      ++lookups;
       rocksdb::ReadOptions options;
       u8 key_bytes[sizeof(Key)];
       auto key_len = leanstore::fold(key_bytes, k);
@@ -124,6 +133,10 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
       assert(status == rocksdb::Status::OK());
       assert(sizeof(v) == value.size());
       memcpy(&v, value.data(), value.size());
+      assert(status.GetLastLevel() != -2);
+      auto level = status.GetLastLevel() + 1; // which level satisfied this Get operation 
+      level_accessed += level;
+
       if (status == rocksdb::Status::OK()) {
          bool io = rocksdb::get_perf_context()->block_read_count - old_block_read_count > 0;
          if (from_update == false) {
@@ -137,7 +150,8 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
                }
             } else {
                // no io, make sure we place the hottest data near the top of the LSM hiearchy
-               if (leanstore::utils::RandomGenerator::getRandU64(0, hot_up_migrations) < 1) {
+               // if record is retrieved from memtables (level == -1), skip migration
+               if (level != -1 && leanstore::utils::RandomGenerator::getRandU64(0, hot_up_migrations) < 1) {
                   if (g.upgrade_to_write_lock() == false) { // obtain a write lock for migration
                      return false;
                   }
@@ -234,5 +248,19 @@ struct UpMigrationRocksDBAdapter : public leanstore::StorageInterface<Key, Paylo
       std::cout << "cold up_migrations " << up_migrations << std::endl;
       std::cout << "hot up_migrations " << hot_record_up_migrations << std::endl;
       std::cout << "Stats "<< options.statistics->ToString() << std::endl;
+   }
+
+   std::vector<std::string> stats_column_names() override { 
+      return {"hit_rate", "avg_lvl"}; 
+   }
+
+   std::vector<std::string> stats_columns() override { 
+      auto hits = options.statistics->getAndResetTickerCount(rocksdb::Tickers::BLOCK_CACHE_DATA_HIT);
+      auto misses = options.statistics->getAndResetTickerCount(rocksdb::Tickers::BLOCK_CACHE_DATA_MISS);
+      auto levels = level_accessed.get();
+      auto gets = lookups.get();
+      level_accessed.store(0);
+      lookups.store(0);
+      return {std::to_string(hits / (0.0 + hits + misses)), std::to_string(levels / (gets + 0.0))};
    }
 };

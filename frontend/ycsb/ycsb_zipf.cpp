@@ -57,6 +57,7 @@ DEFINE_bool(verify, false, "");
 DEFINE_string(index_type, "BTree", "");
 DEFINE_bool(lsmt_use_record_cache, false, "use record cache?");
 DEFINE_string(lsmt_db_path, "./", "directory for storing lsm-tree files");
+DEFINE_bool(lsmt_populate_block_cache_for_compaction_and_flush, false, "prepopulate block cache during memtable flush and compaction?");
 DEFINE_uint32(cached_btree, 0, "");
 DEFINE_uint32(cached_btree_node_size_type, 0, "");
 DEFINE_bool(inclusive_cache, false, "");
@@ -334,9 +335,9 @@ int main(int argc, char** argv)
    } else if (FLAGS_index_type == kIndexTypeTrieBTree) {
       adapter.reset(new BTreeTrieCachedVSAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, top_tree_size_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexTypeLSMT) {
-      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_use_record_cache, FLAGS_lsmt_db_path, top_tree_size_gib, FLAGS_dram_gib, false, FLAGS_cache_lazy_migration));
+      adapter.reset(new RocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_use_record_cache, FLAGS_lsmt_populate_block_cache_for_compaction_and_flush, FLAGS_lsmt_db_path, top_tree_size_gib, FLAGS_dram_gib, false, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeUpLSMT) {
-      adapter.reset(new UpMigrationRocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, FLAGS_dram_gib + top_tree_size_gib, false, FLAGS_cache_lazy_migration));
+      adapter.reset(new UpMigrationRocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, FLAGS_lsmt_populate_block_cache_for_compaction_and_flush, FLAGS_dram_gib + top_tree_size_gib, false, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2LSMT) {
       adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexType2LSMT_CF){
@@ -353,10 +354,10 @@ int main(int argc, char** argv)
       assert(FLAGS_index_type == kIndexTypeAntiCacheB);
       adapter.reset(new AntiCacheBTreeAdapter<YCSBKey, YCSBPayload>(*btree2_ptr, top_tree_size_gib));
    }
-
+   auto adapter_ptr = adapter.get();
    db.registerConfigEntry("ycsb_read_ratio", FLAGS_ycsb_read_ratio);
    db.registerConfigEntry("ycsb_target_gib", FLAGS_target_gib);
-   db.startProfilingThread();
+   db.startProfilingThread(adapter_ptr->stats_column_names(), [adapter_ptr](){ return adapter_ptr->stats_columns(); });
    adapter->set_buffer_manager(db.buffer_manager.get());
    // -------------------------------------------------------------------------------------
    auto& table = *adapter;

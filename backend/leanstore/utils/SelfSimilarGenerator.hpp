@@ -29,6 +29,10 @@ class SelfSimilarGenerator: public Generator
    u64 rand() override {
       return distribution(generator);
    }
+
+   u64 rand(u64) override {
+      return distribution(generator);
+   }
 };
 // -------------------------------------------------------------------------------------
 }  // namespace utils

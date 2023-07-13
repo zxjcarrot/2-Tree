@@ -65,7 +65,7 @@ class LeanStore
    storage::BufferManager& getBufferManager() { return *buffer_manager; }
    cr::CRManager& getCRManager() { return *cr_manager; }
    // -------------------------------------------------------------------------------------
-   void startProfilingThread();
+   void startProfilingThread(const std::vector<std::string> & additional_columns = {}, std::function<std::vector<string>()> func = [](){ return std::vector<std::string>{}; });
    void persist();
    void restore();
    // -------------------------------------------------------------------------------------

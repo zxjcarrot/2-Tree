@@ -67,6 +67,7 @@ class Generator {
 public:
    virtual ~Generator() {}
    virtual u64 rand()=0;
+   virtual u64 rand(u64)=0;
 };
 
 // -------------------------------------------------------------------------------------

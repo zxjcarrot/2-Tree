@@ -19,6 +19,8 @@ struct StorageInterface {
    virtual void clear_io_stats() {}
    virtual void evict_all() {}
    virtual void set_buffer_manager(storage::BufferManager *) {}
+   virtual std::vector<std::string> stats_column_names() { return {}; }
+   virtual std::vector<std::string> stats_columns() { return {}; }
 };
 
 
