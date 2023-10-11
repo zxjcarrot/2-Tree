@@ -1,3 +1,13 @@
+# TieredIndexing
+Tiered Indexing is a general way to improve the memory utilization of buffer-managed data structures including B+tree, Hashing, Heap, and Log-Structured-Merge Tree. The philosophy of Tiered Indexing is to maintain a hierarchy of homogeneous index structures with different hotness that share a buffer pool. Tiered Indexing actively performs efficient inter-tier record migration based on record hotness. 
+
+Pointers to tiered data structures:
+2B+tree: `backend/twotree/ConcurrentTwoBTree.hpp`
+2Hash: `backend/twohash/TwoHash.hpp`
+2Heap: `backend/twoheap/TwoIHeap.hpp`
+BiLSM-tree: `backend/lsmt/bidirectional_migration_rocksdb_adapter.hpp`
+
+
 # LeanStore
 [LeanStore](https://db.in.tum.de/~leis/papers/leanstore.pdf) is a high-performance OLTP storage engine optimized for many-core CPUs and NVMe SSDs. Our goal is to achieve performance comparable to in-memory systems when the data set fits into RAM, while being able to fully exploit the bandwidth of fast NVMe SSDs for large data sets. While LeanStore is currently a research prototype, we hope to make it usable in production in the future.
 
