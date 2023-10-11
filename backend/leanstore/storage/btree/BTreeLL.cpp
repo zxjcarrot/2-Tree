@@ -429,6 +429,38 @@ OP_RESULT BTreeLL::remove(u8* o_key, u16 o_key_length)
    jumpmuCatch() { ensure(false); }
 }
 // -------------------------------------------------------------------------------------
+OP_RESULT BTreeLL::remove(u8* o_key, u16 o_key_length, bool no_merge)
+{
+   cr::Worker::my().walEnsureEnoughSpace(PAGE_SIZE * 1);
+   Slice key(o_key, o_key_length);
+   jumpmuTry()
+   {
+      BTreeExclusiveIterator iterator(*static_cast<BTreeGeneric*>(this));
+      auto ret = iterator.seekExact(key);
+      if (ret != OP_RESULT::OK) {
+         jumpmu_return ret;
+      }
+      Slice value = iterator.value();
+      if (FLAGS_wal) {
+         auto wal_entry = iterator.leaf.reserveWALEntry<WALRemove>(o_key_length);
+         wal_entry->type = WAL_LOG_TYPE::WALRemove;
+         wal_entry->key_length = o_key_length;
+         std::memcpy(wal_entry->payload, key.data(), key.length());
+         std::memcpy(wal_entry->payload + o_key_length, value.data(), value.length());
+         wal_entry.submit();
+      } else {
+         iterator.leaf.incrementGSN();
+      }
+      ret = iterator.removeCurrent();
+      ensure(ret == OP_RESULT::OK);
+      if (no_merge == false || iterator.currentLeafCount() <= 1) {
+         iterator.mergeIfNeeded();
+      }
+      jumpmu_return OP_RESULT::OK;
+   }
+   jumpmuCatch() { ensure(false); }
+}
+// -------------------------------------------------------------------------------------
 u64 BTreeLL::countEntries()
 {
    return BTreeGeneric::countEntries();

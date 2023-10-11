@@ -13,7 +13,7 @@ DEFINE_uint32(pp_threads, 1, "number of page provider threads");
 DEFINE_double(top_component_dram_ratio, 0.0, "");
 // -------------------------------------------------------------------------------------
 DEFINE_string(csv_path, "./log", "");
-DEFINE_bool(csv_truncate, false, "");
+DEFINE_bool(csv_truncate, true, "");
 DEFINE_string(ssd_path, "./leanstore", "");
 DEFINE_uint32(async_batch_size, 256, "");
 DEFINE_bool(trunc, false, "Truncate file");

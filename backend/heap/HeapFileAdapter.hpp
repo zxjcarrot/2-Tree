@@ -6,7 +6,8 @@
 #include "leanstore/storage/btree/core/WALMacros.hpp"
 #include "ART/ARTIndex.hpp"
 #include "stx/btree_map.h"
-#include "leanstore/utils/DistributedCounter.hpp"
+#include "common/DistributedCounter.hpp"
+#include "common/utils.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore

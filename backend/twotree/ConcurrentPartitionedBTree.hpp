@@ -5,6 +5,7 @@
 #include "leanstore/storage/btree/BTreeLL.hpp"
 #include "leanstore/storage/btree/core/WALMacros.hpp"
 #include "interface/StorageInterface.hpp"
+#include "common/utils.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 static constexpr int max_eviction_workers = 4;

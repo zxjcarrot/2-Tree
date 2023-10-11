@@ -127,14 +127,6 @@ private:
     static constexpr uint64_t kWriterIdMask = 0xffffffff;
 };
 
-class DeferCode {
-public:
-	DeferCode(std::function<void()> code): code(code) {}
-	~DeferCode() { code(); }
-private:
-	std::function<void()> code;
-};
-
 enum class RemovePredicateResult{ GOOD = 0, VALUE_HAS_OTHER_REFERENCE, VALUE_NOT_SATISFYING_PREDICATE};
 enum class RemoveResult{ GOOD = 0, KEY_NOT_FOUND, VALUE_HAS_OTHER_REFERENCE, VALUE_NOT_SATISFYING_PREDICATE};
 

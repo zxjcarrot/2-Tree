@@ -32,7 +32,7 @@ namespace rs = rapidjson;
 namespace leanstore
 {
 // -------------------------------------------------------------------------------------
-LeanStore::LeanStore()
+LeanStore::LeanStore(double effective_dram_gib): effective_dram_gib(effective_dram_gib)
 {
    LeanStore::addStringFlag("ssd_path", &FLAGS_ssd_path);
    if (FLAGS_recover_file != "./leanstore.json") {
@@ -68,7 +68,7 @@ LeanStore::LeanStore()
    }
    ensure(fcntl(ssd_fd, F_GETFL) != -1);
    // -------------------------------------------------------------------------------------
-   buffer_manager = make_unique<storage::BufferManager>(ssd_fd);
+   buffer_manager = make_unique<storage::BufferManager>(ssd_fd, effective_dram_gib);
    BMC::global_bf = buffer_manager.get();
    // -------------------------------------------------------------------------------------
    DTRegistry::global_dt_registry.registerDatastructureType(0, storage::btree::BTreeLL::getMeta());
@@ -121,14 +121,14 @@ std::string exec_cmd(const char* command) {
 }
 
 // -------------------------------------------------------------------------------------
-void LeanStore::startProfilingThread(const std::vector<std::string> & additional_columns, std::function<std::vector<string>()> func)
+void LeanStore::startProfilingThread(const std::vector<std::string> & additional_columns, std::function<std::vector<string>()> func, const string & results_csv_file_path)
 {
    double read_iops = 0;
    double write_iops = 0;
    double read_bw = 0;
    double write_bw = 0;
    double dev_util = 0;
-   std::thread profiling_thread([&, additional_columns, func]() {
+   std::thread profiling_thread([&, this, func](std::vector<std::string> addi_columns) {
       profiling::BMTable bm_table(*buffer_manager.get());
       profiling::DTTable dt_table(*buffer_manager.get());
       profiling::CPUTable cpu_table;
@@ -162,6 +162,11 @@ void LeanStore::startProfilingThread(const std::vector<std::string> & additional
       config_hash = configs_table.hash();
       // -------------------------------------------------------------------------------------
       u64 seconds = 0;
+      bool results_csv_header_written = false;
+      std::ofstream results_csv;
+      if (!results_csv_file_path.empty()) {
+         results_csv.open(results_csv_file_path, open_flags);
+      }
       while (bg_threads_keep_running) {
          for (u64 t_i = 0; t_i < tables.size(); t_i++) {
             tables[t_i]->next();
@@ -197,10 +202,18 @@ void LeanStore::startProfilingThread(const std::vector<std::string> & additional
             std::vector<variant<std::string, const char *, Table>> header_cells;
             std::vector<std::string> headers_original{"t", "TX P", "TX A", "TX C", "W MiB", "R MiB", "Instrs/TX", "Cycles/TX", "CPUs", "LLC-miss/TX", "WAL T", "WAL R G", "WAL W G",
                            "GCT Rounds", "Split/Merge", "RdRestarts", "IO Read/s", "IO Write/s", "Read BW(MB/s)", "Write BW(MB/s)", "IO Util(%)"};
-            header_cells.insert(header_cells.end(), additional_columns.begin(), additional_columns.end());
+            header_cells.insert(header_cells.end(), addi_columns.begin(), addi_columns.end());
             header_cells.insert(header_cells.end(), headers_original.begin(), headers_original.end());
             table.add_row(header_cells);
 
+            if (results_csv_header_written == false && !results_csv_file_path.empty()) {
+               results_csv_header_written = true;
+               results_csv << std::get<0>(header_cells[0]);
+               for (size_t i = 1; i < header_cells.size(); ++i) {
+                  results_csv << "," << std::get<0>(header_cells[i]);
+               }
+               results_csv << std::endl;
+            }
             std::vector<variant<std::string, const char *, Table>> data_cells;
             std::vector<std::string> data_original{std::to_string(seconds), cr_table.get("0", "tx"), cr_table.get("0", "tx_abort"), cr_table.get("0", "gct_committed_tx"),
                            bm_table.get("0", "w_mib"), bm_table.get("0", "r_mib"), std::to_string(instr_per_tx), std::to_string(cycles_per_tx),
@@ -214,12 +227,20 @@ void LeanStore::startProfilingThread(const std::vector<std::string> & additional
             for (size_t i = 0; i < data_original.size(); ++i) {
                data_cells.push_back(data_original[i]);
             }
+
+            if (!results_csv_file_path.empty()) {
+               results_csv << std::get<0>(data_cells[0]);
+               for (size_t i = 1; i < data_cells.size(); ++i) {
+                  results_csv << "," << std::get<0>(data_cells[i]);
+               }
+               results_csv << std::endl;
+            }
             table.add_row(data_cells);
             // -------------------------------------------------------------------------------------
-            table.format().width(10);
-            table.column(0 + additional_columns.size()).format().width(5);
-            table.column(1 + additional_columns.size()).format().width(12);
-            //table.column(15 + additional_columns.size()).format().width(12);
+            for (size_t i = 0; i < data_cells.size(); ++i) {
+               table.column(i).format().width(15);
+            }
+            
             // -------------------------------------------------------------------------------------
             auto print_table = [](tabulate::Table& table, std::function<bool(u64)> predicate) {
                std::stringstream ss;
@@ -241,22 +262,13 @@ void LeanStore::startProfilingThread(const std::vector<std::string> & additional
                print_table(table, [](u64 line_n) { return line_n == 4; });
             }
             // -------------------------------------------------------------------------------------
-            if (FLAGS_iostat_dev != "") {
-               std::string cmd = "iostat -x 1 2 -m | grep " + FLAGS_iostat_dev + " | tail -n 1 | awk '{print $2,$3,$4,$5,$16}'";
-               std::cout << cmd << std::endl;
-               std::stringstream cmd_result(exec_cmd(cmd.c_str()));
-               std::cout << cmd << "done" << std::endl;
-               cmd_result >> read_iops >> write_iops >> read_bw >> write_bw >> dev_util;
-            } else {
-               std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-            }
-
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             seconds += 1;
             std::locale::global(std::locale::classic());
          }
       }
       bg_threads_counter--;
-   });
+   }, additional_columns);
    bg_threads_counter++;
    profiling_thread.detach();
 }

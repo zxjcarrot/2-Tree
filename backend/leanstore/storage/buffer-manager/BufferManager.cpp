@@ -31,14 +31,13 @@ namespace leanstore
 {
 namespace storage
 {
-thread_local atomic<bool> BufferManager::this_thread_alloc_failed{false};
 // -------------------------------------------------------------------------------------
-BufferManager::BufferManager(s32 ssd_fd) : ssd_fd(ssd_fd)
+BufferManager::BufferManager(s32 ssd_fd, double effective_dram_gib) : ssd_fd(ssd_fd)
 {
    // -------------------------------------------------------------------------------------
    // Init DRAM pool
    {
-      dram_pool_size = FLAGS_dram_gib * 1024 * 1024 * 1024 / sizeof(BufferFrame);
+      dram_pool_size = effective_dram_gib * 1024 * 1024 * 1024 / sizeof(BufferFrame);
       const u64 dram_total_size = sizeof(BufferFrame) * (dram_pool_size + safety_pages);
       bfs = reinterpret_cast<BufferFrame*>(mmap(NULL, dram_total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
       madvise(bfs, dram_total_size, MADV_HUGEPAGE);
@@ -251,10 +250,6 @@ BufferFrame& BufferManager::nextBufferFrame(bool & hot_cold) {
 // returns a *write locked* new buffer frame
 BufferFrame& BufferManager::allocatePage(bool from_hot_partition)
 {
-   // if (from_hot_partition && hot_pages >= hot_pages_limit) {
-   //    jumpmu::jump();
-   //    this_thread_alloc_failed.store(true);
-   // }
    Partition * partition = nullptr;
    if (FLAGS_hot_cold_partition) {
       if (from_hot_partition) {
@@ -304,7 +299,6 @@ BufferFrame& BufferManager::allocatePage(bool from_hot_partition)
    // -------------------------------------------------------------------------------------
    if (from_hot_partition) {
       hot_pages++;
-      this_thread_alloc_failed.store(true);
    }
    return *free_bf;
 }

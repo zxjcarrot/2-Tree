@@ -7,7 +7,7 @@
 #include "ART/ARTIndex.hpp"
 #include "stx/btree_map.h"
 #include "leanstore/BTreeAdapter.hpp"
-#include "leanstore/utils/DistributedCounter.hpp"
+#include "common/DistributedCounter.hpp"
 #include "LockManager/LockManager.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
@@ -75,6 +75,8 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> upward_migrations = 0;
    DistributedCounter<> failed_upward_migrations = 0;
    DistributedCounter<> downward_migrations = 0;
+   uint64_t buffer_pool_background_writes_last = 0;
+   IOStats stats;
    u64 lazy_migration_threshold = 10;
    bool lazy_migration = false;
    struct alignas(1) TaggedPayload {
@@ -467,6 +469,12 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> eviction_count_down = kEvictionCheckInterval;
    void try_eviction() {
       if (cache_under_pressure()) {
+         DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+            auto new_reads = WorkerCounters::myCounters().io_reads.load();
+            if (new_reads > old_reads) {
+               stats.eviction_reads += new_reads - old_reads;
+            }
+         }, WorkerCounters::myCounters().io_reads.load());
          int steps = 10; // && cache_under_pressure()
          while (steps > 0) {
             evict_a_bunch();
@@ -526,6 +534,12 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
    bool lookup_internal(Key k, Payload& v, LockGuardProxy & g)
    {
       leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
+      DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+         auto new_reads = WorkerCounters::myCounters().io_reads.load();
+         if (new_reads > old_reads) {
+            stats.reads += new_reads - old_reads;
+         }
+      }, WorkerCounters::myCounters().io_reads.load());
       ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
       u8 key_bytes[sizeof(Key)];
@@ -686,6 +700,12 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       while (g.write_lock() == false);
       ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+         auto new_reads = WorkerCounters::myCounters().io_reads.load();
+         if (new_reads > old_reads) {
+            stats.reads += new_reads - old_reads;
+         }
+      }, WorkerCounters::myCounters().io_reads.load());
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
       HIT_STAT_START;
@@ -765,6 +785,12 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       LockGuardProxy g(&lock_table, k);
       while (g.write_lock() == false);
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+         auto new_reads = WorkerCounters::myCounters().io_reads.load();
+         if (new_reads > old_reads) {
+            stats.reads += new_reads - old_reads;
+         }
+      }, WorkerCounters::myCounters().io_reads.load());
       u8 key_bytes[sizeof(Key)];
       auto hot_key = tag_with_hot_bit(k);
       HIT_STAT_START;
@@ -884,6 +910,28 @@ struct TwoHashAdapter : StorageInterface<Key, Payload> {
       std::cout << total_lookups<< " lookups, " << io_reads.get() << " i/o reads, " << io_writes << " i/o writes, " << io_reads / (total_lookups + 0.00) << " i/o reads/lookup, "  << (io_reads + io_writes) / (total_lookups + 0.00) << " ios/lookup, " << lookups_hit_top << " lookup hit top" << " hot_ht_ios " << hot_ht_ios<< " ios/tophit " << hot_ht_ios / (lookups_hit_top + 0.00)  << std::endl;
       std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations, "<< failed_upward_migrations << " failed_upward_migrations" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01) << std::endl;
+   }
+
+   std::vector<std::string> stats_column_names() { return {"hot_pages", "down_mig", "io_r", "io_w", "io_ev"}; }
+   std::vector<std::string> stats_columns() { 
+      IOStats empty;
+      auto s = exchange_stats(empty);
+      return {std::to_string(buf_mgr->hot_pages.load()), 
+              std::to_string(downward_migrations.get()),
+              std::to_string(s.reads),
+              std::to_string(s.writes), 
+              std::to_string(s.eviction_reads)}; 
+   }
+
+   IOStats exchange_stats(IOStats s) { 
+      IOStats ret;
+      auto t = buffer_pool_background_writes_last;
+      buffer_pool_background_writes_last =  this->buf_mgr->dirty_page_flushes;
+      ret.reads = stats.reads;
+      ret.eviction_reads = stats.eviction_reads;
+      ret.writes = buffer_pool_background_writes_last - t;
+      stats = s;
+      return ret;
    }
 };
 

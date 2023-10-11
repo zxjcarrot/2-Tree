@@ -4,7 +4,7 @@ target_link_libraries(frontend leanstore)
 
 
 add_executable(ycsb_zipf ycsb/ycsb_zipf.cpp)
-target_link_libraries(ycsb_zipf leanstore Threads::Threads rocksdb tcmalloc)
+target_link_libraries(ycsb_zipf treeline leanstore Threads::Threads rocksdb tcmalloc)
 target_include_directories(ycsb_zipf PRIVATE ${SHARED_INCLUDE_DIRECTORY} ${CMAKE_DL_LIBS})
 
 #add_executable(ycsb_hotspot ycsb/ycsb_hotspot.cpp)

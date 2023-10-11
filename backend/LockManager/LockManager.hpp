@@ -8,7 +8,7 @@
 namespace leanstore
 {
 
-constexpr static int kLockWords = 16381;
+constexpr static int kLockWords = 131071;
 class OptimisticLockGuard;
 enum class OptimisticLockState {
     UNINITIALIZED,
@@ -28,6 +28,19 @@ public:
     u64 get_key_version(u64 hash) {
         return words[hash % kLockWords];
     }
+
+    void update_key_version(u64 hash, u64 version) {
+        words[hash % kLockWords] = version;
+    }
+
+    OptimisticLockTable* Copy() {
+        OptimisticLockTable* table_copy = new OptimisticLockTable();
+        for (int i = 0; i < kLockWords; ++i) {
+            table_copy->words[i].store(words[i].load());
+        }
+        return table_copy;
+    }
+
 friend class OptimisticLockGuard;
 friend class PessimisticLockGuard;
 
@@ -55,6 +68,11 @@ public:
         return *this;
     }
     
+    void set_snapshot_read_version(u64 snapshot_version) {
+        version = snapshot_version;
+        state = OptimisticLockState::READ_LOCKED;
+    }
+
     OptimisticLockGuard(OptimisticLockTable *lock_table, u64 hash): lock_table(lock_table) {
         word_pos = hash % kLockWords;
         version = lock_table->words[word_pos];
@@ -113,6 +131,11 @@ public:
         } else {
             return false;
         }
+    }
+
+    // return the version after unlocking
+    u64 version_if_write_unlocked() {
+        return lock_table->words[word_pos] + 1;
     }
 
     ~OptimisticLockGuard() {

@@ -80,7 +80,7 @@ class BufferManager
    atomic<u64> hot_clock_hand = 0;  // used to track the next frame for considering eviction
   public:
    // -------------------------------------------------------------------------------------
-   BufferManager(s32 ssd_fd);
+   BufferManager(s32 ssd_fd, double effective_dram_gib);
    ~BufferManager();
    // -------------------------------------------------------------------------------------
    BufferFrame& allocatePage(bool from_hot_partition);
@@ -125,7 +125,6 @@ class BufferManager
    alignas(64) atomic<s64> hot_pages {0};
    alignas(64)atomic<s64> hot_pages_limit {std::numeric_limits<s64>::max()};
    alignas(64) atomic<u64> dirty_page_flushes = 0;
-   static thread_local atomic<bool> this_thread_alloc_failed;
 };                                                    // namespace storage
 // -------------------------------------------------------------------------------------
 class BMC

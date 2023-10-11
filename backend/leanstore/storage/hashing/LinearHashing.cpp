@@ -800,16 +800,6 @@ void LinearHashTable::merge_chain(u64 bucket, BufferFrame* dirNode) {
    }
 }
 
-class DeferCode {
-public:
-   DeferCode() = delete;
-   DeferCode(std::function<void()> f): f(f) {}
-   ~DeferCode() { 
-      f(); 
-   }
-   std::function<void()> f;
-};
-
 OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_length) {
    volatile u32 mask = 1;
    OP_RESULT ret = OP_RESULT::OK;

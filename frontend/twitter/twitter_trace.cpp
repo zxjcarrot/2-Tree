@@ -64,7 +64,6 @@ DEFINE_bool(lsmt_populate_block_cache_for_compaction_and_flush, false, "prepopul
 DEFINE_bool(lsmt_adaptive_migration, false, "Adaptively control the upward migration");
 DEFINE_bool(lsmt_in_memory_migration, true, "Enable upward migration for in-memory data");
 DEFINE_bool(lsmt_bulk_migration_at_flush, true, "Enable fast bulk migration at flush");
-DEFINE_bool(lsmt_constant_mig_prob, false, "Should the migration prob be constant or exponential with respect to the depth of point reads?");
 DEFINE_bool(inclusive_cache, false, "");
 DEFINE_uint32(update_or_put, 0, "");
 DEFINE_uint32(hotspot_shift_phases, 0, "Number of shifts of hotspots in the workloads");
@@ -78,6 +77,7 @@ DEFINE_bool(ycsb_count_unique_lookup_keys, true, "");
 DEFINE_bool(ycsb_2hash_use_different_hash, false, "whether to use different hash functions for two hash tables");
 
 DEFINE_string(ycsb_request_dist, "hotspot", "");
+DEFINE_string(trace_file, "./", "trace file path");
 DEFINE_double(ycsb_request_hotspot_keyspace_fraction, 0.2, "");
 DEFINE_double(ycsb_request_hotspot_op_fraction, 1.0, "");
 DEFINE_double(ycsb_request_selfsimilar_skew, 0.2, "");
@@ -141,107 +141,65 @@ std::string getCurrentDateTime() {
     return time_str;
 }
 
-void zipf_keyspace_stats(utils::ScrambledZipfGenerator * zipf_gen) {
-   std::vector<YCSBKey> generated_keys;
-   //std::unordered_map<YCSBKey, int> unique_keys;
-   size_t n = FLAGS_ycsb_tuple_count;
-   std::vector<uint64_t> key_frequency(n, 0);
-   for (size_t i = 0; i < n * 2; ++i) {
-      YCSBKey key = zipf_gen->zipf_generator.rand() % n;
-      generated_keys.push_back(key);
-      key_frequency[key]++;
-   }
-   sort(generated_keys.begin(), generated_keys.end());
-   std::cout << "Keyspace Stats: " << std::endl;
-   std::cout << "Skew factor: " << FLAGS_zipf_factor << std::endl;
-   std::cout << "# total keys: " << generated_keys.size() << std::endl;
-   //std::cout << "# unique keys: " << unique_keys.size() << std::endl;
-   std::cout << "Most frequent key occurrence: " << key_frequency[generated_keys[0]] << std::endl;
-   auto print_percentile_info = [&](int p) {
-      double pd = p / 100.0;
-      std::cout << "p" << p  << ": " << generated_keys[pd*generated_keys.size()] << ", covering " << generated_keys[pd*generated_keys.size()] / (0.0 + n) * 100 << "% of the keys, occurrence :" << key_frequency[generated_keys[pd*generated_keys.size()]] << std::endl;
-   };
-   for (size_t i = 1; i <= 99; i += 1) {
-      print_percentile_info(i);
-   }
-   print_percentile_info(99);
+enum class OperationType {
+   Get = 0,
+   Set = 1
+};
+struct Operation {
+   uint64_t key;
+   OperationType type;
+};
+
+std::vector<std::string> Split(const std::string & s, const std::string & delimiter) {
+    size_t pos_start = 0, pos_end, delim_len = delimiter.length();
+    std::string token;
+    std::vector<std::string> res;
+
+    while ((pos_end = s.find(delimiter, pos_start)) != std::string::npos) {
+        token = s.substr (pos_start, pos_end - pos_start);
+        pos_start = pos_end + delim_len;
+        res.push_back (token);
+    }
+
+    res.push_back (s.substr (pos_start));
+    return res;
 }
 
-void zipf_keyspace_stats(utils::ScrambledZipfDistGenerator * zipf_gen) {
-   std::vector<YCSBKey> generated_keys;
-   //std::unordered_map<YCSBKey, int> unique_keys;
-   size_t n = FLAGS_ycsb_tuple_count;
-   std::vector<uint64_t> key_frequency(n, 0);
-   for (size_t i = 0; i < n * 2; ++i) {
-      YCSBKey key = zipf_gen->zipf_generator.rand() % n;
-      generated_keys.push_back(key);
-      key_frequency[key]++;
-   }
-   sort(generated_keys.begin(), generated_keys.end());
-   std::cout << "Keyspace Stats: " << std::endl;
-   std::cout << "Skew factor: " << FLAGS_zipf_factor << std::endl;
-   std::cout << "# total keys: " << generated_keys.size() << std::endl;
-   //std::cout << "# unique keys: " << unique_keys.size() << std::endl;
-   std::cout << "Most frequent key occurrence: " << key_frequency[generated_keys[0]] << std::endl;
-   auto print_percentile_info = [&](int p) {
-      double pd = p / 100.0;
-      std::cout << "p" << p  << ": " << generated_keys[pd*generated_keys.size()] << ", covering " << generated_keys[pd*generated_keys.size()] / (0.0 + n) * 100 << "% of the keys, occurrence :" << key_frequency[generated_keys[pd*generated_keys.size()]] << std::endl;
-   };
-   for (size_t i = 1; i <= 99; i += 1) {
-      print_percentile_info(i);
-   }
-   print_percentile_info(99);
+Operation Parse(const std::string & str) {
+   auto parts = Split(str, ",");
+   return Operation{leanstore::utils::FNV::hash(parts[1].data(), parts[1].size()), parts[5] == "get" ? OperationType::Get : OperationType::Set };
 }
 
-void selfsimilar_keyspace_stats(utils::SelfSimilarGenerator * ss_gen) {
-   std::vector<YCSBKey> generated_keys;
-   std::unordered_map<YCSBKey, int> unique_keys;
-   for (size_t i = 0; i < FLAGS_ycsb_tuple_count * 2; ++i) {
-      YCSBKey key = ss_gen->rand() % FLAGS_ycsb_tuple_count;
-      generated_keys.push_back(key);
-      unique_keys[key]++;
-   }
-   sort(generated_keys.begin(), generated_keys.end());
-   std::cout << "Keyspace Stats: " << std::endl;
-   std::cout << "Skew factor: " << FLAGS_ycsb_request_selfsimilar_skew << std::endl;
-   std::cout << "# total keys: " << generated_keys.size() << std::endl;
-   std::cout << "# unique keys: " << unique_keys.size() << std::endl;
-   std::cout << "Most frequent key occurrence: " << unique_keys[generated_keys[0]] << std::endl;
-   auto print_percentile_info = [&](int p) {
-      double pd = p / 100.0;
-      std::cout << "p" << p  << ": " << generated_keys[pd*generated_keys.size()] << ", covering " << generated_keys[pd*generated_keys.size()] / (0.0 + FLAGS_ycsb_tuple_count) * 100 << "% of the keys, occurrence :" << unique_keys[generated_keys[pd*generated_keys.size()]] << std::endl;
-   };
-   for (size_t i = 5; i <= 95; i += 5) {
-      print_percentile_info(i);
-   }
-   print_percentile_info(99);
-}
-
-void show_5_min_rule_placement(const vector<u64> & access_count,
-   const vector<u64> & sum_reaccess_interval, size_t record_size) {
-   constexpr double price_per_GB_DRAM = 2.69;
-   constexpr double price_per_byte_dram = price_per_GB_DRAM / (1024.0 * 1024 * 1024);
-   constexpr double price_per_STORAGE_DEVICE = 30;
-   constexpr int IOPS = 170000;
-   constexpr double price_per_SSD_IO = price_per_STORAGE_DEVICE / IOPS;
-   double break_even_interval = 1 / (price_per_byte_dram * record_size) * price_per_SSD_IO;
-   int on_storage = 0;
-   int in_memory = 0;
-   for (size_t i = 0; i < access_count.size(); ++i) {
-      if (access_count[i] == 0) {
-         on_storage++;
+template<class T>
+class SynchronizedQueue {
+public:
+   bool pop(T & v) {
+      std::lock_guard<std::mutex> g(&lock);
+      if (queue.empty() == false) {
+         v = std::move(queue.front());
+         queue.pop_front();
+         return true;
       } else {
-         double avg_reaccess_interval_seconds = sum_reaccess_interval[i] / access_count[i] / 1000000;
-         if (avg_reaccess_interval_seconds <= break_even_interval) {
-            in_memory++;
-         } else {
-            on_storage++;
-         }
+         return false;
+      }
+   }
+   void push(const T & v) {
+      std::lock_guard<std::mutex> g(&lock);
+      queue.push_back(v);
+   }
+   
+   bool push(const T & v, int queue_limit) {
+      std::lock_guard<std::mutex> g(&lock);
+      if (queue.size() < queue_limit) {
+         queue.push_back(v);
+         return true;
+      } else {
+         return false;
       }
    }
 
-   cout << "5_min_rule_break_even_interval: " << break_even_interval << " seconds" << std::endl;
-   cout << "5_min_rule_placement: " << in_memory << " records in memory, " << on_storage << " on storage" << std::endl;
+   std::deque<T> queue;
+   std::mutex lock;
 }
 
 // -------------------------------------------------------------------------------------
@@ -388,7 +346,7 @@ int main(int argc, char** argv)
    } else if (FLAGS_index_type == kIndexTypeUpLSMT) {
       adapter.reset(new UpMigrationRocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, FLAGS_lsmt_adaptive_migration, FLAGS_lsmt_in_memory_migration, FLAGS_lsmt_populate_block_cache_for_compaction_and_flush, FLAGS_dram_gib + top_tree_size_gib, false, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexTypeBiUpLSMT) {
-      adapter.reset(new BidirectionalMigrationRocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, FLAGS_lsmt_bulk_migration_at_flush, FLAGS_lsmt_adaptive_migration, FLAGS_lsmt_in_memory_migration, FLAGS_lsmt_populate_block_cache_for_compaction_and_flush, FLAGS_dram_gib + top_tree_size_gib, FLAGS_lsmt_constant_mig_prob, false, FLAGS_cache_lazy_migration));
+      adapter.reset(new BidirectionalMigrationRocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, FLAGS_lsmt_bulk_migration_at_flush, FLAGS_lsmt_adaptive_migration, FLAGS_lsmt_in_memory_migration, FLAGS_lsmt_populate_block_cache_for_compaction_and_flush, FLAGS_dram_gib + top_tree_size_gib, false, FLAGS_cache_lazy_migration));
    } else if (FLAGS_index_type == kIndexType2LSMT) {
       adapter.reset(new TwoRocksDBAdapter<YCSBKey, YCSBPayload>(FLAGS_lsmt_db_path, top_tree_size_gib, FLAGS_dram_gib, FLAGS_cache_lazy_migration, FLAGS_inclusive_cache));
    } else if (FLAGS_index_type == kIndexType2LSMT_CF){
@@ -476,38 +434,38 @@ int main(int argc, char** argv)
             
             table.bulk_load(bulkload_keys, payloads);
          }
-         if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeUpLSMT) {
-            tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
-               for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
-                  YCSBKey key = keys[t_i];
-                  C_WLOCK(t_i);
-                  correct_payloads[t_i] = (u8)key;
-                  YCSBPayload payload((u8)key);
-                  //utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-                  table.insert(key, payload);
-                  C_WUNLOCK(t_i);
-                  WorkerCounters::myCounters().tx++;
-               }
-            });
-         } else {
-            tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
-               //cout << "range size " << range.end() - range.begin() << std::endl;
-               vector<u64> range_keys(range.end() - range.begin());
-               std::iota(range_keys.begin(), range_keys.end(), range.begin());
-               std::random_shuffle(range_keys.begin(), range_keys.end());
-               for (u64 t_i = 0; t_i < range_keys.size(); t_i++) {
-                  u64 idx = range_keys[t_i];
-                  YCSBKey key = keys[idx];
-                  C_WLOCK(idx);
-                  YCSBPayload payload((u8)key);
-                  correct_payloads[idx] = (u8)key;
-                  table.insert(key, payload);
-                  C_WUNLOCK(idx);
+            if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeUpLSMT) {
+               tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+                  for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
+                     YCSBKey key = keys[t_i];
+                     C_WLOCK(t_i);
+                     correct_payloads[t_i] = (u8)key;
+                     YCSBPayload payload((u8)key);
+                     //utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+                     table.insert(key, payload);
+                     C_WUNLOCK(t_i);
+                     WorkerCounters::myCounters().tx++;
+                  }
+               });
+            } else {
+               tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+                  //cout << "range size " << range.end() - range.begin() << std::endl;
+                  vector<u64> range_keys(range.end() - range.begin());
+                  std::iota(range_keys.begin(), range_keys.end(), range.begin());
+                  std::random_shuffle(range_keys.begin(), range_keys.end());
+                  for (u64 t_i = 0; t_i < range_keys.size(); t_i++) {
+                     u64 idx = range_keys[t_i];
+                     YCSBKey key = keys[idx];
+                     C_WLOCK(idx);
+                     YCSBPayload payload((u8)key);
+                     correct_payloads[idx] = (u8)key;
+                     table.insert(key, payload);
+                     C_WUNLOCK(idx);
 
-                  WorkerCounters::myCounters().tx++;
-               }
-            });
-         }
+                     WorkerCounters::myCounters().tx++;
+                  }
+               });
+            }
          //}
       }
       end = chrono::high_resolution_clock::now();
@@ -587,6 +545,7 @@ int main(int argc, char** argv)
       }
       cout << "Warmed up" << endl;
    }
+   std::vector<SynchronizedQueue<std::vector<Operation>>> queues(FLAGS_worker_threads);
 
    atomic<bool> keep_running = true;
    atomic<u64> running_threads_counter = 0;
@@ -594,99 +553,63 @@ int main(int argc, char** argv)
    vector<thread> threads;
    begin = chrono::high_resolution_clock::now();
    for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
-      db.getCRManager().scheduleJobAsync(t_i, [&]() {
+      db.getCRManager().scheduleJobAsync(t_i, [&, t_i]() {
+         int i = t_i;
          adapter->clear_stats();
          running_threads_counter++;
          u64 tx = 0;
+         int scan_len;
          while (keep_running) {
-            auto idx = random_generator->rand() % ycsb_tuple_count;
-            YCSBKey key = keys[idx];
-            // auto old_access_timestamp = last_access_timestamps[idx];
-            // last_access_timestamps[idx] = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-            // if (old_access_timestamp != 0) {
-            //    sum_reaccess_interval[idx] += last_access_timestamps[idx] - old_access_timestamp;
-            // }
-            //access_count[idx]++;
-            assert(key < ycsb_tuple_count);
-            YCSBPayload result;
-            int x = utils::RandomGenerator::getRandU64(0, 100);
-            if (x < FLAGS_ycsb_scan_ratio) {
-               int scan_len = FLAGS_ycsb_scan_length;
-               YCSBKey tk;
-               YCSBPayload tv;
-               auto scan_processor = [&](const YCSBKey & key, const YCSBPayload & payload) {
-                  tk = key;
-                  tv = payload;
-                  if (--scan_len == 0) {
-                     return true;
-                  }
-                  return false;
-               };
-
-               table.scan(key, scan_processor, scan_len);
-            } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio) {
-               YCSBPayload payload;
-               utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-               table.insert(key, payload);
-            } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio) {
-               C_WLOCK(idx);
-               if (key_deleted[idx] == false) {
-                  correct_payloads[idx]++;
-                  YCSBPayload payload(correct_payloads[idx]);
-                  if (FLAGS_update_or_put == 0) {
-                     table.update(key, payload);
-                  } else {
-                     table.put(key, payload);
-                  }
-                  //assert(table.lookup(key, result));
-               }
-               C_WUNLOCK(idx);
-            } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_delete_ratio) {
-               C_WLOCK(idx);
-               if (key_deleted[idx] == false) {
-                  bool res = table.remove(key);
-                  // if (res == false) {
-                  //    table.remove(key);
-                  // }
-                  assert(res == true);
-                  key_deleted[idx] = true;
-                  //assert(table.lookup(key, result) == false);
-               }
-               C_WUNLOCK(idx);
-            } else if (x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_blind_write_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_delete_ratio + FLAGS_ycsb_insert_ratio) {
-               C_WLOCK(idx);
-               if (key_deleted[idx] == true) {
-                  YCSBPayload payload((u8)key);
-                  correct_payloads[idx] = (u8)key;
-                  table.insert(key, payload);
-                  key_deleted[idx] = false;
-                  //assert(table.lookup(key, result));
-               }
-               C_WUNLOCK(idx);
-            } else { // x < FLAGS_ycsb_scan_ratio + FLAGS_ycsb_update_ratio + FLAGS_ycsb_read_ratio + FLAGS_ycsb_delete_ratio
-               C_RLOCK(idx);
-               bool res = table.lookup(key, result);
-               
-               if (FLAGS_ycsb_correctness_check) {
-                  if (key_deleted[idx]) {
-                     assert(res == false);
-                  } else {
-                     if (res == false) {
-                        auto res2 = table.lookup(key, result);
-                     }
-                     assert(res);
-                     auto correct_payload_byte = correct_payloads[idx];
-                     YCSBPayload correct_result(correct_payload_byte);
-                     if (result != correct_result) {
-                        res = table.lookup(key, result);
-                     }
-                     assert(result == correct_result);
-                  }
-               }
-               C_RUNLOCK(idx);
+            std::vector<Operation> ops;
+            while(queues[i].pop(ops) == false) {
+               ;
             }
-            WorkerCounters::myCounters().tx++;
-            ++tx;
+            for (int j = 0; j < ops.size(); ++j) {
+               auto hash = ops[j].key;
+               auto type = ops[j].type;
+               YCSBKey key = hash;
+               auto idx = key % ycsb_tuple_count;
+               assert(key < ycsb_tuple_count);
+               YCSBPayload result;
+               if (type == OperationType::Set) {
+                  C_WLOCK(idx);
+                  if (key_deleted[idx] == false) {
+                     correct_payloads[idx]++;
+                     YCSBPayload payload(correct_payloads[idx]);
+                     if (FLAGS_update_or_put == 0) {
+                        table.update(key, payload);
+                     } else {
+                        table.put(key, payload);
+                     }
+                     //assert(table.lookup(key, result));
+                  }
+                  C_WUNLOCK(idx) ;
+               } else {
+                  C_RLOCK(idx);
+                  bool res = table.lookup(key, result);
+                  
+                  if (FLAGS_ycsb_correctness_check) {
+                     if (key_deleted[idx]) {
+                        assert(res == false);
+                     } else {
+                        if (res == false) {
+                           auto res2 = table.lookup(key, result);
+                        }
+                        assert(res);
+                        auto correct_payload_byte = correct_payloads[idx];
+                        YCSBPayload correct_result(correct_payload_byte);
+                        if (result != correct_result) {
+                           res = table.lookup(key, result);
+                        }
+                        assert(result == correct_result);
+                     }
+                  }
+                  C_RUNLOCK(idx);
+               }
+               WorkerCounters::myCounters().tx++;
+               ++tx;
+            }
+            
          }
          txs += tx;
          running_threads_counter--;
@@ -704,6 +627,33 @@ int main(int argc, char** argv)
          }
          sleep(seconds_per_phase);
       }
+      std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+      std::ifstream infile(trace_file);
+      std::string line;
+      constexpr int kBatchSize = 1024;
+      constexpr bool kQueueLimit = 10;
+      int queueId = 0;
+      while(true) {
+         std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+         auto seconds = std::chrono::duration_cast<std::chrono::seconds>(end - begin).count();
+         if (seconds > FLAGS_run_for_seconds) {
+            break;
+         }
+
+         int countDown = kBatchSize;
+         std::vector<Operation> ops;
+         while(std::getline(infile, line) && countDown--) {
+            ops.emplace_back(std::move(Parse(line)));
+         }
+         if (ops.empty()) {
+            break;
+         }
+         while(true) {
+            if (queues[(++queueId) % FLAGS_worker_threads].push(ops, kQueueLimit)) {
+               break;
+            }
+         }
+      }
       // Shutdown threads
       keep_running = false;
       while (running_threads_counter) {
@@ -715,33 +665,8 @@ int main(int argc, char** argv)
       cout << "Total commit: " << calculateMTPS(begin, end, txs.load()) << " M tps" << endl;
       adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
       std::cout << "Hot pages: " << db.buffer_manager->hot_pages << std::endl;
-      show_5_min_rule_placement(access_count, sum_reaccess_interval, sizeof(YCSBPayload) + sizeof(YCSBKey));
-      if (FLAGS_ycsb_request_dist == kRequestDistributionZipfian) {
-         zipf_keyspace_stats((utils::ScrambledZipfGenerator*)random_generator.get());
-      } else if (FLAGS_ycsb_request_dist == kRequestDistributionZipfian2) {
-         zipf_keyspace_stats((utils::ScrambledZipfDistGenerator*)random_generator.get());
-      } else if (FLAGS_ycsb_request_dist == kRequestDistributionSelfSimilar) {
-         selfsimilar_keyspace_stats((utils::SelfSimilarGenerator*)random_generator.get());
-      }
-      
+
       cout << "-------------------------------------------------------------------------------------" << endl;
-      
-      if (FLAGS_index_type == kIndexTypeBiUpLSMT && false) {
-         auto index = (BidirectionalMigrationRocksDBAdapter<YCSBKey, YCSBPayload>*)(adapter.get());
-         auto record_size = (sizeof(YCSBKey) + sizeof(YCSBPayload) + 5);
-         auto sst_file_approximate_size = 64 * 1024 * 1024;
-         auto records_per_sst_file = sst_file_approximate_size / record_size;
-         double displacement_sum = 0;
-         for (size_t i = 0; i < ycsb_tuple_count; ++i) {
-            YCSBPayload v;
-            int sst_file_count = 0;
-            index->lookup_with_sst_count(keys[i], v, sst_file_count);
-            auto target_sst_file_count = i / records_per_sst_file;
-            displacement_sum += std::abs(static_cast<int>(sst_file_count - target_sst_file_count));
-         }
-         double displacement_average = displacement_sum / ycsb_tuple_count;
-         std::cout << "Displacement average " << displacement_average << std::endl;
-      }
       db.getCRManager().joinAll();
    }
 

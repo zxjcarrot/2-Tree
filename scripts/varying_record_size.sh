@@ -20,7 +20,7 @@ for record_size in 56 120 248 504 1016 2040
 do
 TUPLE_COUNT="$(( $DATA / ($record_size + 8) ))"
 echo $TUPLE_COUNT
-cat <<EOT >> greetings.txt
+cat << EOT > frontend/ycsb/RecordSize.h
 #pragma once
 #define RECORD_SIZE $record_size
 EOT

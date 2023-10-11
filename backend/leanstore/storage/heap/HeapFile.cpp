@@ -2,6 +2,7 @@
 
 #include "leanstore/storage/buffer-manager/DTRegistry.hpp"
 #include "leanstore/concurrency-recovery/CRMG.hpp"
+#include "common/utils.hpp"
 // -------------------------------------------------------------------------------------
 #include "gflags/gflags.h"
 // -------------------------------------------------------------------------------------
@@ -436,15 +437,6 @@ double HeapFile::current_load_factor() {
    return data_stored.load() / (getPages() * EFFECTIVE_PAGE_SIZE + 0.0);
 }
 
-class DeferCode {
-public:
-   DeferCode() = delete;
-   DeferCode(std::function<void()> f): f(f) {}
-   ~DeferCode() { 
-      f(); 
-   }
-   std::function<void()> f;
-};
 
 
 u32 HeapFile::get_page_with_space(u32 space_required) {
