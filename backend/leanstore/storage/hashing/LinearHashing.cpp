@@ -327,6 +327,8 @@ OP_RESULT LinearHashTable::lookupForUpdate(u8* key, u16 key_length, std::functio
                Swip<LinearHashingNode>& c_swip = target_guard->overflow;
                pp_guard = std::move(target_guard);
                target_guard = HybridPageGuard<LinearHashingNode>(pp_guard, c_swip, LATCH_FALLBACK_MODE::EXCLUSIVE);
+               pp_guard.toExclusive();
+               target_guard.toExclusive();
 
                s32 slot_in_node = target_guard->find(key, key_length);
                if (slot_in_node != -1) {
@@ -797,16 +799,6 @@ void LinearHashTable::merge_chain(u64 bucket, BufferFrame* dirNode) {
       WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
    }
 }
-
-class DeferCode {
-public:
-   DeferCode() = delete;
-   DeferCode(std::function<void()> f): f(f) {}
-   ~DeferCode() { 
-      f(); 
-   }
-   std::function<void()> f;
-};
 
 OP_RESULT LinearHashTable::upsert(u8* key, u16 key_length, u8* value, u16 value_length) {
    volatile u32 mask = 1;

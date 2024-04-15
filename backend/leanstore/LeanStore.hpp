@@ -39,8 +39,9 @@ class LeanStore
    u64 config_hash = 0;
    GlobalStats global_stats;
    // -------------------------------------------------------------------------------------
+   double effective_dram_gib;
   public:
-   LeanStore();
+   LeanStore(double effective_dram_gib = 1.0);
    // -------------------------------------------------------------------------------------
    template <typename T>
    void registerConfigEntry(string name, T value)
@@ -65,7 +66,7 @@ class LeanStore
    storage::BufferManager& getBufferManager() { return *buffer_manager; }
    cr::CRManager& getCRManager() { return *cr_manager; }
    // -------------------------------------------------------------------------------------
-   void startProfilingThread();
+   void startProfilingThread(const std::vector<std::string> & additional_columns = {}, std::function<std::vector<string>()> func = [](){ return std::vector<std::string>{}; }, const string & results_csv_file_path = "");
    void persist();
    void restore();
    // -------------------------------------------------------------------------------------

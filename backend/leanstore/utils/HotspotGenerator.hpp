@@ -43,7 +43,9 @@ class HotspotGenerator: public Generator
     this->hot_interval = (int) (interval * this->hotset_fraction);
     this->cold_interval = interval - hot_interval;
    }
-
+  u64 rand(u64) override {
+    return rand();
+  }
    u64 rand() override {
       u64 value = 0;
       double constant = 1000000000000000000.0;

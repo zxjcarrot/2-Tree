@@ -46,6 +46,10 @@ class HotspotZipfGenerator: public Generator
     zipf_generator = new ZipfGenerator(hot_interval, zipf_factor);
    }
 
+   u64 rand(u64) override {
+      return rand();
+   }
+  
    u64 rand() override {
       u64 value = 0;
       double constant = 1000000000000000000.0;

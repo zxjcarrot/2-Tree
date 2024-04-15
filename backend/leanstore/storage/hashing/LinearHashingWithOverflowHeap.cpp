@@ -2,6 +2,7 @@
 
 #include "leanstore/storage/buffer-manager/DTRegistry.hpp"
 #include "leanstore/concurrency-recovery/CRMG.hpp"
+#include "common/utils.hpp"
 // -------------------------------------------------------------------------------------
 #include "gflags/gflags.h"
 // -------------------------------------------------------------------------------------
@@ -1024,16 +1025,6 @@ void LinearHashTableWithOverflowHeap::merge_chain(u64 bucket, BufferFrame* dirNo
    //    WorkerCounters::myCounters().dt_restarts_read[dt_id]++;
    // }
 }
-
-class DeferCode {
-public:
-   DeferCode() = delete;
-   DeferCode(std::function<void()> f): f(f) {}
-   ~DeferCode() { 
-      f(); 
-   }
-   std::function<void()> f;
-};
 
 OP_RESULT LinearHashTableWithOverflowHeap::upsert(u8* key, u16 key_length, u8* value, u16 value_length) {
    volatile u32 mask = 1;

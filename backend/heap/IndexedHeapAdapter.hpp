@@ -5,7 +5,7 @@
 #include "leanstore/storage/btree/BTreeLL.hpp"
 #include "leanstore/storage/heap/HeapFile.hpp"
 #include "leanstore/storage/btree/core/WALMacros.hpp"
-#include "leanstore/utils/DistributedCounter.hpp"
+#include "common/DistributedCounter.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore
@@ -26,6 +26,15 @@ struct IndexedHeapAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> iheap_buffer_hit = 0;
    DistributedCounter<> scan_ops = 0;
    DistributedCounter<> io_reads_scan = 0;
+   alignas(64) std::atomic<uint64_t> bp_dirty_page_flushes_snapshot = 0;
+   uint64_t buffer_pool_background_writes_last = 0;
+   IOStats stats;
+   leanstore::storage::BufferManager * buf_mgr = nullptr;
+
+   void set_buffer_manager(storage::BufferManager * buf_mgr) override { 
+      this->buf_mgr = buf_mgr;
+      bp_dirty_page_flushes_snapshot.store(this->buf_mgr->dirty_page_flushes.load());
+   }
 
    IndexedHeapAdapter(leanstore::storage::heap::HeapFile& heap_file, leanstore::storage::btree::BTreeLL& btree_index) : iheap(heap_file, btree_index) {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
@@ -36,6 +45,7 @@ struct IndexedHeapAdapter : StorageInterface<Key, Payload> {
       io_reads_snapshot = WorkerCounters::myCounters().io_reads.load();
       io_reads_scan = scan_ops = 0;
       io_reads = 0;
+      bp_dirty_page_flushes_snapshot.store(this->buf_mgr->dirty_page_flushes.load());
    }
 
    bool lookup(Key k, Payload& v) override
@@ -43,6 +53,12 @@ struct IndexedHeapAdapter : StorageInterface<Key, Payload> {
       leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
       total_lookups++;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+         auto new_reads = WorkerCounters::myCounters().io_reads.load();
+         if (new_reads > old_reads) {
+            stats.reads += new_reads - old_reads;
+         }
+      }, WorkerCounters::myCounters().io_reads.load());
       u8 key_bytes[sizeof(Key)];
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
       auto res = iheap.lookup(key_bytes, fold(key_bytes, k), [&](const u8* payload, u16 payload_length) { memcpy(&v, payload, payload_length); }) ==
@@ -58,7 +74,14 @@ struct IndexedHeapAdapter : StorageInterface<Key, Payload> {
    }
    void insert(Key k, Payload& v) override
    {
-      DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
+      //DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+         auto new_reads = WorkerCounters::myCounters().io_reads.load();
+         if (new_reads > old_reads) {
+            stats.reads += new_reads - old_reads;
+         }
+      }, WorkerCounters::myCounters().io_reads.load());
       u8 key_bytes[sizeof(Key)];
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
       iheap.insert(key_bytes, fold(key_bytes, k), reinterpret_cast<u8*>(&v), sizeof(v));
@@ -110,6 +133,12 @@ struct IndexedHeapAdapter : StorageInterface<Key, Payload> {
       leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
       total_lookups++;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+         auto new_reads = WorkerCounters::myCounters().io_reads.load();
+         if (new_reads > old_reads) {
+            stats.reads += new_reads - old_reads;
+         }
+      }, WorkerCounters::myCounters().io_reads.load());
       u8 key_bytes[sizeof(Key)];
       auto old_miss = WorkerCounters::myCounters().io_reads.load();
       [[maybe_unused]] auto op_res = iheap.lookupForUpdate(key_bytes, fold(key_bytes, k), 
@@ -131,6 +160,8 @@ struct IndexedHeapAdapter : StorageInterface<Key, Payload> {
    }
 
    void report(u64 entries, u64 pages) override {
+      assert(this->buf_mgr->dirty_page_flushes >= this->bp_dirty_page_flushes_snapshot);
+      auto io_writes = this->buf_mgr->dirty_page_flushes - this->bp_dirty_page_flushes_snapshot;
       assert(io_reads_now >= io_reads_snapshot);
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::cout << "Total IO reads during benchmark " << total_io_reads_during_benchmark << std::endl;
@@ -150,8 +181,26 @@ struct IndexedHeapAdapter : StorageInterface<Key, Payload> {
       double heap_buffer_hit_rate = iheap_buffer_hit / (iheap_buffer_hit + iheap_buffer_miss + 1.0);
       std::cout << "IHeap buffer hits/misses " <<  iheap_buffer_hit << "/" << iheap_buffer_miss << std::endl;
       std::cout << "IHeap buffer hit rate " <<  heap_buffer_hit_rate << " miss rate " << (1 - heap_buffer_hit_rate) << std::endl;
-      std::cout << total_lookups<< " lookups, " << io_reads.get() << " ios, " << io_reads / (total_lookups + 0.00) << " ios/lookup" << std::endl;
+      std::cout << total_lookups<< " lookups, " << io_reads.get() << " i/o reads, " << io_writes << " i/o writes, " << io_reads / (total_lookups + 0.00) << " i/o reads/lookup, " <<  (io_reads + io_writes) / (total_lookups + 0.00) << " ios/lookup" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01);
+   }
+
+   std::vector<std::string> stats_column_names() { return {"io_r", "io_w"}; }
+   std::vector<std::string> stats_columns() { 
+      IOStats empty;
+      auto s = exchange_stats(empty);
+      return {std::to_string(s.reads),
+              std::to_string(s.writes)}; 
+   }
+
+   IOStats exchange_stats(IOStats s) { 
+      IOStats ret;
+      auto t = buffer_pool_background_writes_last;
+      buffer_pool_background_writes_last =  this->buf_mgr->dirty_page_flushes;
+      ret.reads = stats.reads;
+      ret.writes = buffer_pool_background_writes_last - t;
+      stats = s;
+      return ret;
    }
 };
 

@@ -49,6 +49,8 @@ find_package(Threads REQUIRED)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
 #include("${CMAKE_SOURCE_DIR}/libs/gflags.cmake")
+#include("${CMAKE_SOURCE_DIR}/libs/rocksdb.cmake")
+include("${CMAKE_SOURCE_DIR}/libs/treeline.cmake")
 include("${CMAKE_SOURCE_DIR}/libs/tabluate.cmake")
 include("${CMAKE_SOURCE_DIR}/libs/rapidjson.cmake")
 #include("${CMAKE_SOURCE_DIR}/libs/googletest.cmake")

@@ -394,6 +394,7 @@ void BufferManager::pageProviderThread(u64 p_begin, u64 p_end)  // [p_begin, p_e
                             written_bf.header.lastWrittenGSN = written_lsn;
                             written_bf.header.isWB = false;
                             PPCounters::myCounters().flushed_pages_counter++;
+                            this->dirty_page_flushes++;
                             // -------------------------------------------------------------------------------------
                             guard.unlock();
                             jumpmu_break;

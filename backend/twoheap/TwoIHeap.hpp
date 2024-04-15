@@ -5,7 +5,7 @@
 #include "leanstore/storage/btree/BTreeLL.hpp"
 #include "leanstore/storage/heap/HeapFile.hpp"
 #include "leanstore/storage/btree/core/WALMacros.hpp"
-#include "leanstore/utils/DistributedCounter.hpp"
+#include "common/DistributedCounter.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace leanstore
@@ -54,7 +54,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
    DTID dt_id;
 
    OptimisticLockTable lock_table;
-   
+   alignas(64) std::atomic<uint64_t> bp_dirty_page_flushes_snapshot = 0;
    DistributedCounter<> hot_partition_size_bytes;
    DistributedCounter<> scan_ops;
    DistributedCounter<> io_reads_scan;
@@ -81,6 +81,9 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> downward_migrations = 0;
    DistributedCounter<> eviction_bounding_time = 0;
    DistributedCounter<> eviction_bounding_n = 0;
+
+   uint64_t buffer_pool_background_writes_last = 0;
+   IOStats stats;
 
    leanstore::storage::BufferManager * buf_mgr = nullptr;
 
@@ -150,6 +153,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       scan_ops = 0;
       io_reads = 0;
       eviction_bounding_time = eviction_bounding_n = 0;
+      bp_dirty_page_flushes_snapshot.store(this->buf_mgr->dirty_page_flushes.load());
    }
 
    void evict_all() override {
@@ -252,15 +256,16 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
             if (inclusive) {
                if (tagged_payload.modified()) {
                   upsert_cold_partition(key, tagged_payload.payload); // Cold partition
+                  ++downward_migrations;
                }
             } else { // exclusive, put it back in the on-disk B-Tree
                insert_cold_partition(key, tagged_payload.payload); // Cold partition
+               ++downward_migrations;
             }
             auto op_res = hot_iheap.remove(key_bytes, fold(key_bytes, key));
             hot_partition_item_count--;
             assert(op_res == leanstore::storage::heap::OP_RESULT::OK);
             hot_partition_size_bytes -= sizeof(Key) + sizeof(TaggedPayload);
-            ++downward_migrations;
          }
          auto io_reads_new = WorkerCounters::myCounters().io_reads.load();
          assert(io_reads_new >= io_reads_old);
@@ -421,18 +426,15 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
    DistributedCounter<> eviction_count_down {kEvictionCheckInterval};
    void try_eviction() {
       if (cache_under_pressure()) {
+         DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+            auto new_reads = WorkerCounters::myCounters().io_reads.load();
+            if (new_reads > old_reads) {
+               stats.eviction_reads += new_reads - old_reads;
+            }
+         }, WorkerCounters::myCounters().io_reads.load());
          evict_a_bunch();
       }
    }
-
-   void try_eviction_direct() {
-      --eviction_count_down;
-      if (eviction_count_down.load() <= 0) {
-            evict_a_bunch();
-         eviction_count_down += kEvictionCheckInterval;
-      }
-   }
-
    void admit_element(Key k, Payload & v, bool dirty = false, bool referenced = true) {
       insert_hot_partition(k, v, dirty, referenced);
       hot_partition_size_bytes += sizeof(Key) + sizeof(TaggedPayload);
@@ -451,6 +453,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
 
    void set_buffer_manager(storage::BufferManager * buf_mgr) { 
       this->buf_mgr = buf_mgr;
+      bp_dirty_page_flushes_snapshot.store(this->buf_mgr->dirty_page_flushes.load());
    }
 
    bool lookup(Key k, Payload & v) {
@@ -472,6 +475,12 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       leanstore::utils::IOScopedCounter cc([&](u64 ios){ this->io_reads += ios; });
       ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+         auto new_reads = WorkerCounters::myCounters().io_reads.load();
+         if (new_reads > old_reads) {
+            stats.reads += new_reads - old_reads;
+         }
+      }, WorkerCounters::myCounters().io_reads.load());
       u8 key_bytes[sizeof(Key)];
       TaggedPayload tp;
       // try hot partition first
@@ -595,6 +604,12 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       while (g.write_lock() == false);
       ++total_lookups;
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+         auto new_reads = WorkerCounters::myCounters().io_reads.load();
+         if (new_reads > old_reads) {
+            stats.reads += new_reads - old_reads;
+         }
+      }, WorkerCounters::myCounters().io_reads.load());
       u8 key_bytes[sizeof(Key)];
       auto hot_key = k;
       HIT_STAT_START;
@@ -658,6 +673,12 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       LockGuardProxy g(&lock_table, k);
       while (g.write_lock() == false);
       DeferCode c([&, this](){io_reads_now = WorkerCounters::myCounters().io_reads.load();});
+      DeferCodeWithContext ccc([&, this](uint64_t old_reads) {
+         auto new_reads = WorkerCounters::myCounters().io_reads.load();
+         if (new_reads > old_reads) {
+            stats.reads += new_reads - old_reads;
+         }
+      }, WorkerCounters::myCounters().io_reads.load());
       u8 key_bytes[sizeof(Key)];
       auto hot_key = k;
       HIT_STAT_START;
@@ -674,7 +695,7 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
          return;
       }
       // move to hot partition
-      admit_element(k, v, true);
+      admit_element(k, v, true, false);
 
       if (inclusive == false) { // If exclusive, remove the tuple from the on-disk B-Tree
          auto cold_key = k;
@@ -705,6 +726,8 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
    }
 
    void report([[maybe_unused]] u64, u64) override {
+      assert(this->buf_mgr->dirty_page_flushes >= this->bp_dirty_page_flushes_snapshot);
+      auto io_writes = this->buf_mgr->dirty_page_flushes - this->bp_dirty_page_flushes_snapshot;
       auto total_io_reads_during_benchmark = io_reads_now - io_reads_snapshot;
       std::string hot_iheap_stats = iheap_stat("Hot", hot_iheap, sizeof(Key) + sizeof(TaggedPayload), (sizeof(Key) + sizeof(leanstore::storage::heap::HeapTupleId)));
       std::string cold_iheap_stats = iheap_stat("Cold", cold_iheap, sizeof(Key) + sizeof(Payload), (sizeof(Key) + sizeof(leanstore::storage::heap::HeapTupleId)));
@@ -715,10 +738,33 @@ struct TwoIHeapAdapter : StorageInterface<Key, Payload> {
       std::cout << "IHeap buffer hits/misses " <<  heap_buffer_hit << "/" << heap_buffer_miss << std::endl;
       std::cout << "IHeap buffer hit rate " <<  iheap_hit_rate << " miss rate " << (1 - iheap_hit_rate) << std::endl;
       std::cout << "Evicted " << eviction_items << " tuples, " << eviction_io_reads << " io_reads for these evictions, io_reads/eviction " << eviction_io_reads / (eviction_items  + 1.0) << std::endl;
+      std::cout << total_lookups<< " lookups, " << io_reads.get() << " i/o reads, " << io_writes << " i/o writes, " << io_reads / (total_lookups + 0.00) << " i/o reads/lookup, "  << (io_reads + io_writes) / (total_lookups + 0.00) << " ios/lookup, " << lookups_hit_top << " lookup hit top" << " hot_iheap_ios " << hot_iheap_ios<< " ios/tophit " << hot_iheap_ios / (lookups_hit_top + 0.00) << " io_rws/eviction " << (eviction_io_reads + io_writes) / (eviction_items  + 1.0)  << std::endl;
       std::cout << total_lookups<< " lookups, " << io_reads.get() << " ios, " << io_reads / (total_lookups + 0.00) << " ios/lookup, " << lookups_hit_top << " lookup hit top" << " hot_iheap_ios " << hot_iheap_ios<< " ios/tophit " << hot_iheap_ios / (lookups_hit_top + 0.00)  << std::endl;
       std::cout << upward_migrations << " upward_migrations, "  << downward_migrations << " downward_migrations, "<< failed_upward_migrations << " failed_upward_migrations" << std::endl;
       std::cout << "Scan ops " << scan_ops << ", ios_read_scan " << io_reads_scan << ", #ios/scan " <<  io_reads_scan/(scan_ops + 0.01) << std::endl;
       std::cout << "Average eviction bounding time " << eviction_bounding_time / (eviction_bounding_n + 1) << std::endl;
+   }
+
+   std::vector<std::string> stats_column_names() { return {"hot_pages", "down_mig", "io_r", "io_w", "io_ev"}; }
+   std::vector<std::string> stats_columns() { 
+      IOStats empty;
+      auto s = exchange_stats(empty);
+      return {std::to_string(buf_mgr->hot_pages.load()), 
+              std::to_string(downward_migrations.get()),
+              std::to_string(s.reads),
+              std::to_string(s.writes), 
+              std::to_string(s.eviction_reads)}; 
+   }
+
+   IOStats exchange_stats(IOStats s) { 
+      IOStats ret;
+      auto t = buffer_pool_background_writes_last;
+      buffer_pool_background_writes_last =  this->buf_mgr->dirty_page_flushes;
+      ret.reads = stats.reads;
+      ret.eviction_reads = stats.eviction_reads;
+      ret.writes = buffer_pool_background_writes_last - t;
+      stats = s;
+      return ret;
    }
 };
 

@@ -52,6 +52,7 @@ class BTreeLL : public BTreeInterface, public BTreeGeneric
    virtual OP_RESULT upsert(u8* key, u16 key_length, u8* value, u16 value_length) override;
    virtual OP_RESULT updateSameSize(u8* key, u16 key_length, function<void(u8* value, u16 value_size)>, WALUpdateGenerator = {{}, {}, 0}) override;
    virtual OP_RESULT remove(u8* key, u16 key_length) override;
+   virtual OP_RESULT remove(u8* key, u16 key_length, bool no_merge) override;
    virtual OP_RESULT scanAsc(u8* start_key,
                              u16 key_length,
                              function<bool(const u8* key, u16 key_length, const u8* value, u16 value_length)>,
