@@ -60,12 +60,14 @@ struct BidirectionalMigrationRocksDBAdapter : public leanstore::StorageInterface
    struct alignas(1)  TaggedPayload {
       Payload payload;
       bool ref = false;
-      bool migrated = false;
+      //bool migrated = false;
    };
 
    struct FlushContext {
       leanstore::OptimisticLockTable* table = nullptr;
       size_t bytes_migrated = 0;
+      size_t bytes_migrated_ref = 0;
+      size_t bytes_migrated_key_occ = 0;
       size_t bytes_examined = 0;
       size_t write_lock_failed = 0;
       size_t memtable_throttled = 0;
@@ -153,13 +155,14 @@ struct BidirectionalMigrationRocksDBAdapter : public leanstore::StorageInterface
             return (void*)ctx;
          };
 
-         options.memtable_flush_on_each_key_value = [&, this](const rocksdb::Slice & key, const rocksdb::Slice & value, void * context) -> bool {
+         options.memtable_flush_on_each_key_value = [&, this](const rocksdb::Slice & key, const rocksdb::Slice & value, void * context, uint64_t key_occurrence) -> bool {
             assert(key.size() == sizeof(Key));
             assert(value.size() == sizeof(TaggedPayload));
             FlushContext* ctx = reinterpret_cast<FlushContext*>(context);
             auto tagged_value = reinterpret_cast<TaggedPayload*>(const_cast<char*>(value.data()));
             ctx->bytes_examined += key.size() + 8 + value.size();
-            if (tagged_value->migrated == false || tagged_value->ref == false || ctx->bytes_migrated >= kRocksDBWriteBufferSize / 2) {
+            //if (tagged_value->migrated == false || tagged_value->ref == false || ctx->bytes_migrated >= kRocksDBWriteBufferSize / 2) {
+            if ((tagged_value->ref == false && key_occurrence < 2) || ctx->bytes_migrated >= kRocksDBWriteBufferSize / 2) {
                return true;
             }
             auto k = unfold(*(Key*)(key.data()));
@@ -172,8 +175,14 @@ struct BidirectionalMigrationRocksDBAdapter : public leanstore::StorageInterface
             leanstore::LockGuardProxy g(&lock_table, k);
             g.set_snapshot_read_version(snapshot_version);
             if (g.upgrade_to_write_lock()) {
+               if (tagged_value->ref) {
+                  ctx->bytes_migrated_ref+= key.size() + 8 + value.size();
+               } else {
+                  ctx->bytes_migrated_key_occ += key.size() + 8 + value.size();
+               }
+               
                tagged_value->ref = false;
-               tagged_value->migrated = true;
+               //tagged_value->migrated = true;
 
                rocksdb::WriteOptions options;
                options.disableWAL = true;
@@ -195,14 +204,22 @@ struct BidirectionalMigrationRocksDBAdapter : public leanstore::StorageInterface
 
          options.memtable_flush_end = [&, this](void * context) {
             FlushContext* ctx = reinterpret_cast<FlushContext*>(context);
-            std::cout << ctx->bytes_examined << " examined, " << ctx->bytes_migrated << " bytes migrated upwards, " << ctx->write_lock_failed << " write lock fails, " << ctx->memtable_throttled << " memtable throttles." << std::endl;
+            std::cout << ctx->bytes_examined << " examined, " 
+                      << ctx->bytes_migrated << " bytes migrated upwards, " 
+                      << ctx->bytes_migrated_ref << " bytes migrated because of reference, " 
+                      << ctx->bytes_migrated_key_occ << " bytes migrated because of key occurrence, " 
+                      << ctx->write_lock_failed << " write lock fails, " 
+                      << ctx->memtable_throttled << " memtable throttles." << std::endl;
             delete ctx;
          };
 
 
          on_memtable_hit = [&, this] (const rocksdb::Slice & key, rocksdb::Slice & value) {
             auto tagged_value = reinterpret_cast<TaggedPayload*>(const_cast<char*>(value.data()));
-            if (tagged_value->migrated == false || tagged_value->ref == true) {
+            // if (tagged_value->migrated == false || tagged_value->ref == true) {
+            //    return;
+            // }
+            if (tagged_value->ref == true) {
                return;
             }
             tagged_value->ref = true;
@@ -414,7 +431,7 @@ struct BidirectionalMigrationRocksDBAdapter : public leanstore::StorageInterface
       TaggedPayload payload;
       payload.payload = v;
       payload.ref = false;
-      payload.migrated = migrated;
+      //payload.migrated = migrated;
       auto status = db->Put(options, rocksdb::Slice((const char *)key_bytes, key_len), rocksdb::Slice((const char *)&payload, sizeof(payload)));
       assert(status == rocksdb::Status::OK());
    }
