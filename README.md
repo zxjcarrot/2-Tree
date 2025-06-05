@@ -8,7 +8,18 @@ Pointers to tiered data structures:
 * BiLSM-tree: `backend/lsmt/bidirectional_migration_rocksdb_adapter.hpp`
 
 ## Cite
+
 ```
+@article{zhou2025tiered,
+  title={Tiered-Indexing: Optimizing Access Methods for Skew},
+  author={Zhou, Xinjing and Hao, Xiangpeng and Yu, Xiangyao and Stonebraker, Michael},
+  journal={The VLDB Journal},
+  volume={34},
+  number={4},
+  pages={1--24},
+  year={2025},
+  publisher={Springer}
+}
 @inproceedings{2-tree,
   author       = {Zhou, Xinjing and Yu, Xiangyao and Graefe, Goetz and Stonebraker, Michael},
   title        = {Two is Better Than One: The Case for 2-Tree for Skewed Data Sets},
