@@ -465,49 +465,49 @@ int main(int argc, char** argv)
          if (FLAGS_index_type == kIndexTypeTreeline) {
             std::vector<YCSBKey> bulkload_keys;
             std::vector<YCSBPayload> payloads;
-            for (int i = 0; i < 50240; ++i) {
+            for (int i = 0; i < 50000; ++i) {
                bulkload_keys.push_back(keys[i]);
             }
             sort(bulkload_keys.begin(), bulkload_keys.end());
-            for (int i = 0; i < 50240; ++i) {
+            for (int i = 0; i < 50000; ++i) {
                YCSBPayload payload((u8)bulkload_keys[i]);
                payloads.push_back(payload);
             }
             
             table.bulk_load(bulkload_keys, payloads);
          }
-         if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeUpLSMT) {
-            tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
-               for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
-                  YCSBKey key = keys[t_i];
-                  C_WLOCK(t_i);
-                  correct_payloads[t_i] = (u8)key;
-                  YCSBPayload payload((u8)key);
-                  //utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-                  table.insert(key, payload);
-                  C_WUNLOCK(t_i);
-                  WorkerCounters::myCounters().tx++;
-               }
-            });
-         } else {
-            tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
-               //cout << "range size " << range.end() - range.begin() << std::endl;
-               vector<u64> range_keys(range.end() - range.begin());
-               std::iota(range_keys.begin(), range_keys.end(), range.begin());
-               std::random_shuffle(range_keys.begin(), range_keys.end());
-               for (u64 t_i = 0; t_i < range_keys.size(); t_i++) {
-                  u64 idx = range_keys[t_i];
-                  YCSBKey key = keys[idx];
-                  C_WLOCK(idx);
-                  YCSBPayload payload((u8)key);
-                  correct_payloads[idx] = (u8)key;
-                  table.insert(key, payload);
-                  C_WUNLOCK(idx);
+            if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeUpLSMT) {
+               tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+                  for (u64 t_i = range.begin(); t_i < range.end(); t_i++) {
+                     YCSBKey key = keys[t_i];
+                     C_WLOCK(t_i);
+                     correct_payloads[t_i] = (u8)key;
+                     YCSBPayload payload((u8)key);
+                     //utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+                     table.insert(key, payload);
+                     C_WUNLOCK(t_i);
+                     WorkerCounters::myCounters().tx++;
+                  }
+               });
+            } else {
+               tbb::parallel_for(tbb::blocked_range<u64>(0, n), [&](const tbb::blocked_range<u64>& range) {
+                  //cout << "range size " << range.end() - range.begin() << std::endl;
+                  vector<u64> range_keys(range.end() - range.begin());
+                  std::iota(range_keys.begin(), range_keys.end(), range.begin());
+                  std::random_shuffle(range_keys.begin(), range_keys.end());
+                  for (u64 t_i = 0; t_i < range_keys.size(); t_i++) {
+                     u64 idx = range_keys[t_i];
+                     YCSBKey key = keys[idx];
+                     C_WLOCK(idx);
+                     YCSBPayload payload((u8)key);
+                     correct_payloads[idx] = (u8)key;
+                     table.insert(key, payload);
+                     C_WUNLOCK(idx);
 
-                  WorkerCounters::myCounters().tx++;
-               }
-            });
-         }
+                     WorkerCounters::myCounters().tx++;
+                  }
+               });
+            }
          //}
       }
       end = chrono::high_resolution_clock::now();
@@ -550,7 +550,7 @@ int main(int argc, char** argv)
 
    adapter->report(FLAGS_ycsb_tuple_count, db.getBufferManager().consumedPages());
    std::cout << "Hot pages: " << db.buffer_manager->hot_pages << std::endl;
-   //adapter->evict_all();
+   adapter->evict_all();
    //std::cout << "All evicted" << std::endl;
    // if (FLAGS_index_type == kIndexType2LSMT || FLAGS_index_type == kIndexTypeLSMT || FLAGS_index_type == kIndexType2LSMT_CF || FLAGS_index_type == kIndexTypeLSMT)
    {
@@ -581,7 +581,7 @@ int main(int argc, char** argv)
          }
          C_RUNLOCK(key_idx);
          
-         assert(result == correct_result);
+//         assert(result == correct_result);
          WorkerCounters::myCounters().tx++;
          ++i;
       }

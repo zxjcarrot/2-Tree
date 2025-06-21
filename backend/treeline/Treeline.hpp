@@ -34,6 +34,7 @@ struct TreelineAdapter : public leanstore::StorageInterface<Key, Payload> {
       options.record_cache_capacity = (memory_budget_gib) * 1024 * 1024 * 1024UL / (record_cache_size_per_entry);
       options.use_memory_based_io = false;
       options.rewrite_search_radius = 0;
+      options.records_per_page_goal = 16 * 1024 / (sizeof(Key) + sizeof(Payload) + 20);
       options.num_bg_threads = 0;
       options.optimistic_caching = false;
       options.rec_cache_use_lru = false;
@@ -72,6 +73,7 @@ struct TreelineAdapter : public leanstore::StorageInterface<Key, Payload> {
     
    void evict_all() {
       //db_->FlushRecordCache(/*disable_deferred_io = */ true);
+      db_->FlattenRange();
    }
 
    void clear_stats() {

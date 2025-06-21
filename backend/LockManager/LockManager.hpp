@@ -8,7 +8,7 @@
 namespace leanstore
 {
 
-constexpr static int kLockWords = 131071;
+constexpr static int kLockWords = 65537;
 class OptimisticLockGuard;
 enum class OptimisticLockState {
     UNINITIALIZED,
